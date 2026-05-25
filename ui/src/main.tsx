@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { fetchActivityTimeline, screenpipeFrameUrl, syncScreenpipe } from "./api";
-import type { ActivityTimelineResponse, RuntimeTickResponse, TimelineBucket, TimelineItem } from "./types";
+import { fetchActivityTimeline, fetchViewFamilies, screenpipeFrameUrl, syncScreenpipe } from "./api";
+import type { ActivityTimelineResponse, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewFamiliesResponse, ViewFamilySummary } from "./types";
 import "./styles.css";
 
 const POLL_MS = 15_000;
@@ -12,6 +12,7 @@ type FramePreview = { frameId: string | number; title?: string };
 
 function App() {
   const [timeline, setTimeline] = useState<ActivityTimelineResponse | null>(null);
+  const [viewFamilies, setViewFamilies] = useState<ViewFamiliesResponse | null>(null);
   const [lastTick, setLastTick] = useState<RuntimeTickResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [live, setLive] = useState(true);
@@ -33,6 +34,7 @@ function App() {
       const next = await fetchActivityTimeline({ minutes, bucketMinutes: chooseBucket(minutes), includeLowLevelScreenpipe: true, dedupe: false, bucketItemLimit: false, summarizeHeartbeats: false, sourceFilter, mergeContinuous: true, mergeGapMinutes: 3 });
       if (seq !== refreshSeq.current) return;
       setTimeline(next);
+      fetchViewFamilies().then(setViewFamilies).catch(() => undefined);
       const windows = lastTick?.diagnostics?.screenpipe_activity?.count ?? 0;
       setStatus(`${next.records_used} records · ${next.buckets.length} buckets · ${windows} Screenpipe windows`);
 
@@ -46,6 +48,7 @@ function App() {
       const synced = await fetchActivityTimeline({ minutes, bucketMinutes: chooseBucket(minutes), includeLowLevelScreenpipe: true, dedupe: false, bucketItemLimit: false, summarizeHeartbeats: false, sourceFilter, mergeContinuous: true, mergeGapMinutes: 3 });
       if (seq !== refreshSeq.current) return;
       setTimeline(synced);
+      fetchViewFamilies().then(setViewFamilies).catch(() => undefined);
       const syncedWindows = tick.diagnostics?.screenpipe_activity?.count ?? 0;
       setStatus(`${synced.records_used} records · ${synced.buckets.length} buckets · ${syncedWindows} Screenpipe windows`);
     } catch (error) {
@@ -141,11 +144,44 @@ function App() {
           <Signal label="Domains" values={filteredSignals.top_domains} />
         </section>
 
+        <ViewGraph families={viewFamilies?.families ?? []} />
+
         <Timeline buckets={filteredBuckets} loading={loading && !timeline} sourceFilter={sourceFilter} selectedItemId={selectedItemId} onSelect={setSelectedItemId} onOpenFrame={setPreviewFrame} />
       </main>
       <Inspector item={selectedItem} onClose={() => setSelectedItemId(null)} onOpenFrame={setPreviewFrame} />
       <FrameLightbox preview={previewFrame} onClose={() => setPreviewFrame(null)} />
     </div>
+  );
+}
+
+function ViewGraph({ families }: { families: ViewFamilySummary[] }) {
+  const shown = families.filter(family => family.count > 0 || ["evidence", "activity", "proposal", "memory"].includes(family.family));
+  return (
+    <section className="view-graph" aria-label="Memory view graph">
+      <div className="view-graph-head">
+        <span>Memory Views</span>
+        <b>Observation → EvidenceView → ActivityView → ProposalView → MemoryView</b>
+      </div>
+      <div className="view-family-list">
+        {shown.map(family => <ViewFamily key={family.family} family={family} />)}
+      </div>
+    </section>
+  );
+}
+
+function ViewFamily({ family }: { family: ViewFamilySummary }) {
+  const title = family.latest?.title ?? family.family;
+  return (
+    <article className={`view-family ${family.count ? "has-views" : ""}`}>
+      <div>
+        <span>{viewFamilyLabel(family.family)}</span>
+        <b>{family.count}</b>
+      </div>
+      <p>{title}</p>
+      <div>
+        {(family.kinds.length ? family.kinds : ["waiting"]).slice(0, 4).map(kind => <Tag key={kind}>{kind}</Tag>)}
+      </div>
+    </article>
   );
 }
 
@@ -378,6 +414,20 @@ function sourceFilterLabel(filter: SourceFilter) {
   if (filter === "browser") return "Browser";
   if (filter === "runtime") return "Runtime";
   return "All sources";
+}
+
+function viewFamilyLabel(family: string) {
+  const labels: Record<string, string> = {
+    evidence: "EvidenceView",
+    activity: "ActivityView",
+    proposal: "ProposalView",
+    intent: "IntentView",
+    workflow: "WorkflowView",
+    memory: "MemoryView",
+    resource: "ResourceView",
+    answer: "AnswerView",
+  };
+  return labels[family] ?? family;
 }
 
 function summarizeSignals(buckets: TimelineBucket[]) {

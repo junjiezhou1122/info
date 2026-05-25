@@ -1,4 +1,4 @@
-import type { ActivityTimelineResponse, RuntimeTickResponse } from "./types";
+import type { ActivityTimelineResponse, RuntimeTickResponse, ViewFamiliesResponse } from "./types";
 
 const API_BASE = import.meta.env.VITE_CONTEXT_API_BASE ?? "http://localhost:3111";
 
@@ -47,6 +47,25 @@ export async function fetchActivityTimeline(options: { minutes?: number; limit?:
   });
   if (!res.ok) throw new Error(`timeline compile failed: ${res.status}`);
   return res.json();
+}
+
+export async function fetchViewFamilies(): Promise<ViewFamiliesResponse> {
+  const res = await fetch(`${API_BASE}/context/views?view_types=evidence,activity,proposal,intent,workflow,memory,resource,answer&limit=120&active_only=true`);
+  if (!res.ok) throw new Error(`view family fetch failed: ${res.status}`);
+  const body = await res.json();
+  const views = Array.isArray(body.views) ? body.views : [];
+  const familyOrder = ["evidence", "activity", "proposal", "intent", "workflow", "memory", "resource", "answer"];
+  const families = familyOrder.map(family => {
+    const familyViews = views.filter((view: any) => view.view_type === family);
+    const kinds = [...new Set(familyViews.map((view: any) => typeof view.content?.kind === "string" ? view.content.kind : undefined).filter(Boolean))] as string[];
+    return {
+      family,
+      count: familyViews.length,
+      kinds,
+      latest: familyViews[0],
+    };
+  });
+  return { ok: true, views, families };
 }
 
 function timelineRecordLimit(minutes: number, sourceFilter: "screenpipe" | "browser" | "runtime" | "all") {

@@ -40,23 +40,27 @@ test("Evidence View compiler normalizes raw browser and Screenpipe observations"
   });
 
   const result = compileEvidenceViews({ write: true, limit: 10, minutes: 10_000 }, store);
-  const views = store.listViews({ view_type_prefix: "evidence.", limit: 10 });
+  const views = store.listViews({ view_types: ["evidence"], limit: 10 });
 
   assert.equal(result.records_used, 2);
   assert.equal(views.length, 2);
-  assert.ok(views.some(view => view.view_type === "evidence.browser_page"));
-  assert.ok(views.some(view => view.view_type === "evidence.screen_frame"));
+  assert.ok(views.every(view => view.view_type === "evidence"));
+  assert.ok(views.some(view => view.content?.kind === "page"));
+  assert.ok(views.some(view => view.content?.kind === "screen"));
 
-  const browser = views.find(view => view.view_type === "evidence.browser_page");
+  const browser = views.find(view => view.content?.kind === "page");
   assert.ok(browser);
   assert.deepEqual(browser.source_records, ["record:evidence-browser"]);
-  assert.equal(browser.content?.url, "https://docs.screenpi.pe/recording");
-  assert.equal((browser.content?.claims as Array<Record<string, unknown>>).some(claim => claim.kind === "url_seen"), true);
+  assert.equal((browser.content?.subject as Record<string, unknown>).url, "https://docs.screenpi.pe/recording");
+  assert.equal((browser.content?.origin as Record<string, unknown>).schema, "observation.browser_page_heartbeat");
+  assert.equal((browser.content?.signals as Record<string, unknown>).duration_seconds, 120);
+  assert.equal((browser.content?.claims as string[]).includes("url_seen"), true);
+  assert.equal((browser.content?.quality as Record<string, unknown>).confidence, 0.9);
 
-  const frame = views.find(view => view.view_type === "evidence.screen_frame");
+  const frame = views.find(view => view.content?.kind === "screen");
   assert.ok(frame);
-  assert.equal((frame.content?.attribution as Record<string, unknown>).frame_id, 9466);
-  assert.equal(frame.content?.app, "Warp");
+  assert.deepEqual((frame.content?.signals as Record<string, unknown>).frame_ids, [9466]);
+  assert.equal((frame.content?.subject as Record<string, unknown>).app, "Warp");
 }));
 
 test("Evidence View can be used as a graph node with stable provenance", () => withStore((store) => {
@@ -74,7 +78,8 @@ test("Evidence View can be used as a graph node with stable provenance", () => w
   const second = buildEvidenceView(record);
 
   assert.equal(first.id, second.id);
-  assert.equal(first.view_type, "evidence.local_project");
+  assert.equal(first.view_type, "evidence");
+  assert.equal(first.content?.kind, "project");
   assert.deepEqual(first.source_records, [record.id]);
   assert.equal(first.compiler?.id, "builtin.evidence-view");
   assert.equal(first.lossiness, "low");
@@ -105,6 +110,6 @@ test("runtimeTick compiles Evidence Views before higher-level runtime Views", as
   }, store);
 
   assert.equal(result.ok, true);
-  assert.ok(result.compiled_views.some(view => view.view_type === "evidence.*"));
-  assert.ok(store.listViews({ view_type_prefix: "evidence.", limit: 10 }).some(view => view.source_records?.includes("record:evidence-runtime-source")));
+  assert.ok(result.compiled_views.some(view => view.view_type === "evidence"));
+  assert.ok(store.listViews({ view_types: ["evidence"], limit: 10 }).some(view => view.source_records?.includes("record:evidence-runtime-source")));
 }));

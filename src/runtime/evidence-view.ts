@@ -43,11 +43,11 @@ export function compileEvidenceViews(options: CompileEvidenceViewsOptions = {}, 
       related_records: selected.map(record => record.id),
       related_views: stored.map(view => view.id).filter(Boolean) as string[],
       payload: {
-        view_type: "evidence.*",
+        view_type: "evidence",
         records_scanned: records.length,
         records_used: selected.length,
         views_compiled: stored.length,
-        view_types: top(stored.map(view => view.view_type), 12),
+        view_kinds: top(stored.map(view => stringValue(view.content?.kind)).filter((value): value is string => Boolean(value)), 12),
       },
     });
   }
@@ -65,7 +65,7 @@ export function compileEvidenceViews(options: CompileEvidenceViewsOptions = {}, 
 export function buildEvidenceView(record: StoredContextRecord, generatedAt = new Date().toISOString(), minutes = 240): ContextView {
   const classification = classifyEvidence(record);
   const observedAt = record.time?.observed_at ?? record.created_at;
-  const title = evidenceTitle(record, classification.viewType);
+  const title = evidenceTitle(record, classification.kind);
   const url = record.content?.url ?? stringValue(record.payload?.browser_url);
   const frameIds = frameIdsOf(record);
   const windowTitle = stringValue(record.payload?.window_name);
@@ -73,12 +73,13 @@ export function buildEvidenceView(record: StoredContextRecord, generatedAt = new
   const domain = domainOf(record);
   const project = projectOf(record);
   const contentType = stringValue(record.payload?.content_type);
+  const text = excerpt(record.content?.text ?? stringValue(record.payload?.text), 1200);
 
   return {
-    id: `evidence:${classification.key}:${stableKey(record.id)}`,
-    view_type: classification.viewType,
+    id: `evidence:${classification.kind}:${stableKey(record.id)}`,
+    view_type: "evidence",
     title,
-    summary: evidenceSummary(record, classification.viewType),
+    summary: evidenceSummary(record, classification.kind),
     status: "candidate",
     source_records: [record.id],
     compiler: { id: EVIDENCE_VIEW_COMPILER_ID, version: "1", mode: "deterministic" },
@@ -92,12 +93,46 @@ export function buildEvidenceView(record: StoredContextRecord, generatedAt = new
       time_range: { start: observedAt, end: observedAt },
     },
     content: {
-      evidence_kind: classification.key,
+      kind: classification.kind,
+      observed_at: observedAt,
+      origin: {
+        schema: record.schema.name,
+        source: record.source.type,
+        connector: record.source.connector,
+      },
+      subject: {
+        type: classification.subjectType,
+        app,
+        title,
+        window: normalizeWindowTitle(windowTitle),
+        url,
+        domain,
+        path: record.content?.path,
+        project,
+      },
+      signals: {
+        text,
+        event: interactionAttribution(record).event_type,
+        selected_text: classification.kind === "selection" ? text : undefined,
+        duration_seconds: durationSecondsOf(record),
+        frame_ids: frameIds.length ? frameIds : undefined,
+        metrics: metricSignalsOf(record),
+      },
+      claims: evidenceClaims(record, classification.kind),
+      quality: {
+        confidence: classification.confidence,
+        reason: classification.reason,
+      },
+      data: {
+        raw_keys: Object.keys(record.payload ?? {}).sort(),
+        content_type: contentType,
+      },
+      // Legacy-friendly denormalized fields while callers migrate to content.subject/signals.
+      evidence_kind: classification.kind,
       observation_schema: record.schema.name,
       observation_source: sourceLabel(record),
-      observed_at: observedAt,
       title,
-      text: excerpt(record.content?.text ?? stringValue(record.payload?.text), 1200),
+      text,
       url,
       path: record.content?.path,
       app,
@@ -115,7 +150,6 @@ export function buildEvidenceView(record: StoredContextRecord, generatedAt = new
         frame_ids: frameIds.length ? frameIds : undefined,
         interaction: interactionAttribution(record),
       },
-      claims: evidenceClaims(record, classification.viewType),
       raw_keys: Object.keys(record.payload ?? {}).sort(),
     },
     confidence: classification.confidence,
@@ -145,55 +179,53 @@ function isEvidenceInputRecord(record: StoredContextRecord, options: CompileEvid
   return true;
 }
 
-function classifyEvidence(record: StoredContextRecord): { key: string; viewType: string; confidence: number; stability: ContextView["stability"] } {
+function classifyEvidence(record: StoredContextRecord): { kind: string; subjectType: string; confidence: number; stability: ContextView["stability"]; reason: string } {
   const schema = record.schema.name;
   const contentType = stringValue(record.payload?.content_type)?.toLowerCase();
-  if (schema === "observation.browser_text_selected") return { key: "text_selection", viewType: "evidence.text_selection", confidence: 0.92, stability: "session" };
-  if (schema.startsWith("observation.browser_")) return { key: "browser_page", viewType: "evidence.browser_page", confidence: 0.9, stability: "session" };
-  if (schema === "observation.screenpipe_activity_summary") return { key: "app_focus", viewType: "evidence.app_focus", confidence: 0.78, stability: "ephemeral" };
-  if (schema === "observation.screenpipe_input_event") return { key: "ui_interaction", viewType: "evidence.ui_interaction", confidence: 0.82, stability: "ephemeral" };
-  if (schema === "observation.screenpipe_workspace_signal" && contentType === "element") return { key: "ui_element", viewType: "evidence.ui_element", confidence: 0.72, stability: "ephemeral" };
-  if (schema === "observation.screenpipe_workspace_signal" || schema === "observation.screenpipe_activity") return { key: "screen_frame", viewType: "evidence.screen_frame", confidence: 0.68, stability: "ephemeral" };
-  if (schema === "observation.local_project") return { key: "local_project", viewType: "evidence.local_project", confidence: 0.95, stability: "project" };
-  if (schema.includes("ai_session")) return { key: "agent_session", viewType: "evidence.agent_session", confidence: 0.86, stability: "session" };
-  if (schema.includes("terminal") || record.source.type === "terminal") return { key: "terminal_event", viewType: "evidence.terminal_event", confidence: 0.86, stability: "session" };
-  if (record.content?.url) return { key: "resource", viewType: "evidence.resource", confidence: 0.82, stability: "session" };
-  return { key: "observation", viewType: "evidence.observation", confidence: record.signal?.confidence ?? 0.65, stability: "session" };
+  if (schema === "observation.browser_text_selected") return { kind: "selection", subjectType: "text", confidence: 0.92, stability: "session", reason: "browser extension reported selected text" };
+  if (schema.startsWith("observation.browser_")) return { kind: "page", subjectType: "page", confidence: 0.9, stability: "session", reason: "browser extension reported current page URL" };
+  if (schema === "observation.screenpipe_activity_summary") return { kind: "focus", subjectType: "app", confidence: 0.78, stability: "ephemeral", reason: "Screenpipe reported active app/window summary" };
+  if (schema === "observation.screenpipe_input_event") return { kind: "input", subjectType: "ui_event", confidence: 0.82, stability: "ephemeral", reason: "Screenpipe UI event stream reported interaction" };
+  if (schema === "observation.screenpipe_workspace_signal" && contentType === "element") return { kind: "input", subjectType: "ui_element", confidence: 0.72, stability: "ephemeral", reason: "Screenpipe accessibility element was visible" };
+  if (schema === "observation.screenpipe_workspace_signal" || schema === "observation.screenpipe_activity") return { kind: "screen", subjectType: "screen_frame", confidence: 0.68, stability: "ephemeral", reason: "Screenpipe OCR/frame capture reported visible text" };
+  if (schema === "observation.local_project") return { kind: "project", subjectType: "local_project", confidence: 0.95, stability: "project", reason: "local project connector read repository state" };
+  if (schema.includes("ai_session")) return { kind: "agent_session", subjectType: "agent_session", confidence: 0.86, stability: "session", reason: "AI session locator found a local agent session" };
+  if (schema.includes("terminal") || record.source.type === "terminal") return { kind: "other", subjectType: "terminal_event", confidence: 0.86, stability: "session", reason: "terminal connector reported an event" };
+  if (record.content?.url) return { kind: "resource", subjectType: "url", confidence: 0.82, stability: "session", reason: "record contains a URL resource" };
+  return { kind: "other", subjectType: "observation", confidence: record.signal?.confidence ?? 0.65, stability: "session", reason: "generic observation mapping" };
 }
 
-function evidenceTitle(record: StoredContextRecord, viewType: string): string {
-  if (viewType === "evidence.app_focus") {
+function evidenceTitle(record: StoredContextRecord, kind: string): string {
+  if (kind === "focus") {
     return [appOf(record), normalizeWindowTitle(stringValue(record.payload?.window_name))].filter(Boolean).join(" - ") || "Focused app evidence";
   }
-  if (viewType === "evidence.screen_frame") return record.content?.title ?? "Screen frame evidence";
-  if (viewType === "evidence.ui_interaction") return record.content?.title ?? `${appOf(record) ?? "App"} interaction`;
-  if (viewType === "evidence.local_project") return record.content?.title ?? `Local project: ${projectOf(record) ?? "unknown"}`;
+  if (kind === "screen") return record.content?.title ?? "Screen frame evidence";
+  if (kind === "input") return record.content?.title ?? `${appOf(record) ?? "App"} interaction`;
+  if (kind === "project") return record.content?.title ?? `Local project: ${projectOf(record) ?? "unknown"}`;
   return record.content?.title ?? record.content?.url ?? record.content?.path ?? record.schema.name;
 }
 
-function evidenceSummary(record: StoredContextRecord, viewType: string): string {
-  const title = evidenceTitle(record, viewType);
+function evidenceSummary(record: StoredContextRecord, kind: string): string {
+  const title = evidenceTitle(record, kind);
   const source = sourceLabel(record);
   const observedAt = record.time?.observed_at ?? record.created_at;
-  return `${viewType} from ${source} at ${observedAt}: ${title}`;
+  return `EvidenceView(kind=${kind}) from ${source} at ${observedAt}: ${title}`;
 }
 
-function evidenceClaims(record: StoredContextRecord, viewType: string): Array<Record<string, unknown>> {
-  const observedAt = record.time?.observed_at ?? record.created_at;
-  const claims: Array<Record<string, unknown>> = [];
+function evidenceClaims(record: StoredContextRecord, kind: string): string[] {
+  const claims: string[] = [];
   const url = record.content?.url ?? stringValue(record.payload?.browser_url);
   const app = appOf(record);
-  const domain = domainOf(record);
   const text = excerpt(record.content?.text ?? stringValue(record.payload?.text), 280);
-  if (url) claims.push({ kind: "url_seen", value: url, domain, observed_at: observedAt });
-  if (app) claims.push({ kind: viewType === "evidence.app_focus" ? "app_focused" : "app_reported", value: app, observed_at: observedAt });
-  if (text) claims.push({ kind: viewType === "evidence.screen_frame" ? "text_visible" : "text_observed", value: text, observed_at: observedAt });
-  if (record.content?.path) claims.push({ kind: "path_seen", value: record.content.path, observed_at: observedAt });
-  if (viewType === "evidence.ui_interaction") {
+  if (url) claims.push("url_seen", "resource_seen");
+  if (app) claims.push(kind === "focus" ? "app_focused" : "app_reported");
+  if (text) claims.push(kind === "screen" ? "text_visible" : "text_observed");
+  if (record.content?.path) claims.push("path_seen");
+  if (kind === "input") {
     const interaction = interactionAttribution(record);
-    if (interaction.event_type) claims.push({ kind: "ui_event", value: interaction.event_type, role: interaction.element_role, name: interaction.element_name, observed_at: observedAt });
+    if (interaction.event_type) claims.push("ui_event");
   }
-  return claims;
+  return [...new Set(claims)];
 }
 
 function interactionAttribution(record: StoredContextRecord): Record<string, unknown> {
@@ -219,6 +251,22 @@ function domainOf(record: StoredContextRecord): string | undefined {
   const url = record.content?.url ?? stringValue(record.payload?.browser_url);
   if (!url) return undefined;
   try { return new URL(url).hostname; } catch { return undefined; }
+}
+
+function durationSecondsOf(record: StoredContextRecord): number | undefined {
+  const dwell = numberValue(record.payload?.dwell_seconds);
+  if (dwell !== undefined) return dwell;
+  const minutes = numberValue(record.payload?.minutes);
+  return minutes !== undefined ? minutes * 60 : undefined;
+}
+
+function metricSignalsOf(record: StoredContextRecord): Record<string, number> | undefined {
+  const metrics: Record<string, number> = {};
+  for (const key of ["scroll_depth", "selection_count", "active_seconds", "frame_count", "node_count"] as const) {
+    const value = numberValue(record.payload?.[key]);
+    if (value !== undefined) metrics[key] = value;
+  }
+  return Object.keys(metrics).length ? metrics : undefined;
 }
 
 function frameIdsOf(record: StoredContextRecord): Array<string | number> {
@@ -265,4 +313,10 @@ function stableKey(value: string): string {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return undefined;
 }

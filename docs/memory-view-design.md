@@ -11,29 +11,48 @@ The core model is:
 
 ```text
 Observation
-  -> Compression
-  -> View
-  -> Composition
-  -> Memory View
+  -> EvidenceView
+  -> ActivityView
+  -> IntentView / WorkflowView
+  -> MemoryView
+  -> Agent / App consumption
 ```
 
 More precisely:
 
 ```text
 Fixed Observations
-  -> many possible compression lenses
-  -> many purpose-specific Views
-  -> selected Views compose into higher-level Views
-  -> only stable, useful Views become Memory Views
+  -> normalized evidence nodes
+  -> time/activity compression
+  -> goal/workflow interpretation
+  -> durable memory views
+  -> consumed by agents, apps, and other compilers
 ```
 
 The important separation:
 
 ```text
-Observation = evidence of what happened
-View        = compressed interpretation for a purpose
-Memory View = durable View that changes future behavior
-MetaView    = proposal/control View that decides what Views should be created
+Observation = raw source of truth about what was captured
+EvidenceView = normalized evidence from one or more observations
+ActivityView = time-based compression of evidence into "what happened"
+IntentView   = hypothesis about goal or task
+WorkflowView = structured task/session composed from activities and intents
+MemoryView   = durable View that changes future behavior
+ProposalView = control View that decides what Views should be created next
+```
+
+The system is therefore not a single summarizer. It is a View graph:
+
+```text
+Observation
+  -> EvidenceView
+  -> ActivityView
+  -> IntentView
+  -> WorkflowView
+  -> MemoryView
+
+Any View can become input to another View.
+Agents and applications consume Views, not raw sensor logs by default.
 ```
 
 ## 2. Why Observation And View Must Be Separate
@@ -68,12 +87,11 @@ Views:
 
 ```text
 One YouTube watch session
-  -> activity.segment
-  -> evidence.resource
-  -> resource.learning_material
-  -> intent.candidate
-  -> workflow.learning_session
-  -> memory.learning_interest
+  -> EvidenceView(kind="page")
+  -> ActivityView(kind="resource_consumption")
+  -> IntentView(kind="learning_candidate")
+  -> WorkflowView(kind="learning_session")
+  -> MemoryView(kind="learning_interest")
 ```
 
 The original data stays fixed. The interpretations can evolve.
@@ -147,19 +165,19 @@ The View hierarchy should be explicit.
 L0 Observation
   raw evidence, not a View
 
-L1 Evidence View
+L1 EvidenceView
   cleaned, normalized evidence
 
-L2 Activity View
+L2 ActivityView
   time-based compression of what the user did
 
-L3 Intent / Task View
+L3 IntentView / TaskView
   hypothesis about what the user may be trying to do
 
-L4 Workflow View
+L4 WorkflowView
   structured session or task flow
 
-L5 Memory View
+L5 MemoryView
   stable knowledge that should affect future behavior
 ```
 
@@ -185,36 +203,106 @@ high volume allowed
 not directly used as memory
 ```
 
-### L1 Evidence View
+### L1 EvidenceView
 
-Evidence Views normalize sensor-specific records into reusable evidence.
+EvidenceViews normalize sensor-specific records into reusable evidence.
 
-Examples:
+The preferred concept name is `EvidenceView`.
 
 ```text
-evidence.resource
-evidence.interaction
-evidence.screen_frame
-evidence.app_focus
+EvidenceView
 ```
 
-Example:
+In storage, keep the View family simple:
+
+```text
+view_type = "evidence"
+content.kind = "page" | "screen" | "focus" | "input" | "selection" | "project" | "agent_session" | "resource" | "other"
+```
+
+Do not create a new top-level `view_type` for every sensor-specific evidence
+shape unless there is a strong product reason. New data sources should usually
+extend `content.kind`, `content.subject`, `content.signals`, or
+`content.data`.
+
+Minimal content contract:
+
+```ts
+type EvidenceViewContent = {
+  kind: string;
+  observed_at: string;
+
+  origin: {
+    schema: string;
+    source: string;
+    connector?: string;
+  };
+
+  subject: {
+    type?: string;
+    app?: string;
+    title?: string;
+    window?: string;
+    url?: string;
+    domain?: string;
+    path?: string;
+    project?: string;
+  };
+
+  signals?: {
+    text?: string;
+    event?: string;
+    selected_text?: string;
+    duration_seconds?: number;
+    frame_ids?: Array<string | number>;
+    metrics?: Record<string, number>;
+  };
+
+  claims?: string[];
+  quality?: {
+    confidence?: number;
+    reason?: string;
+  };
+
+  data?: Record<string, unknown>;
+};
+```
+
+`claims` and `quality.confidence` are optional helper indexes. They should come
+from deterministic source mapping, not LLM interpretation.
+
+Example page evidence:
 
 ```json
 {
-  "view_type": "evidence.resource",
-  "title": "Lecture 1 - How to Start a Startup",
+  "view_type": "evidence",
+  "title": "Stanford CS153 Frontier Systems - YouTube",
   "content": {
-    "resource_type": "web_video",
-    "url": "https://www.youtube.com/watch?v=...",
-    "domain": "youtube.com",
-    "app": "chrome",
-    "title": "Lecture 1 - How to Start a Startup",
-    "selected_texts": ["115K", "Lecture 1 - How to Start a Startup"],
-    "signal_counts": {
-      "browser_heartbeat": 56,
-      "selected_text": 2,
-      "screen_frame": 3
+    "kind": "page",
+    "observed_at": "2026-05-25T16:23:57Z",
+    "origin": {
+      "schema": "observation.browser_page_heartbeat",
+      "source": "browser",
+      "connector": "chrome-extension"
+    },
+    "subject": {
+      "type": "page",
+      "app": "Chrome",
+      "title": "Stanford CS153 Frontier Systems - YouTube",
+      "url": "https://www.youtube.com/watch?v=Lri2LNYtERM",
+      "domain": "youtube.com"
+    },
+    "signals": {
+      "duration_seconds": 26751,
+      "metrics": {
+        "scroll_depth": 0.54,
+        "selection_count": 6
+      }
+    },
+    "claims": ["page_visible", "resource_seen"],
+    "quality": {
+      "confidence": 0.9,
+      "reason": "browser extension reported current page URL"
     }
   },
   "source_records": ["..."]
@@ -222,10 +310,12 @@ Example:
 ```
 
 This layer should be mostly deterministic.
+It should not say what the user intended. It only says what was observed and
+what this evidence can directly support.
 
-### L2 Activity View
+### L2 ActivityView
 
-Activity Views compress evidence over time.
+ActivityViews compress EvidenceViews over time.
 
 They answer:
 
@@ -236,18 +326,26 @@ What was the user doing during this interval?
 Examples:
 
 ```text
-activity.segment
-activity.resource_consumption
-activity.app_focus
+ActivityView(kind="segment")
+ActivityView(kind="resource_consumption")
+ActivityView(kind="app_focus")
+```
+
+Suggested storage shape:
+
+```text
+view_type = "activity"
+content.kind = "segment" | "resource_consumption" | "app_focus" | "debugging" | "coding" | "reading" | "other"
 ```
 
 Example:
 
 ```json
 {
-  "view_type": "activity.segment",
+  "view_type": "activity",
   "title": "Watched YC startup lecture",
   "content": {
+    "kind": "resource_consumption",
     "start": "2026-05-25T14:11:27Z",
     "end": "2026-05-25T14:25:27Z",
     "duration_minutes": 14,
@@ -264,7 +362,7 @@ Example:
       "screen_frames": 3
     }
   },
-  "source_views": ["evidence.resource:..."],
+  "source_views": ["evidence:..."],
   "confidence": 0.92,
   "lossiness": "medium"
 }
@@ -272,27 +370,35 @@ Example:
 
 This is the first layer that should drive the main timeline product.
 
-### L3 Intent / Task View
+### L3 IntentView / TaskView
 
-Intent Views are hypotheses.
+IntentViews are hypotheses.
 
 They should never pretend to be certain.
 
 Examples:
 
 ```text
-intent.candidate
-task.thread
+IntentView(kind="candidate")
+TaskView(kind="thread")
 work_thread
+```
+
+Suggested storage shape:
+
+```text
+view_type = "intent"
+content.kind = "candidate" | "explicit_goal" | "task_thread" | "question" | "other"
 ```
 
 Example:
 
 ```json
 {
-  "view_type": "intent.candidate",
+  "view_type": "intent",
   "title": "Possible study intent: startup/product feedback",
   "content": {
+    "kind": "candidate",
     "hypothesis": "User may be studying startup and product feedback concepts.",
     "supporting_signals": [
       "14 minutes on YC startup lecture",
@@ -304,34 +410,42 @@ Example:
       "No follow-up query yet"
     ]
   },
-  "source_views": ["activity.segment:..."],
+  "source_views": ["activity:..."],
   "confidence": 0.68,
   "lossiness": "high"
 }
 ```
 
-### L4 Workflow View
+### L4 WorkflowView
 
-Workflow Views compose multiple activities and intents into a task/session.
+WorkflowViews compose multiple activities and intents into a task/session.
 
 Examples:
 
 ```text
-workflow.learning_session
-workflow.research_session
-workflow.coding_session
-workflow.recipe
-workflow.trace
-workflow.attempt
+WorkflowView(kind="learning_session")
+WorkflowView(kind="research_session")
+WorkflowView(kind="coding_session")
+WorkflowView(kind="recipe")
+WorkflowView(kind="trace")
+WorkflowView(kind="attempt")
+```
+
+Suggested storage shape:
+
+```text
+view_type = "workflow"
+content.kind = "learning_session" | "research_session" | "coding_session" | "recipe" | "trace" | "attempt" | "other"
 ```
 
 Example:
 
 ```json
 {
-  "view_type": "workflow.learning_session",
+  "view_type": "workflow",
   "title": "YC startup lecture study session",
   "content": {
+    "kind": "learning_session",
     "phases": [
       "watched lecture",
       "selected key text",
@@ -341,26 +455,33 @@ Example:
     "topic_candidates": ["startup", "product feedback", "memory architecture"],
     "open_questions": ["How should ActivitySegment feed IntentView?"]
   },
-  "source_views": ["activity.segment:...", "intent.candidate:..."],
+  "source_views": ["activity:...", "intent:..."],
   "confidence": 0.74
 }
 ```
 
-### L5 Memory View
+### L5 MemoryView
 
-Memory Views are not just old summaries.
+MemoryViews are not just old summaries.
 
-A Memory View is a durable View that should change future behavior.
+A MemoryView is a durable View that should change future behavior.
 
 Examples:
 
 ```text
-memory.project.patterns
-memory.user.preference
-memory.learning_interest
-memory.workflow_recipe
-memory.surfacing_preference
-memory.routine_patterns
+MemoryView(kind="project_pattern")
+MemoryView(kind="user_preference")
+MemoryView(kind="learning_interest")
+MemoryView(kind="workflow_recipe")
+MemoryView(kind="surfacing_preference")
+MemoryView(kind="routine_pattern")
+```
+
+Suggested storage shape:
+
+```text
+view_type = "memory"
+content.kind = "project_pattern" | "user_preference" | "learning_interest" | "workflow_recipe" | "surfacing_preference" | "routine_pattern" | "other"
 ```
 
 Entry conditions should be strict:
@@ -377,9 +498,10 @@ Example:
 
 ```json
 {
-  "view_type": "memory.project.patterns",
+  "view_type": "memory",
   "title": "Info architecture pattern: Observation to View",
   "content": {
+    "kind": "project_pattern",
     "claim": "The user prefers an architecture where raw observations remain fixed and multiple Views are generated through typed compression.",
     "applies_to": ["Info runtime", "memory architecture", "agent context"],
     "future_use": [
@@ -388,18 +510,18 @@ Example:
       "Do not treat timeline as memory directly"
     ]
   },
-  "source_views": ["workflow.learning_session:...", "brief.research:..."],
+  "source_views": ["workflow:...", "brief.research:..."],
   "confidence": 0.84,
   "stability": "project",
   "lossiness": "high"
 }
 ```
 
-## 5. MetaView As View Proposal
+## 5. ProposalView As View Proposal
 
-MetaView should not mean "metadata for a View".
+`MetaView` should not mean "metadata for a View".
 
-In this system, MetaView means:
+In this system, if we use the word `MetaView`, it should mean:
 
 ```text
 A proposal/control View that decides what Views should be created from existing observations/views.
@@ -408,16 +530,19 @@ A proposal/control View that decides what Views should be created from existing 
 Recommended concrete type:
 
 ```text
-proposal.view
+ProposalView
+view_type = "proposal"
+content.kind = "view_proposal"
 ```
 
 Example:
 
 ```json
 {
-  "view_type": "proposal.view",
+  "view_type": "proposal",
   "title": "Possible learning session around startup/product building",
   "content": {
+    "kind": "view_proposal",
     "hypothesis": "These observations look like a focused learning session.",
     "scope": {
       "start": "2026-05-25T14:11:27Z",
@@ -427,7 +552,8 @@ Example:
     },
     "proposed_views": [
       {
-        "view_type": "resource.learning_material",
+        "view_type": "resource",
+        "kind": "learning_material",
         "priority": 0.9,
         "confidence": 0.93,
         "cost": "low",
@@ -435,7 +561,8 @@ Example:
         "reason": "continuous YouTube dwell with selected title text"
       },
       {
-        "view_type": "intent.candidate",
+        "view_type": "intent",
+        "kind": "candidate",
         "priority": 0.7,
         "confidence": 0.68,
         "cost": "medium",
@@ -443,7 +570,8 @@ Example:
         "reason": "intent is plausible but not explicit"
       },
       {
-        "view_type": "workflow.learning_session",
+        "view_type": "workflow",
+        "kind": "learning_session",
         "priority": 0.55,
         "confidence": 0.5,
         "cost": "medium",
@@ -452,7 +580,7 @@ Example:
       }
     ]
   },
-  "source_views": ["activity.segment:..."],
+  "source_views": ["activity:..."],
   "compiler": {
     "id": "program.view_proposal",
     "mode": "hybrid"
@@ -462,7 +590,7 @@ Example:
 }
 ```
 
-MetaView answers:
+ProposalView answers:
 
 ```text
 What can be compressed next?
@@ -479,11 +607,11 @@ content.
 Preferred provenance path:
 
 ```text
-memory.project.patterns
-  -> workflow.learning_session
-  -> intent.candidate
-  -> activity.segment
-  -> evidence.resource
+MemoryView
+  -> WorkflowView
+  -> IntentView
+  -> ActivityView
+  -> EvidenceView
   -> observation.browser_page_heartbeat
 ```
 
@@ -492,12 +620,27 @@ This keeps high-level Views compact while preserving explainability.
 Composition rules:
 
 ```text
-L1 Evidence can cite raw observations directly.
-L2 Activity should cite L1 Evidence plus key records.
-L3 Intent should cite L2 Activity.
-L4 Workflow should cite L2/L3 Views.
-L5 Memory should cite L4/L3 Views, not thousands of raw records.
+L1 EvidenceView can cite raw observations directly.
+L2 ActivityView should cite L1 EvidenceViews plus key records.
+L3 IntentView should cite L2 ActivityViews.
+L4 WorkflowView should cite L2/L3 Views.
+L5 MemoryView should cite L4/L3 Views, not thousands of raw records.
 ```
+
+Agents and applications should normally consume the highest View that matches
+their job:
+
+```text
+timeline UI       -> ActivityView + selected EvidenceView attribution
+debug inspector   -> EvidenceView
+daily summary     -> ActivityView / WorkflowView
+coding assistant  -> WorkflowView / work_thread / MemoryView
+preference router -> MemoryView / ProposalView
+external answer   -> local Views + external extraction Views
+```
+
+Raw Observations remain available for audit and recompilation, but they are not
+the default interface for agents.
 
 ## 7. Query Answering With Memory Views
 
@@ -509,12 +652,12 @@ Example:
 Question: "我刚刚在研究什么？"
 
 Retrieve:
-  activity.segment
-  evidence.resource
-  intent.candidate
-  workflow.learning_session
+  ActivityView
+  EvidenceView
+  IntentView
+  WorkflowView
   brief.research
-  memory.project.patterns
+  MemoryView
 
 If missing source content:
   external retrieval
@@ -554,8 +697,8 @@ Not every View needs an LLM.
 Deterministic:
 
 ```text
-evidence.resource
-activity.segment
+EvidenceView
+ActivityView
 source URL normalization
 duration / dwell calculations
 basic proposal rules
@@ -564,10 +707,10 @@ basic proposal rules
 Hybrid / agent:
 
 ```text
-intent.candidate
-workflow.learning_session
+IntentView
+WorkflowView
 brief.research
-memory.project.patterns
+MemoryView
 contradiction detection
 view proposal prioritization
 ```
@@ -598,7 +741,7 @@ valid_until
 stale_after
 ```
 
-Memory View should only become long-term when it survives feedback or reuse.
+MemoryView should only become long-term when it survives feedback or reuse.
 
 ```text
 single signal        -> candidate
@@ -613,30 +756,96 @@ The first slice should be:
 
 ```text
 Observation
-  -> evidence.resource
-  -> activity.segment
-  -> proposal.view
+  -> EvidenceView
+  -> ActivityView
+  -> ProposalView
 ```
 
 Then:
 
 ```text
-proposal.view
-  -> resource.learning_material
-  -> intent.candidate
+ProposalView
+  -> ResourceView(kind="learning_material")
+  -> IntentView
 ```
 
 Only after that:
 
 ```text
-workflow.learning_session
-  -> memory.project.patterns
-  -> memory.learning_interest
+WorkflowView
+  -> MemoryView(kind="project_pattern")
+  -> MemoryView(kind="learning_interest")
 ```
 
 Do not start by generating long-term memory directly from raw observations.
 
-## 11. Current Naming Recommendations
+## 11. Naming Recommendations
+
+Use human-facing concept names for architecture discussion:
+
+```text
+EvidenceView
+ActivityView
+IntentView
+TaskView
+WorkflowView
+MemoryView
+ProposalView
+ResourceView
+AnswerView
+```
+
+Use simple storage `view_type` families where possible:
+
+```text
+evidence
+activity
+intent
+task
+workflow
+memory
+proposal
+resource
+answer
+```
+
+Use `content.kind` for specialization:
+
+```text
+EvidenceView:
+  view_type = evidence
+  content.kind = page | screen | focus | input | selection | project | agent_session | resource | other
+
+ActivityView:
+  view_type = activity
+  content.kind = segment | resource_consumption | app_focus | debugging | coding | reading | other
+
+IntentView:
+  view_type = intent
+  content.kind = candidate | explicit_goal | task_thread | question | other
+
+WorkflowView:
+  view_type = workflow
+  content.kind = learning_session | research_session | coding_session | recipe | trace | attempt | other
+
+MemoryView:
+  view_type = memory
+  content.kind = project_pattern | user_preference | learning_interest | workflow_recipe | surfacing_preference | routine_pattern | other
+```
+
+This keeps the graph easy to query:
+
+```text
+find all evidence        -> view_type = evidence
+find screen evidence     -> view_type = evidence AND content.kind = screen
+find all memory          -> view_type = memory
+find user preferences    -> view_type = memory AND content.kind = user_preference
+```
+
+Backward compatibility:
+
+Existing names can remain while the system migrates. They are concrete product
+views or legacy names, not the long-term conceptual naming style.
 
 Keep:
 
@@ -656,13 +865,14 @@ work_thread
 Add:
 
 ```text
-evidence.resource
-evidence.interaction
-evidence.screen_frame
-activity.segment
-proposal.view
-intent.candidate
-workflow.learning_session
+evidence
+activity
+proposal
+intent
+workflow
+memory
+resource
+answer
 source.content
 extraction.video_transcript
 ```
@@ -677,23 +887,201 @@ thread.display_card         -> app/thread UI View
 advice.browser_ambient      -> analysis/advice namespace only if reused
 ```
 
-## 12. Summary
+## 12. Current Implementation Contract
+
+The first runtime slice now materializes the new View family design directly:
+
+```text
+Observation
+  -> EvidenceView   view_type = evidence
+  -> ActivityView   view_type = activity
+  -> ProposalView   view_type = proposal
+```
+
+Implementation files:
+
+```text
+src/runtime/evidence-view.ts
+  deterministic Observation -> EvidenceView compiler
+
+src/runtime/memory-views.ts
+  EvidenceView -> ActivityView compiler
+  ActivityView -> ProposalView compiler
+  MemoryView builder contract
+
+src/runtime/runtime.ts
+  runtime tick compiles evidence, then activity, then proposal
+
+ui/src/main.tsx
+  displays current View family counts in the Timeline page
+```
+
+The current `EvidenceView` content shape is:
+
+```ts
+{
+  kind: "page" | "screen" | "focus" | "input" | "selection" | "project" | "agent_session" | "resource" | "other";
+  observed_at: string;
+  origin: {
+    schema: string;
+    source: string;
+    connector?: string;
+  };
+  subject: {
+    type?: string;
+    app?: string;
+    title?: string;
+    window?: string;
+    url?: string;
+    domain?: string;
+    path?: string;
+    project?: string;
+  };
+  signals?: {
+    text?: string;
+    event?: string;
+    selected_text?: string;
+    duration_seconds?: number;
+    frame_ids?: Array<string | number>;
+    metrics?: Record<string, number>;
+  };
+  claims?: string[];
+  quality?: {
+    confidence?: number;
+    reason?: string;
+  };
+  data?: Record<string, unknown>;
+}
+```
+
+The current `ActivityView` content shape is:
+
+```ts
+{
+  kind: "resource_consumption" | "app_focus" | "coding" | "segment";
+  start: string;
+  end: string;
+  duration_minutes: number;
+  app?: string;
+  domain?: string;
+  project?: string;
+  resource?: {
+    type: "url";
+    url: string;
+    title?: string;
+    domain?: string;
+  };
+  action: "watching_or_reading" | "using_app" | "working_in_project" | "working_or_browsing";
+  evidence_summary: {
+    evidence_views: number;
+    kinds: Record<string, number>;
+    origins: Record<string, number>;
+    frame_ids?: string[];
+  };
+}
+```
+
+The current `ProposalView` content shape is:
+
+```ts
+{
+  kind: "view_proposal";
+  hypothesis: string;
+  scope: {
+    start?: string;
+    end?: string;
+    apps?: string[];
+    domains?: string[];
+  };
+  proposed_views: Array<{
+    view_type: "resource" | "intent" | "workflow" | string;
+    kind: string;
+    priority: number;
+    confidence: number;
+    cost: "low" | "medium" | "high";
+    decision: "materialize_now" | "defer_or_agent" | "defer" | "reject";
+    reason: string;
+  }>;
+}
+```
+
+## 13. MemoryView Catalog
+
+`MemoryView` should stay stricter than other Views. It is only for durable,
+behavior-changing knowledge.
+
+Recommended `content.kind` catalog:
+
+```text
+project_pattern
+  A stable architectural or implementation pattern in this project.
+  Example: "Info keeps Observations fixed and generates purpose-specific Views."
+
+user_preference
+  A persistent user preference that should alter future answers or UI behavior.
+  Example: "The user prefers simple schemas with family + kind over many top-level view types."
+
+learning_interest
+  A repeated or confirmed learning topic.
+  Example: "The user is actively studying memory systems and agent workflows."
+
+workflow_recipe
+  A reusable way to perform a task.
+  Example: "When changing View compilers, write tests first, then update runtime, then verify UI."
+
+surfacing_preference
+  A preference about what should be shown, hidden, or ranked.
+  Example: "Hide low-level Screenpipe recorder activity by default, keep it available in debug."
+
+routine_pattern
+  A repeated activity pattern worth recognizing proactively.
+  Example: "Morning coding sessions often start with Screenpipe/runtime timeline inspection."
+
+tooling_constraint
+  A constraint that should prevent repeated mistakes.
+  Example: "Do not write derived intelligence as context_records; write it as context_views."
+```
+
+Minimal `MemoryView` content:
+
+```ts
+{
+  kind: string;
+  claim: string;
+  applies_to: string[];
+  future_use: string[];
+}
+```
+
+Promotion rule:
+
+```text
+EvidenceView and ActivityView can be deterministic candidates.
+IntentView and WorkflowView can be agent hypotheses.
+MemoryView should require explicit user instruction, repeated evidence, positive feedback, or successful reuse.
+```
+
+## 14. Summary
 
 The design should preserve this invariant:
 
 ```text
 Raw observations stay fixed.
-Compression creates purpose-specific Views.
+Compression creates purpose-specific View nodes.
 Views compose through provenance.
-MetaView/proposal decides what to materialize.
-Only durable, useful, behavior-changing Views become Memory Views.
+ProposalView decides what to materialize.
+Agents and apps consume Views by default.
+Only durable, useful, behavior-changing Views become MemoryViews.
 ```
 
 Short version:
 
 ```text
-Observation is evidence.
-View is compression.
-Proposal is control.
-Memory View is reusable behavior-shaping knowledge.
+Observation is raw source of truth.
+EvidenceView is normalized evidence.
+ActivityView is what happened over time.
+IntentView is a hypothesis.
+WorkflowView is task/session structure.
+ProposalView is control.
+MemoryView is reusable behavior-shaping knowledge.
 ```

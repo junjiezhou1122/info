@@ -80,3 +80,31 @@ export type RuntimeTickResponse = {
     screenpipe_workspace_signals?: { ok?: boolean; count?: number; error?: string };
   };
 };
+
+export type ContextViewSummary = {
+  id: string;
+  view_type: string;
+  title?: string;
+  summary?: string;
+  status?: string;
+  source_records?: string[];
+  source_views?: string[];
+  confidence?: number;
+  stability?: string;
+  lossiness?: string;
+  content?: Record<string, unknown>;
+  updated_at?: string;
+};
+
+export type ViewFamilySummary = {
+  family: string;
+  count: number;
+  kinds: string[];
+  latest?: ContextViewSummary;
+};
+
+export type ViewFamiliesResponse = {
+  ok: true;
+  views: ContextViewSummary[];
+  families: ViewFamilySummary[];
+};

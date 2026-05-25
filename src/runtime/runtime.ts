@@ -13,6 +13,7 @@ import { compileWorkThreadView } from "./work-thread-view.js";
 import { compileActivityTimeline } from "./activity-timeline.js";
 import { compileProjectTimeline } from "./project-timeline.js";
 import { compileEvidenceViews } from "./evidence-view.js";
+import { compileActivityViews, compileProposalViews } from "./memory-views.js";
 
 export type RuntimeTickRequest = {
   window_minutes?: number;
@@ -412,9 +413,23 @@ function compileRuntimeViews(input: {
       write: input.write,
       records: input.records,
     }, input.store);
-    out.push({ view_type: "evidence.*", records_used: compiled.records_used, view_count: compiled.views.length, title: "Evidence Views" });
+    out.push({ view_type: "evidence", records_used: compiled.records_used, view_count: compiled.views.length, title: "Evidence Views" });
+
+    const activities = compileActivityViews({
+      minutes: Math.max(input.windowMinutes, 240),
+      limit: 500,
+      write: input.write,
+      evidenceViews: compiled.views,
+    }, input.store);
+    out.push({ view_type: "activity", records_used: compiled.records_used, view_count: activities.views.length, title: "Activity Views" });
+
+    const proposals = compileProposalViews({
+      write: input.write,
+      activityViews: activities.views,
+    }, input.store);
+    out.push({ view_type: "proposal", view_count: proposals.views.length, title: "Proposal Views" });
   } catch (error) {
-    out.push({ view_type: "evidence.*", skipped: error instanceof Error ? error.message : String(error) });
+    out.push({ view_type: "evidence", skipped: error instanceof Error ? error.message : String(error) });
   }
 
   try {
