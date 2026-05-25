@@ -9,6 +9,10 @@ import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "../c
 import { buildCandidateThreads, type CandidateThread } from "./correlation.js";
 import { buildLocalProjectSnapshotRecord } from "../connectors/local-project.js";
 import { buildThreadEvidenceMap } from "../threads/thread-evidence.js";
+import { compileWorkThreadView } from "./work-thread-view.js";
+import { compileActivityTimeline } from "./activity-timeline.js";
+import { compileProjectTimeline } from "./project-timeline.js";
+import { compileEvidenceViews } from "./evidence-view.js";
 
 export type RuntimeTickRequest = {
   window_minutes?: number;
@@ -25,6 +29,11 @@ export type RuntimeTickRequest = {
   screenpipe_limit?: number;
   project_snapshot_interval_seconds?: number;
   ai_session_interval_seconds?: number;
+  compile_views?: boolean;
+  view_compile_interval_seconds?: number;
+  work_thread_view_minutes?: number;
+  activity_timeline_minutes?: number;
+  project_timeline_minutes?: number;
 };
 
 export type WorkspaceCandidate = {
@@ -54,6 +63,7 @@ export type RuntimeTickResult = {
   candidate_threads: CandidateThread[];
   top_thread?: StoredWorkThread | CandidateThread;
   written_threads: string[];
+  compiled_views: Array<{ view_type: string; view_id?: string; title?: string; records_used?: number; view_count?: number; bucket_count?: number; work_thread_count?: number; skipped?: string }>;
   diagnostics: Record<string, unknown>;
 };
 
@@ -87,12 +97,13 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
   const write = req.write ?? true;
   const force = req.force ?? false;
   const diagnostics: Record<string, unknown> = {};
+  const compiledViews: RuntimeTickResult["compiled_views"] = [];
   const previousTick = store.getRuntimeState("last_tick")?.value ?? {};
   const activeState = store.getRuntimeState("active_thread")?.value ?? {};
+  const writtenRecords: string[] = [];
 
   const baseRecords = store.recent(80, undefined, timeWindow)
-    .filter(record => record.source.type !== "social" && record.schema.name !== "observation.social_post_saved")
-    .filter(record => record.schema.name !== "episode.candidate_thread");
+    .filter(record => record.source.type !== "social" && record.schema.name !== "observation.social_post_saved");
 
   const screenpipeRecords: StoredContextRecord[] = [];
   if (includeScreenpipe) {
@@ -131,7 +142,7 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
     screenpipeRecords.push(...workspaceSignals.records);
 
     const inputEvents = await fetchScreenpipeInputEvents({
-      limit: 8,
+      limit: req.screenpipe_limit ?? 8,
       start_time: `${windowMinutes}m ago`,
       end_time: "now",
     });
@@ -159,6 +170,12 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
     };
     screenpipeRecords.push(...screenpipe.records);
   }
+  if (write && screenpipeRecords.length) {
+    for (const record of dedupeRecords(screenpipeRecords)) {
+      const stored = store.insertRecord(record);
+      writtenRecords.push(stored.id);
+    }
+  }
 
   const workspaceCandidates = resolveWorkspaceCandidates({
     project_hints: req.project_hints,
@@ -176,7 +193,6 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
   const activeWorkspace = workspaceCandidates[0];
 
   const localProjectRecords: StoredContextRecord[] = [];
-  const writtenRecords: string[] = [];
   const projectSnapshotIntervalSeconds = req.project_snapshot_interval_seconds ?? 120;
   const lastProjectSnapshotAt = stringValue(previousTick.last_project_snapshot_at);
   const hasCurrentProjectSnapshot = activeWorkspace?.project_path
@@ -250,42 +266,6 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
   if (write) {
     for (const thread of candidateThreads) {
       const evidenceIds = [...new Set(thread.records.map(r => r.id))];
-      const candidateRecord: ContextRecord = {
-        id: `runtime:${thread.thread_id}`,
-        schema: { name: "episode.candidate_thread", version: 1 },
-        source: { type: "runtime", connector: "runtime-tick" },
-        scope: {
-          project: thread.projects[0] ?? activeWorkspace?.project,
-          repo: thread.repos[0],
-          app: thread.apps[0],
-          domain: thread.domains[0],
-          project_path: activeWorkspace?.project_path,
-        },
-        time: { observed_at: generatedAt, captured_at: generatedAt },
-        content: {
-          title: thread.title,
-          text: [
-            `Runtime candidate WorkThread: ${thread.title}`,
-            `confidence: ${thread.confidence}`,
-            `records: ${evidenceIds.length}`,
-            `active workspace: ${activeWorkspace?.project_path ?? "unknown"}`,
-            `keywords: ${thread.keywords.join(", ")}`,
-            `reasons:\n${thread.reasons.map(r => `- ${r}`).join("\n")}`,
-          ].join("\n\n"),
-        },
-        acquisition: {
-          mode: "derived",
-          actor: "system",
-          reason: "Runtime tick maintained deterministic WorkThread candidate from recent evidence.",
-        },
-        signal: { importance: Math.min(0.9, thread.confidence), confidence: thread.confidence, status: "candidate" },
-        privacy: { level: "private", retention: "normal", allow_embedding: false, allow_llm_summary: true, allow_external_llm: false, allow_external_reader: false },
-        relations: { derived_from: evidenceIds },
-        memory: { kind: "episode", stability: "session" },
-        payload: { thread, runtime_tick: { window_minutes: windowMinutes, active_workspace: activeWorkspace } },
-      };
-      const storedRecord = store.insertRecord(candidateRecord);
-      writtenRecords.push(storedRecord.id);
       const storedThread = store.upsertWorkThread({
         id: thread.thread_id,
         title: thread.title,
@@ -342,6 +322,33 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
         last_seen_at: generatedAt,
       });
     }
+  }
+
+  const shouldCompileViews = req.compile_views ?? true;
+  const viewCompileIntervalSeconds = req.view_compile_interval_seconds ?? 120;
+  const lastViewCompileAt = stringValue(previousTick.last_view_compile_at);
+  const shouldRunViewCompilers = shouldCompileViews && (force || secondsSince(lastViewCompileAt) >= viewCompileIntervalSeconds);
+  diagnostics.view_compile = {
+    enabled: shouldCompileViews,
+    interval_seconds: viewCompileIntervalSeconds,
+    skipped: !shouldRunViewCompilers,
+    last_view_compile_at: lastViewCompileAt,
+  };
+  if (shouldRunViewCompilers) {
+    compiledViews.push(...compileRuntimeViews({
+      store,
+      write,
+      records,
+      activeWorkspace,
+      windowMinutes,
+      workThreadMinutes: req.work_thread_view_minutes,
+      activityMinutes: req.activity_timeline_minutes,
+      projectMinutes: req.project_timeline_minutes,
+    }));
+    diagnostics.compiled_views = compiledViews;
+  }
+
+  if (write) {
     store.setRuntimeState("last_tick", {
       generated_at: generatedAt,
       active_workspace_path: activeWorkspace?.project_path,
@@ -351,6 +358,8 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
       candidate_count: candidateThreads.length,
       last_project_snapshot_at: shouldSnapshotProject ? generatedAt : previousTick.last_project_snapshot_at,
       last_ai_session_scan_at: shouldScanAiSessions ? generatedAt : previousTick.last_ai_session_scan_at,
+      last_view_compile_at: shouldRunViewCompilers ? generatedAt : previousTick.last_view_compile_at,
+      compiled_views: compiledViews,
       evidence: {
         base_records: baseRecords.length,
         screenpipe_records: screenpipeRecords.length,
@@ -380,8 +389,74 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
     candidate_threads: candidateThreads,
     top_thread: topThread,
     written_threads: writtenThreads,
+    compiled_views: compiledViews,
     diagnostics,
   };
+}
+
+function compileRuntimeViews(input: {
+  store: ContextStore;
+  write: boolean;
+  records?: StoredContextRecord[];
+  activeWorkspace?: WorkspaceCandidate;
+  windowMinutes: number;
+  workThreadMinutes?: number;
+  activityMinutes?: number;
+  projectMinutes?: number;
+}): RuntimeTickResult["compiled_views"] {
+  const out: RuntimeTickResult["compiled_views"] = [];
+  try {
+    const compiled = compileEvidenceViews({
+      minutes: Math.max(input.windowMinutes, 240),
+      limit: 500,
+      write: input.write,
+      records: input.records,
+    }, input.store);
+    out.push({ view_type: "evidence.*", records_used: compiled.records_used, view_count: compiled.views.length, title: "Evidence Views" });
+  } catch (error) {
+    out.push({ view_type: "evidence.*", skipped: error instanceof Error ? error.message : String(error) });
+  }
+
+  try {
+    const compiled = compileWorkThreadView({
+      minutes: input.workThreadMinutes ?? Math.max(input.windowMinutes, 180),
+      limit: 180,
+      write: input.write,
+    }, input.store);
+    out.push({ view_type: "work_thread", view_id: compiled.view.id, title: compiled.view.title, records_used: compiled.records_used, work_thread_count: compiled.candidate_threads.length });
+  } catch (error) {
+    out.push({ view_type: "work_thread", skipped: error instanceof Error ? error.message : String(error) });
+  }
+
+  try {
+    const compiled = compileActivityTimeline({
+      minutes: input.activityMinutes ?? Math.max(input.windowMinutes, 240),
+      limit: 400,
+      eventLimit: 120,
+      write: input.write,
+    }, input.store);
+    out.push({ view_type: "timeline.activity", view_id: compiled.view.id, title: compiled.view.title, records_used: compiled.records_used, bucket_count: compiled.buckets.length });
+  } catch (error) {
+    out.push({ view_type: "timeline.activity", skipped: error instanceof Error ? error.message : String(error) });
+  }
+
+  if (input.activeWorkspace?.project_path) {
+    try {
+      const compiled = compileProjectTimeline({
+        projectPath: input.activeWorkspace.project_path,
+        minutes: input.projectMinutes ?? 2 * 24 * 60,
+        limit: 500,
+        eventLimit: 120,
+        write: input.write,
+      }, input.store);
+      out.push({ view_type: "project_timeline", view_id: compiled.view.id, title: compiled.view.title, records_used: compiled.records_used, bucket_count: compiled.buckets.length, work_thread_count: compiled.work_threads.length });
+    } catch (error) {
+      out.push({ view_type: "project_timeline", skipped: error instanceof Error ? error.message : String(error) });
+    }
+  } else {
+    out.push({ view_type: "project_timeline", skipped: "no active workspace" });
+  }
+  return out;
 }
 
 export function resolveWorkspaceCandidates(input: { project_hints?: string[]; records: StoredContextRecord[]; fallback_paths?: string[] }): WorkspaceCandidate[] {
@@ -475,6 +550,10 @@ function selectThreadRecords(records: StoredContextRecord[], workspace?: Workspa
   const localProjectIds = new Set(records.filter(record => record.schema.name === "observation.local_project" && isRecordRelevantToWorkspace(record, workspace)).map(record => record.id));
 
   for (const record of records) {
+    if (record.schema.name.startsWith("derived.") || record.schema.name.startsWith("episode.")) {
+      filtered.push({ id: record.id, title: record.content?.title, reason: "legacy-derived-or-episode" });
+      continue;
+    }
     if (record.schema.name === "observation.screenpipe_workspace_signal") {
       filtered.push({ id: record.id, title: record.content?.title, reason: "workspace-signal-only" });
       continue;
@@ -495,7 +574,6 @@ function isRecordRelevantToWorkspace(record: StoredContextRecord, workspace?: Wo
   if (!workspace?.project_path) return true;
   if (record.schema.name === "observation.local_project") return normalizeProjectPath(record.scope?.project_path ?? stringValue(record.payload?.root) ?? record.content?.path) === workspace.project_path;
   if (record.schema.name === "observation.ai_session_locator_result") return normalizeProjectPath(record.scope?.project_path ?? stringValue(record.payload?.project_path)) === workspace.project_path;
-  if (record.schema.name.startsWith("episode.")) return true;
   const text = `${record.content?.title ?? ""}\n${record.content?.text ?? ""}\n${record.content?.url ?? ""}\n${record.content?.path ?? ""}\n${JSON.stringify(record.payload ?? {})}`;
   const paths = extractLikelyAbsoluteProjectPaths(text).map(normalizeProjectPath).filter(Boolean);
   if (paths.length > 0) return paths.includes(workspace.project_path);

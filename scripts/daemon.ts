@@ -26,6 +26,12 @@ function parseArgs(argv: string[]): RuntimeTickRequest & { interval_seconds?: nu
     else if (arg === "--timeline-limit") req.timeline_limit = Number(argv[++i]);
     else if (arg === "--project-snapshot-interval") req.project_snapshot_interval_seconds = Number(argv[++i]);
     else if (arg === "--ai-session-interval") req.ai_session_interval_seconds = Number(argv[++i]);
+    else if (arg === "--no-compile-views") req.compile_views = false;
+    else if (arg === "--compile-views") req.compile_views = true;
+    else if (arg === "--view-compile-interval") req.view_compile_interval_seconds = Number(argv[++i]);
+    else if (arg === "--work-thread-minutes") req.work_thread_view_minutes = Number(argv[++i]);
+    else if (arg === "--activity-minutes") req.activity_timeline_minutes = Number(argv[++i]);
+    else if (arg === "--project-timeline-minutes") req.project_timeline_minutes = Number(argv[++i]);
   }
   if (process.env.RUNTIME_PROJECT) req.project_hints = [...(req.project_hints ?? []), process.env.RUNTIME_PROJECT];
   if (process.env.RUNTIME_INTERVAL_SECONDS) req.interval_seconds = Number(process.env.RUNTIME_INTERVAL_SECONDS);
@@ -81,6 +87,7 @@ async function runOnce() {
     screenpipe: (result.diagnostics.screenpipe as any)?.ok ?? "skipped",
     throttle: result.diagnostics.throttle,
     interpretation,
+    compiled_views: result.compiled_views,
     timeline: timelineState,
   }, null, 2));
 }

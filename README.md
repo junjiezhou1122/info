@@ -20,6 +20,12 @@ Plugins attend differently.
 Actions require provenance and permission.
 ```
 
+## 核心文档
+
+- `docs/info-design-consensus.md`: 长期设计共识，定义 Observation / View / Program / Capability / Application 等核心概念。
+- `docs/info-ambient-runtime-architecture.md`: 最高层 ambient runtime 架构基线。
+- `docs/info-runtime-implementation-plan.md`: 按架构推进实现的工程计划。
+
 ## API
 
 - `POST /context/ingest`
@@ -31,27 +37,31 @@ Actions require provenance and permission.
 - `POST /context/connectors`
 - `GET /context/connectors`
 
-## 快速运行：standalone HTTP
+## 快速运行：policy-aware HTTP runtime
 
-不依赖 iii engine，方便 browser extension 先接入：
+默认开发入口。不依赖 iii engine，方便 browser extension / local apps 先接入：
 
 ```bash
 pnpm install
-pnpm run http
+pnpm run dev
 ```
 
 默认地址：`http://localhost:3111`。
 
+`pnpm run http` 是同一个 standalone HTTP runtime 的显式别名。
+
 ## 运行 iii worker
 
+iii worker 目前是实验映射入口，不是默认开发入口：
+
 ```bash
-pnpm run dev
+pnpm run iii:worker
 ```
 
 需要本地 iii engine 在 `ws://localhost:49134`，或设置：
 
 ```bash
-III_ENGINE_URL=ws://host:port pnpm run dev
+III_ENGINE_URL=ws://host:port pnpm run iii:worker
 ```
 
 ## 本地 smoke test
@@ -72,7 +82,7 @@ pnpm run episode:summary -- <thread_id>
 
 ## Browser Extension
 
-`browser-extension/` 是 Chrome MV3 草稿：点击扩展按钮后采集当前页面 title/url/正文/选中文本/scroll depth/dwell time，并写入 `/context/ingest`。
+`browser-extension/` 是 Chrome MV3 草稿：点击扩展按钮后采集当前页面 title/url/正文/选中文本/scroll depth/dwell time。普通采集写入 `/context/ingest`；Ambient Explore 写入 `/context/ingest?process=true&cascade_views=true`，由 Program runtime 触发 AgentTask 并产出 Views，扩展本身只读取 Views 和写 feedback。
 
 Chrome 加载方式：
 
@@ -131,12 +141,12 @@ CONTEXT_PACK_AI_SESSIONS=1 AI_SESSION_PROJECT=/Users/junjie/info pnpm run test:p
 ```
 
 
-## WorkThread / Episode v0
+## WorkThread / View v0
 
 `correlate:recent --write` 现在会同时写入：
 
-- `episode.candidate_thread` ContextRecord
 - `work_threads` 表里的 candidate WorkThread
+- `work_thread` ContextView
 
 常用命令：
 
@@ -158,7 +168,7 @@ pnpm run episode:summary -- <thread_id> --write
 `--write` 会写入：
 
 ```text
-episode.project_work
+summary.project_work_episode
 ```
 
 ContextPack v2 现在也支持 `thread_id`，会优先纳入该 thread 的 evidence records。
@@ -178,7 +188,7 @@ pnpm run thread -- list
 pnpm run episode:summary -- <thread_id>
 ```
 
-默认只输出候选 WorkThread，不修改原始 records。确认合理后可以写入候选 episode：
+默认只输出候选 WorkThread，不修改原始 records。确认合理后可以写入 WorkThread index 并刷新 `work_thread` View：
 
 ```bash
 pnpm run correlate:recent -- --write
@@ -227,6 +237,8 @@ pnpm run episode:summary -- <thread_id>
 
 - 先从本地 `ContextRecord` 搜索 goal 相关记录。
 - 再取同一时间窗口内的 recent records。
+- 如果请求带 `plugin_id`，则改走 brokered Context Pack：加载对应 `plugins/<plugin_id>/plugin.json`，应用 `allowed_sources` / `allowed_schemas` / `allowed_view_types` / `allow_external_llm` / `allow_external_reader` 等权限，并返回 `plugin_loaded` 诊断。
+- `plugin_id` 路径用于 agent/plugin consumption；默认路径保持原有本地 pack 行为。
 - 如果启用 `include_screenpipe`，则按需调用 Screenpipe `/search`。 
 - Screenpipe raw media 仍留在 Screenpipe，本项目只把结果作为 pack-time evidence 合并，不默认持久化。
 - `pack.sources` 和 markdown 中保留 provenance。
@@ -287,7 +299,7 @@ pnpm run thread -- evidence:write active
 - 从最近 `ContextRecord` 和可选 Screenpipe activity 推断 active workspace。
 - 对 active workspace 写入 `observation.local_project` 快照。
 - 定位相关 Codex / Claude Code session，写入 `observation.ai_session_locator_result` metadata 引用。
-- 构建候选 WorkThread，写入 `episode.candidate_thread` 和 `work_threads`。
+- 构建候选 WorkThread，写入 `work_threads` index，并编译 `work_thread` View。
 - 不复制 Screenpipe raw media，也不导入完整 AI transcript。
 
 HTTP 入口：
@@ -340,8 +352,8 @@ ALLOW_EXTERNAL_LLM=1 LLM_BASE_URL=https://api.openai.com/v1 LLM_API_KEY=... LLM_
 
 解释结果会：
 
-- 写入 `episode.thread_interpretation`
-- 更新 `work_threads.metadata.display_title / llm_summary / llm_next_steps / llm_tags`
+- 写入 `thread.display_card` View
+- 更新 `work_threads.metadata.display_title / llm_brief`
 - 默认把 `work_threads.title` 更新为 LLM 标题
 
 ## Thread Evidence Map

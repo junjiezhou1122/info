@@ -1,5 +1,5 @@
 import { ContextStore } from "../core/store.js";
-import type { ContextRecord, StoredContextRecord, StoredWorkThread, ThreadEvidenceMap } from "../core/types.js";
+import type { StoredContextRecord, StoredWorkThread, ThreadEvidenceMap } from "../core/types.js";
 import { chatCompletion, parseJsonObject, type LlmOptions } from "../core/llm.js";
 import { buildThreadEvidenceMap } from "./thread-evidence.js";
 
@@ -67,25 +67,7 @@ export async function interpretThread(req: ThreadInterpretRequest, store = new C
   let updatedThread: StoredWorkThread | undefined;
 
   if (req.write ?? true) {
-    const record: ContextRecord = {
-      id: `interpretation:${thread.id}`,
-      schema: { name: "episode.thread_interpretation", version: 1 },
-      source: { type: "llm_interpreter", connector: "openai-compatible" },
-      scope: { project: thread.projects?.[0], repo: thread.repos?.[0], app: thread.apps?.[0], domain: thread.domains?.[0] },
-      time: { observed_at: now, captured_at: now },
-      content: {
-        title: interpretation.display_title,
-        text: [`# ${interpretation.display_title}`, ``, interpretation.brief].join("\n"),
-      },
-      acquisition: { mode: "derived", actor: "system", reason: "LLM interpretation of deterministic WorkThread evidence" },
-      signal: { importance: 0.7, confidence: interpretation.confidence, status: "candidate" },
-      privacy: { level: "private", retention: "normal", allow_embedding: false, allow_llm_summary: true, allow_external_llm: false, allow_external_reader: false },
-      relations: { derived_from: records.map(r => r.id), related_to: [thread.id], thread_memberships: [{ thread_id: thread.id, confidence: thread.confidence ?? 0.6, reasons: ["thread interpretation"] }] },
-      memory: { kind: "episode", stability: "session" },
-      payload: { thread_id: thread.id, raw_title: thread.title, interpretation, llm: { model: llm.model, base_url: llm.base_url }, evidence_ids: records.map(r => r.id), evidence_map: evidenceMap },
-    };
-    written = store.insertRecord(record).id;
-    store.upsertView({
+    written = store.upsertView({
       id: `view:thread-display:${thread.id}`,
       view_type: "thread.display_card",
       title: interpretation.display_title,
@@ -101,7 +83,7 @@ export async function interpretThread(req: ThreadInterpretRequest, store = new C
       lossiness: "medium",
       privacy: { level: "private", retention: "normal", allow_embedding: false, allow_llm_summary: true, allow_external_llm: false, allow_external_reader: false },
       metadata: { evidence_map: evidenceMap, llm: { model: llm.model, base_url: llm.base_url } },
-    });
+    }).id;
   }
 
   if (req.update_thread ?? true) {

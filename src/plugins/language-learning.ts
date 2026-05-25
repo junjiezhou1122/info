@@ -27,6 +27,19 @@ type VocabularyCandidate = {
   source_records: string[];
 };
 
+type TextExposure = {
+  id: string;
+  kind: "record" | "view";
+  source_type: string;
+  schema_name?: string;
+  view_type?: string;
+  title?: string;
+  text?: string;
+  url?: string;
+  payload?: Record<string, unknown>;
+  source_records: string[];
+};
+
 const STOPWORDS = new Set([
   "the", "and", "for", "that", "this", "with", "from", "into", "your", "you", "are", "was", "were", "will", "would", "could", "should", "have", "has", "had", "not", "but", "about", "what", "when", "where", "which", "there", "their", "then", "than", "them", "they", "our", "out", "all", "can", "just", "more", "some", "like", "use", "used", "using", "how", "why", "http", "https", "localhost", "function", "const", "return", "import", "export", "type", "interface", "true", "false", "null", "undefined",
   "example", "domain", "page", "browser", "observation", "snapshot", "published", "warning", "cached", "caching", "retry", "source", "title", "visible", "text",
@@ -43,16 +56,21 @@ export function runLanguageLearningPlugin(options: LanguageLearningRunOptions = 
     time_window: { minutes: days * 24 * 60 },
     limit: options.limit ?? 100,
     include_records: true,
-    include_views: false,
+    include_views: true,
+    view_types: ["extraction.reader_snapshot"],
   };
   const pack = buildContextPack(query, store);
-  const textRecords = pack.records.filter(record => extractText(record).length >= 20);
-  const vocabulary = extractVocabulary(textRecords, minCount).slice(0, 30);
+  const textExposures = [
+    ...pack.records.map(recordTextExposure),
+    ...pack.views.filter(view => view.view_type === "extraction.reader_snapshot").map(viewTextExposure),
+  ].filter(item => extractText(item).length >= 20);
+  const vocabulary = extractVocabulary(textExposures, minCount).slice(0, 30);
   const examples = vocabulary.slice(0, 12).flatMap(candidate => candidate.examples.slice(0, 1).map(sentence => ({
     word: candidate.word,
     sentence,
     record_id: candidate.source_records[0],
   })));
+  const styleGuidance = outputEditStyleGuidance(store);
 
   const baseView = {
     compiler: { id: "language-learning-v0", version: "0.1.0", mode: "deterministic" as const },
@@ -77,14 +95,14 @@ export function runLanguageLearningPlugin(options: LanguageLearningRunOptions = 
 
   const learningPackView: ContextView = {
     ...baseView,
-    id: `memory:language:learning-pack:${dateKey(generatedAt)}`,
-    view_type: "memory.language.learning_pack",
+    id: `app:language:learning-pack:${dateKey(generatedAt)}`,
+    view_type: "app.language.learning_pack",
     title: `Adaptive language learning pack (${days}d)`,
     summary: renderLearningPackSummary(vocabulary),
     purpose: "User-facing learning material generated from personal context exposure without requiring WorkThread.",
     source_records: vocabularyView.source_records,
-    source_views: [vocabularyView.id!],
-    content: { examples, story_prompt: buildStoryPrompt(vocabulary), focus_words: vocabulary.slice(0, 12).map(v => v.word) },
+    source_views: [vocabularyView.id!, ...styleGuidance.map(item => item.memory_view_id)],
+    content: { examples, story_prompt: buildStoryPrompt(vocabulary), focus_words: vocabulary.slice(0, 12).map(v => v.word), ...(styleGuidance.length ? { style_guidance: styleGuidance } : {}) },
     confidence: vocabulary.length ? 0.68 : 0.2,
     stability: "session",
     lossiness: "high",
@@ -97,14 +115,16 @@ export function runLanguageLearningPlugin(options: LanguageLearningRunOptions = 
   const result: LanguageLearningRunResult = {
     ok: true,
     generated_at: generatedAt,
-    records_used: textRecords.length,
+    records_used: textExposures.length,
     vocabulary,
     examples,
     views,
     diagnostics: {
       pack: pack.diagnostics,
-      source_count: pack.records.length,
-      text_record_count: textRecords.length,
+      source_count: pack.records.length + pack.views.length,
+      text_record_count: textExposures.length,
+      reader_extraction_view_count: pack.views.filter(view => view.view_type === "extraction.reader_snapshot").length,
+      style_guidance_count: styleGuidance.length,
       thread_required: false,
       external_llm_used: false,
     },
@@ -123,7 +143,29 @@ export function runLanguageLearningPlugin(options: LanguageLearningRunOptions = 
   return result;
 }
 
-function extractVocabulary(records: StoredContextRecord[], minCount: number): VocabularyCandidate[] {
+function outputEditStyleGuidance(store: ContextStore): Array<{ memory_view_id: string; original_text?: string; edited_text?: string; reason?: string }> {
+  const pack = buildContextPack({
+    plugin_id: "language-learning",
+    mode: "source",
+    include_records: false,
+    include_views: true,
+    view_types: ["memory.output_edit_pattern"],
+    limit: 12,
+  }, store);
+  return pack.views
+    .filter(view => (view.confidence ?? 0) >= 0.5)
+    .filter(view => view.content?.target_view_type === "app.language.learning_pack")
+    .map(view => ({
+      memory_view_id: view.id,
+      original_text: stringValue(view.content?.original_text),
+      edited_text: stringValue(view.content?.edited_text),
+      reason: stringValue(view.content?.reason),
+    }))
+    .filter(item => item.original_text || item.edited_text || item.reason)
+    .slice(0, 5);
+}
+
+function extractVocabulary(records: TextExposure[], minCount: number): VocabularyCandidate[] {
   const byWord = new Map<string, { count: number; examples: string[]; source_records: Set<string> }>();
   for (const record of records) {
     const text = extractText(record);
@@ -133,7 +175,7 @@ function extractVocabulary(records: StoredContextRecord[], minCount: number): Vo
       if (word.length < 4 || STOPWORDS.has(word) || /^[0-9]+$/.test(word)) continue;
       const item = byWord.get(word) ?? { count: 0, examples: [], source_records: new Set<string>() };
       item.count += recordWeight(record);
-      item.source_records.add(record.id);
+      for (const id of record.source_records) item.source_records.add(id);
       if (item.examples.length < 3) {
         const sentence = sentences.find(s => s.toLowerCase().includes(word));
         if (sentence) item.examples.push(sentence.slice(0, 240));
@@ -154,16 +196,16 @@ function extractVocabulary(records: StoredContextRecord[], minCount: number): Vo
 }
 
 
-function recordWeight(record: StoredContextRecord): number {
+function recordWeight(record: TextExposure): number {
   let weight = 1.0;
-  if (record.schema.name === "observation.browser_text_copied") weight = 3.0;
-  else if (record.schema.name === "observation.browser_text_selected") weight = 2.4;
-  else if (record.schema.name === "observation.browser_search_query") weight = 2.0;
-  else if (record.schema.name === "observation.browser_page_saved") weight = 1.8;
-  else if (record.schema.name === "derived.reader_snapshot") weight = 1.2;
-  else if (record.schema.name === "observation.browser_page_snapshot") weight = 1.0;
-  else if (record.schema.name === "observation.screenpipe_input_event") weight = 1.4;
-  else if (record.schema.name === "observation.screenpipe_activity") weight = 0.65;
+  if (record.schema_name === "observation.browser_text_copied") weight = 3.0;
+  else if (record.schema_name === "observation.browser_text_selected") weight = 2.4;
+  else if (record.schema_name === "observation.browser_search_query") weight = 2.0;
+  else if (record.schema_name === "observation.browser_page_saved") weight = 1.8;
+  else if (record.view_type === "extraction.reader_snapshot") weight = 1.2;
+  else if (record.schema_name === "observation.browser_page_snapshot") weight = 1.0;
+  else if (record.schema_name === "observation.screenpipe_input_event") weight = 1.4;
+  else if (record.schema_name === "observation.screenpipe_activity") weight = 0.65;
   const quality = record.payload?.text_quality as any;
   if (quality && typeof quality === "object") {
     const qualityScore = typeof quality.quality_score === "number" ? quality.quality_score : 0.5;
@@ -175,12 +217,44 @@ function recordWeight(record: StoredContextRecord): number {
   return Number(weight.toFixed(3));
 }
 
-function extractText(record: StoredContextRecord): string {
-  return [record.content?.title, record.content?.text, record.content?.url].filter(Boolean).join("\n");
+function recordTextExposure(record: StoredContextRecord): TextExposure {
+  return {
+    id: record.id,
+    kind: "record",
+    source_type: record.source.type,
+    schema_name: record.schema.name,
+    title: record.content?.title,
+    text: record.content?.text,
+    url: record.content?.url,
+    payload: record.payload,
+    source_records: [record.id],
+  };
+}
+
+function viewTextExposure(view: StoredContextView): TextExposure {
+  return {
+    id: view.id,
+    kind: "view",
+    source_type: "view",
+    view_type: view.view_type,
+    title: view.title,
+    text: stringValue(view.content?.text) ?? view.summary,
+    url: stringValue(view.content?.url),
+    payload: view.content,
+    source_records: view.source_records?.length ? view.source_records : [view.id],
+  };
+}
+
+function extractText(record: TextExposure): string {
+  return [record.title, record.text, record.url].filter(Boolean).join("\n");
 }
 
 function splitSentences(text: string): string[] {
   return text.replace(/\s+/g, " ").split(/(?<=[.!?。！？])\s+/).map(s => s.trim()).filter(s => s.length >= 30).slice(0, 80);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function renderLearningPackSummary(vocabulary: VocabularyCandidate[]): string {

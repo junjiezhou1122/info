@@ -1,4 +1,4 @@
-import type { ContextRecord, StoredContextRecord } from "../core/types.js";
+import type { ContextRecord, StoredContextRecord, StoredContextView } from "../core/types.js";
 import type { ContextStore } from "../core/store.js";
 
 const DEFAULT_TIMEOUT_MS = 25_000;
@@ -30,7 +30,7 @@ export function shouldReaderEnrich(record: ContextRecord): { ok: boolean; reason
   return { ok: true };
 }
 
-export async function enrichWithJinaReader(store: ContextStore, parent: StoredContextRecord): Promise<StoredContextRecord | undefined> {
+export async function enrichWithJinaReader(store: ContextStore, parent: StoredContextRecord): Promise<StoredContextView | undefined> {
   const gate = shouldReaderEnrich(parent);
   if (!gate.ok) return undefined;
 
@@ -50,28 +50,19 @@ export async function enrichWithJinaReader(store: ContextStore, parent: StoredCo
     });
     const text = await response.text();
     const ok = response.ok && text.trim().length > 0;
-    const record = store.insertRecord({
-      schema: { name: "derived.reader_snapshot", version: 1 },
-      source: { type: "reader", connector: "jina" },
+    return store.upsertView({
+      id: `extraction:reader-snapshot:${parent.id}`,
+      view_type: "extraction.reader_snapshot",
+      title: parent.content?.title ?? `Reader snapshot: ${targetUrl}`,
+      summary: ok ? `Reader snapshot for ${targetUrl}` : `Reader enrichment failed: HTTP ${response.status}`,
+      status: ok && parent.signal?.status !== "inbox" ? parent.signal?.status ?? "candidate" : "candidate",
+      source_records: [parent.id],
+      compiler: { id: "reader.jina", version: "0.1.0", mode: "deterministic" },
+      purpose: "Extract readable page text from a browser Observation for downstream Programs.",
       scope: parent.scope,
       content: {
-        title: parent.content?.title ?? `Reader snapshot: ${targetUrl}`,
         url: targetUrl,
         text: ok ? text.slice(0, MAX_READER_TEXT) : `Reader enrichment failed: HTTP ${response.status}\n${text.slice(0, 2000)}`,
-      },
-      acquisition: {
-        mode: "derived",
-        actor: "system",
-        reason: `reader enrichment for ${parent.schema.name}`,
-      },
-      signal: {
-        importance: Math.min(1, (parent.signal?.importance ?? 0.5) + 0.05),
-        confidence: ok ? 0.85 : 0.2,
-        status: ok ? parent.signal?.status ?? "accepted" : "candidate",
-      },
-      privacy: parent.privacy,
-      payload: {
-        parent_record_id: parent.id,
         provider: "jina",
         reader_url: readerUrl,
         http_status: response.status,
@@ -79,29 +70,39 @@ export async function enrichWithJinaReader(store: ContextStore, parent: StoredCo
         fetched_at: new Date().toISOString(),
         source_schema: parent.schema,
       },
+      confidence: ok ? 0.85 : 0.2,
+      stability: "session",
+      lossiness: "low",
+      privacy: parent.privacy,
+      metadata: {
+        parent_record_id: parent.id,
+      },
     });
-    return record;
   } catch (error: any) {
-    return store.insertRecord({
-      schema: { name: "derived.reader_snapshot", version: 1 },
-      source: { type: "reader", connector: "jina" },
+    return store.upsertView({
+      id: `extraction:reader-snapshot:${parent.id}`,
+      view_type: "extraction.reader_snapshot",
+      title: parent.content?.title ?? `Reader snapshot failed: ${targetUrl}`,
+      summary: `Reader enrichment failed: ${error?.message ?? String(error)}`,
+      status: "candidate",
+      source_records: [parent.id],
+      compiler: { id: "reader.jina", version: "0.1.0", mode: "deterministic" },
+      purpose: "Extract readable page text from a browser Observation for downstream Programs.",
       scope: parent.scope,
       content: {
-        title: parent.content?.title ?? `Reader snapshot failed: ${targetUrl}`,
         url: targetUrl,
         text: `Reader enrichment failed: ${error?.message ?? String(error)}`,
-      },
-      acquisition: { mode: "derived", actor: "system", reason: `reader enrichment failed for ${parent.schema.name}` },
-      signal: { importance: 0.1, confidence: 0.1, status: "candidate" },
-      privacy: parent.privacy,
-      payload: {
-        parent_record_id: parent.id,
         provider: "jina",
         reader_url: readerUrl,
         ok: false,
         error: error?.message ?? String(error),
         fetched_at: new Date().toISOString(),
       },
+      confidence: 0.1,
+      stability: "session",
+      lossiness: "high",
+      privacy: parent.privacy,
+      metadata: { parent_record_id: parent.id },
     });
   } finally {
     clearTimeout(timer);

@@ -9,6 +9,8 @@
     .box { border: 1px solid #e5e5e5; border-radius: 10px; padding: 10px; margin: 10px 0; background: #fafafa; }
     button { width: 100%; border: 0; border-radius: 8px; padding: 9px 10px; background: #111; color: white; cursor: pointer; margin: 6px 0; }
     button.secondary { background: #eee; color: #111; }
+    details { margin-top: 10px; }
+    summary { cursor: pointer; color: #666; }
     label { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
     input[type="text"], input[type="number"] { width: 100%; box-sizing: border-box; border: 1px solid #ddd; border-radius: 8px; padding: 7px; }
     pre { white-space: pre-wrap; word-break: break-word; max-height: 140px; overflow: auto; background: #f4f4f4; padding: 8px; border-radius: 8px; }
@@ -17,20 +19,22 @@
 <body>
   <h1>Personal Context Sensor</h1>
   <div id="status" class="box muted">Loading…</div>
-  <div class="muted">Manual save reason</div>
-  <input id="saveReason" type="text" placeholder="Why is this page useful?" />
-  <button id="save">Save full snapshot now</button>
-  <button id="refresh" class="secondary">Refresh status</button>
-  <div class="box">
+  <div class="muted">Optional note</div>
+  <input id="saveReason" type="text" placeholder="Why save this page?" />
+  <button id="save">Save & Analyze</button>
+  <details>
+    <summary>Settings</summary>
+    <div class="box">
     <label><input id="captureStream" type="checkbox" /> Record browser event stream</label>
     <label><input id="snapshotOnVisit" type="checkbox" /> Snapshot page on visit</label>
+    <label><input id="allowExternalLlm" type="checkbox" /> Allow local external agent runtime/LLM for browser context</label>
     <div class="muted">Heartbeat seconds</div>
     <input id="heartbeatSeconds" type="number" min="5" step="5" />
     <div class="muted" style="margin-top:8px">Endpoint</div>
     <input id="endpoint" type="text" />
-    <button id="saveSettings" class="secondary">Save settings</button>
-  </div>
+    </div>
+  </details>
   <pre id="result"></pre>
-  <script src="popup.js"></script>
+  <script type="module" src="popup.js"></script>
 </body>
 </html>

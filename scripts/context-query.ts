@@ -23,8 +23,13 @@ function parseArgs(argv: string[]): ContextQuery {
     else if (arg === "--no-views") query.include_views = false;
     else if (arg === "--events") query.include_events = true;
     else if (arg === "--no-events") query.include_events = false;
+    else if (arg === "--markdown") (query as any).__markdown = true;
   }
   return query;
 }
 
-console.log(JSON.stringify(buildContextPack(parseArgs(process.argv.slice(2))), null, 2));
+const query = parseArgs(process.argv.slice(2));
+const markdownOnly = Boolean((query as any).__markdown);
+delete (query as any).__markdown;
+const pack = buildContextPack(query);
+console.log(markdownOnly ? pack.markdown : JSON.stringify(pack, null, 2));

@@ -17,6 +17,7 @@ export type ContextRecord = {
     session?: string;
     domain?: string;
     project_path?: string;
+    plugin_id?: string;
   };
   time?: {
     observed_at?: string;
@@ -86,12 +87,20 @@ export type ContextArtifact = {
   metadata?: Record<string, unknown>;
 };
 
+export type StoredContextArtifact = Required<Pick<ContextArtifact, "id">> & ContextArtifact & {
+  created_at: string;
+};
+
 export type ContextSchema = {
   name: string;
   version: number;
   description?: string;
   json_schema?: Record<string, unknown>;
   example?: Record<string, unknown>;
+};
+
+export type StoredContextSchema = ContextSchema & {
+  created_at: string;
 };
 
 export type ContextConnector = {
@@ -235,9 +244,11 @@ export type ContextQuery = {
   schemas?: string[];
   sources?: string[];
   view_types?: string[];
+  view_type_prefix?: string;
   include_views?: boolean;
   include_records?: boolean;
   include_events?: boolean;
+  allow_external_llm?: boolean;
   event_types?: string[];
   actor_types?: RuntimeEvent["actor"][];
   time_window?: ContextPackRequest["time_window"];
@@ -265,6 +276,7 @@ export type PluginManifest = {
     allowed_view_types?: string[];
     allowed_event_types?: string[];
     max_privacy_level?: "public" | "workspace" | "private" | "secret";
+    allow_external_reader?: boolean;
     allow_external_llm?: boolean;
     allow_write_views?: boolean;
     allow_actions?: boolean;
@@ -288,6 +300,7 @@ export type ContextBrokerPack = {
 
 export type ContextPackRequest = {
   goal: string;
+  plugin_id?: string;
   scope?: ContextRecord["scope"];
   thread_id?: string;
   limit?: number;
@@ -317,4 +330,11 @@ export type ContextPackRequest = {
     window_name?: string;
     browser_url?: string;
   };
+  include_views?: boolean;
+  allow_external_llm?: boolean;
+  view_types?: string[];
+  view_type_prefix?: string;
+  include_events?: boolean;
+  event_types?: string[];
+  actor_types?: RuntimeEvent["actor"][];
 };

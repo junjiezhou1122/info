@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Memory View Architecture</title>
+  <style>
+    :root {
+      --bg: #f6f4ef;
+      --paper: #fffdfa;
+      --ink: #252525;
+      --muted: #66645f;
+      --line: #d8d4ca;
+      --soft: #efede7;
+      --blue: #dfeaf2;
+      --blue-ink: #2f5f78;
+      --green: #dfeee5;
+      --green-ink: #2d6746;
+      --amber: #f4e6bf;
+      --amber-ink: #7b5b18;
+      --red: #f0ded8;
+      --red-ink: #874534;
+      --violet: #e5e0ef;
+      --violet-ink: #5b4a76;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        linear-gradient(90deg, rgba(37,37,37,.035) 1px, transparent 1px),
+        linear-gradient(rgba(37,37,37,.025) 1px, transparent 1px),
+        var(--bg);
+      background-size: 36px 36px;
+      color: var(--ink);
+      font-family: var(--sans);
+      line-height: 1.45;
+    }
+
+    .shell {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 48px 28px 64px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 32px;
+      align-items: end;
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(34px, 5vw, 64px);
+      line-height: .96;
+      letter-spacing: -0.02em;
+      font-weight: 780;
+    }
+
+    .lede {
+      max-width: 780px;
+      margin: 16px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(140px, 1fr));
+      gap: 8px;
+      min-width: 340px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.74);
+      border-radius: 8px;
+    }
+
+    .legend div {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      border: 1px solid rgba(0,0,0,.1);
+      flex: 0 0 auto;
+    }
+
+    .diagram {
+      display: grid;
+      gap: 14px;
+    }
+
+    .band {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.7);
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .band-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .row.query {
+      grid-template-columns: 1.1fr 1.1fr 1fr;
+    }
+
+    .row.answer {
+      grid-template-columns: 1.2fr .8fr 1fr;
+    }
+
+    .node {
+      position: relative;
+      min-height: 128px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      background: var(--paper);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .node:after {
+      content: attr(data-code);
+      position: absolute;
+      right: 10px;
+      bottom: 8px;
+      color: rgba(37,37,37,.16);
+      font-family: var(--mono);
+      font-size: 34px;
+      font-weight: 800;
+      letter-spacing: -0.05em;
+      pointer-events: none;
+    }
+
+    .node h2 {
+      margin: 0 0 8px;
+      font-size: 17px;
+      line-height: 1.16;
+    }
+
+    .node p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .node ul {
+      margin: 10px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .node .tag {
+      display: inline-flex;
+      margin-bottom: 10px;
+      padding: 3px 7px;
+      border: 1px solid rgba(0,0,0,.1);
+      border-radius: 999px;
+      background: rgba(255,255,255,.7);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .observation { background: #fdfbf7; }
+    .evidence { background: var(--blue); border-color: #c9d9e4; }
+    .activity { background: var(--green); border-color: #c7ddcf; }
+    .proposal { background: var(--amber); border-color: #e0ca93; }
+    .view { background: #f7f6f1; }
+    .memory { background: #fff6d9; border-color: #d5b95e; box-shadow: inset 0 0 0 2px rgba(180,140,35,.12); }
+    .external { background: var(--red); border-color: #dfc9c1; }
+    .answer-node { background: var(--violet); border-color: #d2c9df; }
+
+    .connector {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .connector span {
+      display: block;
+      border-top: 1px solid var(--line);
+      margin-top: 10px;
+      padding-top: 8px;
+    }
+
+    .memory-focus {
+      display: grid;
+      grid-template-columns: 1fr 360px 1fr;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .memory-circle {
+      width: 300px;
+      aspect-ratio: 1;
+      margin: 0 auto;
+      border-radius: 50%;
+      border: 1px solid #b99435;
+      background: radial-gradient(circle at center, #fffdfa 0 48%, #fff0b8 49% 100%);
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 34px;
+      box-shadow: inset 0 0 0 12px rgba(185,148,53,.12);
+    }
+
+    .memory-circle span {
+      font-family: var(--mono);
+      color: var(--amber-ink);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+
+    .memory-circle b {
+      display: block;
+      margin-top: 8px;
+      font-size: 30px;
+      line-height: 1.02;
+    }
+
+    .memory-circle em {
+      display: block;
+      margin-top: 12px;
+      color: #665a3f;
+      font-style: normal;
+      font-size: 13px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 8px;
+    }
+
+    .chip {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.72);
+      border-radius: 7px;
+      padding: 8px 10px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: baseline;
+    }
+
+    .chip b {
+      font-family: var(--mono);
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .chip span {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .footer-note {
+      margin-top: 18px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.68);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 980px) {
+      header { grid-template-columns: 1fr; }
+      .legend { min-width: 0; }
+      .row, .row.query, .row.answer, .memory-focus, .connector { grid-template-columns: 1fr; }
+      .connector span { margin-top: 0; }
+      .memory-circle { width: min(300px, 80vw); }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <div class="eyebrow">Info Memory Runtime / Architecture Diagram</div>
+        <h1>Memory View Design</h1>
+        <p class="lede">
+          固定的 Observations 通过不同 compression lenses 生成不同 Views。Views 可以组合成工作流、意图和长期 Memory；用户问题会检索多个 Views，并在缺失证据时触发外部检索。
+        </p>
+      </div>
+      <aside class="legend" aria-label="Legend">
+        <div><span class="swatch" style="background:#fdfbf7"></span> Raw evidence</div>
+        <div><span class="swatch" style="background:var(--blue)"></span> Normalized evidence</div>
+        <div><span class="swatch" style="background:var(--green)"></span> Activity compression</div>
+        <div><span class="swatch" style="background:var(--amber)"></span> Proposal/control</div>
+        <div><span class="swatch" style="background:#fff0b8"></span> Memory View</div>
+        <div><span class="swatch" style="background:var(--red)"></span> External retrieval</div>
+      </aside>
+    </header>
+
+    <section class="diagram">
+      <section class="band">
+        <div class="band-title"><span>Build memory from fixed observations</span><span>Observation -> Compress -> View -> Compose</span></div>
+        <div class="row">
+          <article class="node observation" data-code="L0">
+            <span class="tag">fixed source of truth</span>
+            <h2>Observation</h2>
+            <p>原始证据：browser heartbeat、selected text、screen OCR、UI click、app/window focus。</p>
+            <ul>
+              <li>不解释意图</li>
+              <li>不直接成为 memory</li>
+            </ul>
+          </article>
+          <article class="node evidence" data-code="L1">
+            <span class="tag">deterministic normalize</span>
+            <h2>Evidence View</h2>
+            <p>把不同 sensor 的数据规整成稳定证据，如 resource、interaction、screen frame。</p>
+          </article>
+          <article class="node activity" data-code="L2">
+            <span class="tag">time compression</span>
+            <h2>Activity View</h2>
+            <p>把证据合并成“用户在一段时间做了什么”。这是 timeline 的真正主对象。</p>
+          </article>
+          <article class="node proposal" data-code="L3">
+            <span class="tag">MetaView</span>
+            <h2>View Proposal</h2>
+            <p>判断这里值得生成哪些 Views：resource、intent、workflow、memory，哪些现在生成，哪些 defer。</p>
+          </article>
+          <article class="node view" data-code="L4">
+            <span class="tag">materialized</span>
+            <h2>Domain Views</h2>
+            <p>具体压缩结果：intent.candidate、workflow.learning_session、brief.research、source.content。</p>
+          </article>
+        </div>
+        <div class="connector" aria-hidden="true">
+          <span>capture facts</span>
+          <span>clean evidence</span>
+          <span>segment time</span>
+          <span>decide what to create</span>
+          <span>compose views</span>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="band-title"><span>Memory View is behavior-shaping knowledge</span><span>L5</span></div>
+        <div class="memory-focus">
+          <div class="stack">
+            <div class="chip"><b>source_views</b><span>workflow / intent / activity</span></div>
+            <div class="chip"><b>compiler</b><span>deterministic / llm / hybrid</span></div>
+            <div class="chip"><b>confidence</b><span>provenance weighted</span></div>
+            <div class="chip"><b>validity</b><span>stale_after / archived</span></div>
+          </div>
+          <div class="memory-circle">
+            <div>
+              <span>durable view</span>
+              <b>memory.*</b>
+              <em>Only stable, useful, behavior-changing Views become Memory Views.</em>
+            </div>
+          </div>
+          <div class="stack">
+            <div class="chip"><b>memory.project.patterns</b><span>project principles</span></div>
+            <div class="chip"><b>memory.user.preference</b><span>stable preference</span></div>
+            <div class="chip"><b>memory.surfacing_preference</b><span>show more / less</span></div>
+            <div class="chip"><b>routing.shortcut</b><span>future dispatch</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="band-title"><span>Answer user questions from many Views</span><span>View-aware retrieval</span></div>
+        <div class="row query">
+          <article class="node answer-node" data-code="Q">
+            <span class="tag">trigger</span>
+            <h2>User Query</h2>
+            <p>问题不是直接扫 raw records，而是先判断需要哪些 View families 和 scope。</p>
+          </article>
+          <article class="node view" data-code="R">
+            <span class="tag">local first</span>
+            <h2>Internal View Retrieval</h2>
+            <p>检索 evidence、activity、intent、workflow、brief、analysis、memory Views。</p>
+          </article>
+          <article class="node proposal" data-code="P">
+            <span class="tag">planner</span>
+            <h2>MetaView Planner</h2>
+            <p>判断现有 Views 是否足够；缺 transcript、docs、GitHub context 时生成 retrieval plan。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="band-title"><span>External retrieval writes back as Views</span><span>Do not bypass provenance</span></div>
+        <div class="row answer">
+          <article class="node external" data-code="G">
+            <span class="tag">privacy gate</span>
+            <h2>External Retrieval Gate</h2>
+            <p>检查 privacy、permission、cost、latency。外部工具必须服从本地 provenance policy。</p>
+          </article>
+          <article class="node external" data-code="E">
+            <span class="tag">optional</span>
+            <h2>External Sources</h2>
+            <p>Web search、Docs、GitHub、YouTube transcript、papers。</p>
+          </article>
+          <article class="node evidence" data-code="S">
+            <span class="tag">write back</span>
+            <h2>Source / Extraction View</h2>
+            <p>外部结果先变成 source.content、extraction.reader_snapshot、extraction.video_transcript，再参与回答。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="band-title"><span>Closed loop</span><span>Answer -> Feedback -> Better Memory</span></div>
+        <div class="row answer">
+          <article class="node answer-node" data-code="A">
+            <span class="tag">compose</span>
+            <h2>Synthesis Answer</h2>
+            <p>组合 selected Views，输出 answer、confidence、used_views、used_records、external_sources、missing_context。</p>
+          </article>
+          <article class="node observation" data-code="F">
+            <span class="tag">raw feedback</span>
+            <h2>Feedback Observation</h2>
+            <p>用户接受、纠正、dismiss、打开来源，先作为 observation 记录。</p>
+          </article>
+          <article class="node memory" data-code="M">
+            <span class="tag">learned view</span>
+            <h2>Learning / Memory Views</h2>
+            <p>反馈更新 memory.surfacing_preference、routing.shortcut、memory.project.patterns、control.view_policy。</p>
+          </article>
+        </div>
+      </section>
+    </section>
+
+    <p class="footer-note">
+      Invariant: raw observations stay fixed; all intelligence is represented as Views; Memory is only the subset of Views that changes future behavior.
+    </p>
+  </main>
+</body>
+</html>

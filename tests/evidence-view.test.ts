@@ -1,0 +1,110 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { ContextStore } from "../src/core/store.js";
+import { buildEvidenceView, compileEvidenceViews } from "../src/runtime/evidence-view.js";
+import { runtimeTick } from "../src/runtime/runtime.js";
+
+function withStore(fn: (store: ContextStore) => Promise<void> | void) {
+  const dir = mkdtempSync(join(tmpdir(), "info-evidence-view-test-"));
+  const store = new ContextStore(join(dir, "context.sqlite"));
+  return Promise.resolve(fn(store)).finally(() => rmSync(dir, { recursive: true, force: true }));
+}
+
+test("Evidence View compiler normalizes raw browser and Screenpipe observations", () => withStore((store) => {
+  store.insertRecord({
+    id: "record:evidence-browser",
+    schema: { name: "observation.browser_page_heartbeat", version: 1 },
+    source: { type: "browser", connector: "chrome-extension" },
+    scope: { app: "Chrome", domain: "docs.screenpi.pe" },
+    time: { observed_at: "2026-05-25T10:00:00.000Z" },
+    content: {
+      title: "Screenpipe Docs",
+      url: "https://docs.screenpi.pe/recording",
+      text: "Screenpipe permissions and browser URL capture.",
+    },
+    payload: { dwell_seconds: 120 },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  store.insertRecord({
+    id: "record:evidence-frame",
+    schema: { name: "observation.screenpipe_activity", version: 1 },
+    source: { type: "screenpipe", connector: "screenpipe-local-api" },
+    scope: { app: "Warp" },
+    time: { observed_at: "2026-05-25T10:01:00.000Z" },
+    content: { title: "Warp - OCR", text: "sqlite3 ~/.screenpipe/db.sqlite select browser_url" },
+    payload: { app_name: "Warp", content_type: "OCR", frame_id: 9466 },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const result = compileEvidenceViews({ write: true, limit: 10, minutes: 10_000 }, store);
+  const views = store.listViews({ view_type_prefix: "evidence.", limit: 10 });
+
+  assert.equal(result.records_used, 2);
+  assert.equal(views.length, 2);
+  assert.ok(views.some(view => view.view_type === "evidence.browser_page"));
+  assert.ok(views.some(view => view.view_type === "evidence.screen_frame"));
+
+  const browser = views.find(view => view.view_type === "evidence.browser_page");
+  assert.ok(browser);
+  assert.deepEqual(browser.source_records, ["record:evidence-browser"]);
+  assert.equal(browser.content?.url, "https://docs.screenpi.pe/recording");
+  assert.equal((browser.content?.claims as Array<Record<string, unknown>>).some(claim => claim.kind === "url_seen"), true);
+
+  const frame = views.find(view => view.view_type === "evidence.screen_frame");
+  assert.ok(frame);
+  assert.equal((frame.content?.attribution as Record<string, unknown>).frame_id, 9466);
+  assert.equal(frame.content?.app, "Warp");
+}));
+
+test("Evidence View can be used as a graph node with stable provenance", () => withStore((store) => {
+  const record = store.insertRecord({
+    id: "record:evidence-node",
+    schema: { name: "observation.local_project", version: 1 },
+    source: { type: "local_project", connector: "runtime-snapshot" },
+    scope: { project: "info", project_path: "/Users/junjie/info" },
+    content: { title: "Local project snapshot: info", path: "/Users/junjie/info", text: "src/runtime/evidence-view.ts changed" },
+    payload: { root: "/Users/junjie/info", files_touched: ["src/runtime/evidence-view.ts"] },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const first = buildEvidenceView(record);
+  const second = buildEvidenceView(record);
+
+  assert.equal(first.id, second.id);
+  assert.equal(first.view_type, "evidence.local_project");
+  assert.deepEqual(first.source_records, [record.id]);
+  assert.equal(first.compiler?.id, "builtin.evidence-view");
+  assert.equal(first.lossiness, "low");
+}));
+
+test("runtimeTick compiles Evidence Views before higher-level runtime Views", async () => withStore(async (store) => {
+  store.insertRecord({
+    id: "record:evidence-runtime-source",
+    schema: { name: "observation.browser_page_snapshot", version: 1 },
+    source: { type: "browser", connector: "chrome-extension" },
+    scope: { project: "info", project_path: "/Users/junjie/info", domain: "github.com", app: "Chrome" },
+    content: {
+      title: "Info Runtime",
+      url: "https://github.com/example/info",
+      text: "Context runtime docs mention evidence views and activity timeline.",
+    },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const result = await runtimeTick({
+    include_screenpipe: false,
+    include_ai_sessions: false,
+    include_git: false,
+    compile_views: true,
+    force: true,
+    window_minutes: 60,
+    min_score: 0.1,
+  }, store);
+
+  assert.equal(result.ok, true);
+  assert.ok(result.compiled_views.some(view => view.view_type === "evidence.*"));
+  assert.ok(store.listViews({ view_type_prefix: "evidence.", limit: 10 }).some(view => view.source_records?.includes("record:evidence-runtime-source")));
+}));

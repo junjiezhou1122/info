@@ -1,6 +1,9 @@
 .env
 node_modules/
-data/*.sqlite*
+.pnpm-store/
+data/
+craft-reference/
+ui/dist/
 .DS_Store
 .omc/
 .omx/

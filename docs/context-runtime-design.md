@@ -290,7 +290,7 @@ browser snapshot / manual save
   ↓
 Jina reader enrichment
   ↓
-derived.reader_snapshot
+extraction.reader_snapshot
 ```
 
 但它不能替代 browser，因为它不知道：
@@ -481,25 +481,113 @@ ContextRecord 进入后，不只是存储，还可以触发 workflow。
 ```text
 browser_page_saved
 → reader_enrich
-→ derived.reader_snapshot
+→ extraction.reader_snapshot
 
 screenpipe_activity
 → infer_current_focus
-→ derived.current_focus
+→ focus.current
 
 codex_session_end
 → extract_project_memory
-→ derived.project_memory
+→ memory.project
 
 project_session_end
 → generate_project_summary
-→ derived.project_session_summary
+→ summary.project_session
 ```
 
 这就是系统真正强的地方：
 
 ```text
 Right context → Right agent → Right time → Right action
+```
+
+
+
+## 5.1 Plugin / Skill / View 的边界
+
+后续系统不要把所有能力都写进 core。更清晰的边界是：
+
+```text
+Skill = agent runtime 内部如何做某件事
+Program = Info runtime 什么时候发起一个用户价值循环
+Plugin = 打包和安装形态，不是核心对象
+View = program/compiler/agent task 产出的可复用数据结果
+```
+
+例如 PDF / YouTube 这类能力，本身通常可以由 agent + skill 完成：
+
+```text
+用户问：帮我总结这个 PDF
+外部 agent runtime 自己选择 PDF/search/summary skill
+当前对话里回答
+```
+
+但如果希望它成为持续的个人上下文能力，Info 侧应该包装成 Program 或可安装 plugin，并优先通过通用 AgentTask 边界交给外部 agent runtime：
+
+```text
+pdf-research-plugin
+  trigger: 发现浏览器访问 .pdf
+  submits: AgentTask(context_pack + output_contract)
+  external agent runtime owns PDF/search/summary skills
+  produces: extraction.pdf_text / paper.summary Views
+  writes: ContextStore + RuntimeEvent provenance
+
+注意：这是可安装 plugin 示例，不是默认 runtime 主路径。默认 Browser Ambient 只走 AgentTask + deterministic fallback。
+```
+
+也就是说：
+
+```text
+Skill 是外部 agent runtime 的执行配方。
+Program 是 Info 里的用户价值循环。
+Plugin 是产品化、可安装、可配置、可追踪的 packaging。
+```
+
+这支持社区生态：
+
+```text
+Core Runtime 只定义协议和数据面。
+社区提供各种 context plugins。
+用户按需安装/启用。
+```
+
+例子：
+
+```text
+coding-context-plugin
+  -> ContextView(work_thread)
+  -> ContextView(coding_project_context)
+
+youtube-context-plugin
+  -> extraction.video_transcript
+  -> video.summary
+
+pdf-research-plugin  // installed/enabled plugin
+  -> extraction.pdf_text
+  -> paper.summary
+
+meeting-context-plugin
+  -> meeting.summary
+  -> task.action_items
+```
+
+`coding_project_context` 这种东西很有价值，但不应该是所有用户都必须拥有的 core 概念。它更像 coding 用户安装的专属 view compiler plugin。UI 可以按 project 展示它：
+
+```text
+/Users/junjie/info
+  active work thread
+  current project state
+  recent browser references
+  recent AI sessions
+  build/test status
+  next actions
+```
+
+这样 agent 看到的不再是一堆 raw records，而是：
+
+```text
+当前项目 + 当前任务 + 代码状态 + 证据 + 下一步
 ```
 
 ---
@@ -635,7 +723,7 @@ pnpm run correlate:recent -- --write
 }
 ```
 
-`--write` 会写入 `episode.candidate_thread`，并通过 `relations.derived_from` 指向 evidence records。它不会改写原始 records，因此是可逆的。
+`--write` 会写入 `work_threads` materialized index，并刷新 `work_thread` ContextView。它不会改写原始 records，因此是可逆的。
 
 AI Session Locator 可以作为强 anchor 按需加入 correlation：
 

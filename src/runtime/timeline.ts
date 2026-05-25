@@ -6,6 +6,8 @@ export type CompileObservationTimelineOptions = {
   limit?: number;
   write?: boolean;
   title?: string;
+  records?: StoredContextRecord[];
+  pluginId?: string;
 };
 
 export type CompileObservationTimelineResult = {
@@ -19,7 +21,8 @@ export function compileObservationTimeline(options: CompileObservationTimelineOp
   const minutes = options.minutes ?? 24 * 60;
   const limit = options.limit ?? 200;
   const generatedAt = new Date().toISOString();
-  const records = store.recent(limit, undefined, { minutes });
+  const candidateLimit = options.records ? limit : Math.max(limit * 3, limit + 50);
+  const records = (options.records ?? store.recent(candidateLimit, undefined, { minutes })).filter(isRawObservationRecord).slice(0, limit);
   const buckets = bucketRecords(records);
   const view: ContextView = {
     id: `view:timeline:observations:${timelineKey(generatedAt, minutes)}`,
@@ -30,7 +33,7 @@ export function compileObservationTimeline(options: CompileObservationTimelineOp
     source_records: records.map(r => r.id),
     compiler: { id: "observation-timeline", version: "1", mode: "deterministic" },
     purpose: "Navigable timeline view over raw ContextRecord observations.",
-    scope: { time_range: { start: new Date(Date.now() - minutes * 60_000).toISOString(), end: generatedAt } },
+    scope: { time_range: { start: new Date(Date.now() - minutes * 60_000).toISOString(), end: generatedAt }, plugin_id: options.pluginId },
     content: { minutes, buckets, records: records.map(compactRecord) },
     confidence: 0.95,
     stability: minutes <= 180 ? "session" : "project",
@@ -47,11 +50,19 @@ export function compileObservationTimeline(options: CompileObservationTimelineOp
       status: "completed",
       subject_type: "view",
       subject_id: stored.id,
+      plugin_id: options.pluginId,
       related_records: records.map(r => r.id),
       payload: { minutes, records_used: records.length, bucket_count: buckets.length },
     });
   }
   return { ok: true, view: stored, records_used: records.length, buckets };
+}
+
+function isRawObservationRecord(record: StoredContextRecord): boolean {
+  if (record.schema.name.startsWith("derived.")) return false;
+  if (record.schema.name.startsWith("episode.")) return false;
+  if (record.privacy?.retention === "do_not_store") return false;
+  return true;
 }
 
 function bucketRecords(records: StoredContextRecord[]) {

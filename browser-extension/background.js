@@ -1,8 +1,11 @@
+import { buildViewFeedbackRequest, contextIngestEndpointFromSettings, contextViewUrlFromSettings, contextViewsEndpointFromSettings, feedbackEndpointFromSettings, viewIdsFromProcessedIngestResponse } from "./agent-task.js";
+
 const DEFAULT_SETTINGS = {
   endpoint: "http://localhost:3111/context/ingest",
   captureStream: true,
   heartbeatSeconds: 15,
   snapshotOnVisit: true,
+  allowExternalLlm: true,
   snapshotTextLimit: 120000,
   excludedDomains: [
     "gmail.com",
@@ -53,6 +56,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "save-current-page") {
       const tab = await getActiveTab();
       const result = await captureSnapshot(tab, "manual_save", true, message.reason);
+      sendResponse(result);
+      return;
+    }
+    if (message?.type === "ambient-current-page") {
+      const tab = await getActiveTab();
+      const result = await ambientCurrentPage(tab, message.reason);
+      sendResponse(result);
+      return;
+    }
+    if (message?.type === "poll-context-views") {
+      const result = await pollContextViews(message);
+      sendResponse(result);
+      return;
+    }
+    if (message?.type === "feedback-view") {
+      const result = await postViewFeedback(message);
       sendResponse(result);
       return;
     }
@@ -138,6 +157,77 @@ async function captureSnapshot(tab, reason, manual, manualSaveReason) {
   state.settings = await getSettings();
   const page = await collectFromTab(tab.id);
   return sendSnapshot(page, state, reason, manual, manualSaveReason);
+}
+
+async function ambientCurrentPage(tab, reason) {
+  const startedAt = new Date().toISOString();
+  if (!tab?.id || !tab.url) return { ok: false, stage: "active_tab", error: "no active tab", started_at: startedAt };
+
+  const snapshot = await captureAmbientRequest(tab, reason || "Explore current page with Browser Ambient");
+  const recordId = snapshot?.body?.id || snapshot?.body?.record?.id || snapshot?.body?.duplicate_of;
+  if (!snapshot.ok || !recordId) {
+    return {
+      ok: false,
+      stage: "capture_ambient_request",
+      error: "ambient request failed or missing record id",
+      started_at: startedAt,
+      tab: { id: tab.id, title: tab.title, url: tab.url },
+      snapshot,
+    };
+  }
+
+  const writtenViews = viewIdsFromProcessedIngestResponse(snapshot.body);
+  const views = await fetchViews(writtenViews);
+  return {
+    ok: Boolean(snapshot.ok && snapshot.body?.ok),
+    stage: "done",
+    started_at: startedAt,
+    tab: { id: tab.id, title: tab.title, url: tab.url },
+    record_id: recordId,
+    written_views: writtenViews,
+    views,
+    snapshot,
+    processing: snapshot.body?.processing,
+    cascade_processing: snapshot.body?.cascade_processing,
+  };
+}
+
+async function captureAmbientRequest(tab, reason) {
+  if (!tab?.id || !tab.url) return { ok: false, error: "no active tab" };
+  await ensureVisit(tab, "ambient_requested");
+  const state = getTabState(tab.id, tab.url);
+  state.windowId = tab.windowId;
+  state.settings = await getSettings();
+  const page = await collectFromTab(tab.id);
+  const dwell_seconds = Math.round((Date.now() - state.startedAt) / 1000);
+  const record = baseRecord({
+    schemaName: "observation.browser_ambient_requested",
+    page,
+    state,
+    contentText: page.text,
+    acquisitionMode: "manual",
+    reason,
+    importance: 0.98,
+    payload: {
+      visit_id: state.visitId,
+      canonical_url: page.metadata?.canonical_url,
+      selected_text: page.selected_text,
+      selected_text_length: page.selected_text?.length ?? 0,
+      scroll_depth: page.scroll_depth,
+      scroll_events: page.scroll_events,
+      selection_count: page.selection_count,
+      dwell_seconds,
+      metadata: page.metadata,
+      text_quality: page.text_quality,
+      search: page.search,
+      request: {
+        kind: "ambient_explore",
+        button_clicked: true,
+        requested_at: new Date().toISOString(),
+      },
+    },
+  });
+  return postRecord(record, { process: true, cascadeViews: true });
 }
 
 async function sendVisit(page, state, reason) {
@@ -284,18 +374,84 @@ function baseRecord({ schemaName, page, state, contentText, acquisitionMode, rea
   };
 }
 
-async function postRecord(record) {
+async function postRecord(record, options = {}) {
   if (record.privacy?.retention === "do_not_store") {
     return { ok: true, stored: false, reason: "privacy do_not_store", schema: record.schema.name };
   }
   const settings = await getSettings();
-  const response = await fetch(settings.endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(record),
+  try {
+    const endpoint = contextIngestEndpointFromSettings(settings, options);
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(record),
+    });
+    const body = await response.json().catch(() => ({}));
+    return { ok: response.ok, status: response.status, body, schema: record.schema.name, endpoint };
+  } catch (error) {
+    const endpoint = contextIngestEndpointFromSettings(settings, options);
+    return { ok: false, status: 0, error: error?.message ?? String(error), schema: record.schema.name, endpoint };
+  }
+}
+
+async function fetchViews(viewIds) {
+  const settings = await getSettings();
+  const views = [];
+  for (const id of viewIds) {
+    const endpoint = contextViewUrlFromSettings(settings, id);
+    try {
+      const response = await fetch(endpoint);
+      const body = await response.json().catch(() => ({}));
+      views.push({ ok: response.ok, status: response.status, body, view: body.view, endpoint });
+    } catch (error) {
+      views.push({ ok: false, status: 0, error: error?.message ?? String(error), endpoint });
+    }
+  }
+  return views;
+}
+
+async function pollContextViews(message) {
+  const settings = await getSettings();
+  const endpoint = contextViewsEndpointFromSettings(settings, {
+    viewTypes: message.viewTypes,
+    viewTypePrefix: message.viewTypePrefix,
+    cursor: message.cursor,
+    query: message.query,
+    limit: message.limit ?? 8,
+    activeOnly: message.activeOnly ?? true,
   });
-  const body = await response.json().catch(() => ({}));
-  return { ok: response.ok, status: response.status, body, schema: record.schema.name };
+  try {
+    const response = await fetch(endpoint);
+    const body = await response.json().catch(() => ({}));
+    return { ok: response.ok && Boolean(body.ok), status: response.status, endpoint, ...body };
+  } catch (error) {
+    return { ok: false, status: 0, error: error?.message ?? String(error), endpoint };
+  }
+}
+
+async function postViewFeedback(message) {
+  if (!message.viewId || !message.feedbackType) return { ok: false, error: "viewId and feedbackType are required" };
+  const settings = await getSettings();
+  const endpoint = feedbackEndpointFromSettings(settings);
+  const payload = buildViewFeedbackRequest({
+    viewId: message.viewId,
+    viewType: message.viewType,
+    type: message.feedbackType,
+    value: message.value,
+    reason: message.reason,
+    payload: { surface: "popup", ...(message.payload ?? {}) },
+  });
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json().catch(() => ({}));
+    return { ok: response.ok && Boolean(body.ok), status: response.status, endpoint, payload, ...body };
+  } catch (error) {
+    return { ok: false, status: 0, error: error?.message ?? String(error), endpoint, payload };
+  }
 }
 
 async function collectFromTab(tabId) {
@@ -383,6 +539,7 @@ function privacyForUrl(rawUrl, settings = DEFAULT_SETTINGS) {
     retention: "normal",
     allow_embedding: true,
     allow_llm_summary: true,
+    allow_external_llm: Boolean(settings.allowExternalLlm),
     allow_external_reader: isPublicish,
   };
 }

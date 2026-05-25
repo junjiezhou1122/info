@@ -48,6 +48,7 @@ function normalizePluginManifest(plugin: PluginManifest): PluginManifest {
     ...plugin,
     permissions: {
       max_privacy_level: "private",
+      allow_external_reader: false,
       allow_external_llm: false,
       allow_write_views: false,
       allow_actions: false,
@@ -73,17 +74,17 @@ function defaultLanguageLearningPlugin(): PluginManifest {
         "observation.browser_search_query",
         "observation.screenpipe_activity",
         "observation.screenpipe_input_event",
-        "observation.ai_chat",
-        "derived.reader_snapshot"
+        "observation.ai_chat"
       ],
+      view_types: ["extraction.reader_snapshot"],
       include_records: true,
-      include_views: false,
+      include_views: true,
       time_window: { minutes: 10080 },
       limit: 80
     },
     view_types_produced: [
       "memory.language.vocabulary_exposure",
-      "memory.language.learning_pack"
+      "app.language.learning_pack"
     ],
     actions: [
       { id: "suggest_words", title: "Suggest words", permission_level: "L2_suggest" },
@@ -99,10 +100,11 @@ function defaultLanguageLearningPlugin(): PluginManifest {
         "observation.browser_search_query",
         "observation.screenpipe_activity",
         "observation.screenpipe_input_event",
-        "observation.ai_chat",
-        "derived.reader_snapshot"
+        "observation.ai_chat"
       ],
+      allowed_view_types: ["extraction.reader_snapshot", "memory.output_edit_pattern"],
       max_privacy_level: "private",
+      allow_external_reader: false,
       allow_external_llm: false,
       allow_write_views: true,
       allow_actions: false

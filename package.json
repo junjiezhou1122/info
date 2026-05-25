@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --experimental-sqlite --import tsx src/server/worker.ts",
+    "dev": "node --experimental-sqlite --import tsx src/server/http-server.ts",
+    "iii:worker": "node --experimental-sqlite --import tsx src/server/worker.ts",
     "test:ingest": "node --experimental-sqlite --import tsx scripts/ingest-example.ts",
     "test:pack": "node --experimental-sqlite --import tsx scripts/pack-example.ts",
     "test:pack:v2": "node --experimental-sqlite --import tsx scripts/pack-v2-example.ts",
@@ -25,10 +26,17 @@
     "thread:interpret": "node --experimental-sqlite --import tsx scripts/thread-interpret.ts",
     "context:query": "node --experimental-sqlite --import tsx scripts/context-query.ts",
     "plugin:language": "node --experimental-sqlite --import tsx scripts/plugin-language.ts",
+    "program": "node --experimental-sqlite --import tsx scripts/program-runtime.ts",
     "runtime:events": "node --experimental-sqlite --import tsx scripts/runtime-events.ts",
-    "timeline": "node --experimental-sqlite --import tsx scripts/timeline.ts"
+    "timeline": "node --experimental-sqlite --import tsx scripts/timeline.ts",
+    "pipeline:tick": "node --experimental-sqlite --import tsx scripts/pipeline-tick.ts",
+    "context-runtime:tick": "node --experimental-sqlite --import tsx scripts/context-runtime-tick.ts",
+    "test": "node --experimental-sqlite --import tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.37.0",
+    "@agentclientprotocol/sdk": "^0.22.1",
+    "acpx": "^0.10.0",
     "iii-sdk": "latest",
     "zod": "^3.24.4"
   },

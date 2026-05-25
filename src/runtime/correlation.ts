@@ -53,6 +53,7 @@ const STOPWORDS = new Set([
   "http", "https", "localhost", "com", "www", "file", "files", "true", "false", "null", "undefined",
   "users", "user", "junjie", "node", "npm", "pnpm", "yarn", "bun", "git", "src", "docs", "path", "run",
   "import", "export", "const", "let", "var", "function", "return", "type", "interface",
+  "visit_id", "metadata", "selected_text", "selected_text_length", "scroll_depth", "scroll_events", "selection_count", "dwell_seconds",
   "一个", "这个", "我们", "现在", "然后", "可以", "就是", "什么", "因为", "如果", "不是", "需要", "进行", "这个", "那个",
 ]);
 
@@ -63,7 +64,6 @@ const ANCHOR_SCHEMAS = [
   "observation.codex_session",
   "observation.browser_page_saved",
   "observation.ai_session_locator_result",
-  "episode.candidate_thread",
 ];
 
 export function extractFeatures(record: StoredContextRecord): RecordFeatures {

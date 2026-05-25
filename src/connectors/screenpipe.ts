@@ -123,6 +123,24 @@ function pickContentType(item: any): string | undefined {
   return item.type ?? c.content_type ?? c.type;
 }
 
+function pickFrameId(item: any): string | number | undefined {
+  const c = item.content ?? item;
+  const value = c.frame_id ?? c.frameId ?? item.frame_id ?? item.frameId;
+  return typeof value === "string" || typeof value === "number" ? value : undefined;
+}
+
+function pickFrameIds(item: any): Array<string | number> | undefined {
+  const c = item.content ?? item;
+  const candidates = [c.frame_ids, c.frameIds, item.frame_ids, item.frameIds];
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue;
+    const ids = candidate.filter((value): value is string | number => typeof value === "string" || typeof value === "number");
+    if (ids.length) return ids;
+  }
+  const single = pickFrameId(item);
+  return single !== undefined ? [single] : undefined;
+}
+
 function makeSourceId(item: any, index: number): string {
   const c = item.content ?? item;
   const id = c.frame_id ?? c.id ?? c.audio_chunk_id ?? c.transcription_id ?? item.id ?? item.frame_id;
@@ -139,6 +157,8 @@ export function normalizeScreenpipeResult(item: any, index: number, screenpipeUr
   const url = pickUrl(item);
   const app = pickApp(item);
   const content_type = pickContentType(item);
+  const frameId = pickFrameId(item);
+  const frameIds = pickFrameIds(item);
   const timestamp = pickTimestamp(item) ?? now;
   const text = pickText(item);
   let domain: string | undefined;
@@ -177,6 +197,8 @@ export function normalizeScreenpipeResult(item: any, index: number, screenpipeUr
       app_name: app,
       window_name: pickWindow(item),
       browser_url: url,
+      frame_id: frameId,
+      frame_ids: frameIds,
       raw_result: item,
       provenance: {
         backend: "screenpipe",
@@ -269,6 +291,8 @@ function normalizeActivitySummary(summary: any, screenpipeUrl: string): StoredCo
     const observed = summary?.time_range?.end ?? summary?.recording?.last_frame_at ?? now;
     const title = [win.app_name, win.window_name].filter(Boolean).join(" - ") || "Screenpipe active window";
     const browserUrl = typeof win.browser_url === "string" && win.browser_url ? win.browser_url : undefined;
+    const frameId = pickFrameId(win);
+    const frameIds = pickFrameIds(win);
     let domain: string | undefined;
     if (browserUrl) {
       try { domain = new URL(browserUrl).hostname; } catch { domain = undefined; }
@@ -293,7 +317,7 @@ function normalizeActivitySummary(summary: any, screenpipeUrl: string): StoredCo
       signal: { importance: Math.min(0.7, Number(win.minutes ?? 0) / 10), confidence: 0.75, status: "inbox" },
       privacy: { level: "private", retention: "normal", allow_embedding: false, allow_llm_summary: false, allow_external_reader: false, allow_external_llm: false },
       memory: { kind: "observation", stability: "session" },
-      payload: { screenpipe_api_url: screenpipeUrl, app_name: win.app_name, window_name: win.window_name, browser_url: browserUrl, minutes: win.minutes, frame_count: win.frame_count, raw_result: win, raw_media_stays_in_screenpipe: true },
+      payload: { screenpipe_api_url: screenpipeUrl, app_name: win.app_name, window_name: win.window_name, browser_url: browserUrl, minutes: win.minutes, frame_count: win.frame_count, frame_id: frameId, frame_ids: frameIds, raw_result: win, raw_media_stays_in_screenpipe: true },
       created_at: now,
       updated_at: now,
     });
@@ -348,6 +372,24 @@ export async function fetchScreenpipeFrameContext(frameId: string | number, opti
     return { ok: true, url: screenpipeUrl, frame_id: frameId, context, record: normalizeScreenpipeFrameContext(context, screenpipeUrl) };
   } catch (error: any) {
     return { ok: false, url: screenpipeUrl, frame_id: frameId, error: error?.message ?? String(error) };
+  }
+}
+
+export async function fetchScreenpipeFrameImage(frameId: string | number, options: { url?: string; api_key?: string } = {}): Promise<{ ok: true; contentType: string; bytes: Uint8Array } | { ok: false; status?: number; error: string }> {
+  const screenpipeUrl = options.url ?? process.env.SCREENPIPE_URL ?? "http://localhost:3030";
+  const apiKey = options.api_key ?? await getScreenpipeApiKey();
+  const headers: Record<string, string> = {};
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  try {
+    const res = await fetch(`${screenpipeUrl}/frames/${encodeURIComponent(String(frameId))}`, { headers });
+    if (!res.ok) return { ok: false, status: res.status, error: await res.text() };
+    return {
+      ok: true,
+      contentType: res.headers.get("content-type") ?? "image/jpeg",
+      bytes: new Uint8Array(await res.arrayBuffer()),
+    };
+  } catch (error: any) {
+    return { ok: false, error: error?.message ?? String(error) };
   }
 }
 
@@ -420,13 +462,18 @@ function normalizeScreenpipeFrameContext(context: any, screenpipeUrl: string): S
   const frameId = context?.frame_id ?? "unknown-frame";
   const text = typeof context?.text === "string" ? context.text.slice(0, 5000) : undefined;
   const urls = Array.isArray(context?.urls) ? context.urls.filter((url: unknown) => typeof url === "string") : [];
+  const primaryUrl = urls[0];
+  let domain: string | undefined;
+  if (primaryUrl) {
+    try { domain = new URL(primaryUrl).hostname; } catch { domain = undefined; }
+  }
   return {
     id: stableRecordId(`frame-context-${frameId}`, now),
     schema: { name: "observation.screenpipe_workspace_signal", version: 1 },
     source: { type: "screenpipe", id: String(frameId), connector: "screenpipe-frame-context" },
-    scope: {},
+    scope: { domain },
     time: { observed_at: now, captured_at: now },
-    content: { title: `Screenpipe frame context ${frameId}`, text, url: urls[0] },
+    content: { title: primaryUrl ? `Screenpipe frame: ${domain ?? primaryUrl}` : `Screenpipe frame context ${frameId}`, text, url: primaryUrl },
     acquisition: { mode: "sync", actor: "connector", reason: "Fetched bounded Screenpipe frame context to resolve active workspace.", query: `frame:${frameId}` },
     signal: { importance: 0.45, confidence: 0.8, status: "inbox" },
     privacy: { level: "private", retention: "normal", allow_embedding: false, allow_llm_summary: false, allow_external_reader: false, allow_external_llm: false },
@@ -438,6 +485,7 @@ function normalizeScreenpipeFrameContext(context: any, screenpipeUrl: string): S
       frame_id: frameId,
       text_source: context?.text_source,
       urls,
+      browser_url: primaryUrl,
       node_count: Array.isArray(context?.nodes) ? context.nodes.length : undefined,
       raw_result: context,
       provenance: { backend: "screenpipe", api_url: screenpipeUrl, source_id: String(frameId), frame_id: frameId, raw_media_stays_in_screenpipe: true },

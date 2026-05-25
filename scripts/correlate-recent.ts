@@ -1,7 +1,8 @@
 import { ContextStore } from "../src/core/store.js";
 import { buildCandidateThreads } from "../src/runtime/correlation.js";
+import { compileWorkThreadView } from "../src/runtime/work-thread-view.js";
 import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "../src/connectors/ai-sessions.js";
-import type { ContextRecord, StoredContextRecord } from "../src/core/types.js";
+import type { StoredContextRecord } from "../src/core/types.js";
 
 const args = new Set(process.argv.slice(2));
 const write = args.has("--write");
@@ -38,41 +39,11 @@ const records = [...baseRecords, ...transientRecords];
 const candidate_threads = buildCandidateThreads(records, { minScore, maxThreads });
 
 const written: string[] = [];
+const written_views: string[] = [];
 if (write) {
   for (const thread of candidate_threads) {
     const evidenceIds = thread.records.map(r => r.id);
-    const record: ContextRecord = {
-      schema: { name: "episode.candidate_thread", version: 1 },
-      source: { type: "correlator", connector: "rules-v1" },
-      scope: {
-        project: thread.projects[0],
-        repo: thread.repos[0],
-        app: thread.apps[0],
-        domain: thread.domains[0],
-      },
-      content: {
-        title: thread.title,
-        text: [
-          `Candidate WorkThread: ${thread.title}`,
-          `confidence: ${thread.confidence}`,
-          `records: ${thread.records.length}`,
-          `keywords: ${thread.keywords.join(", ")}`,
-          `reasons:\n${thread.reasons.map(r => `- ${r}`).join("\n")}`,
-        ].join("\n\n"),
-      },
-      acquisition: {
-        mode: "derived",
-        actor: "system",
-        reason: "Deterministic weak correlation over recent ContextRecords",
-      },
-      signal: { importance: Math.min(0.9, thread.confidence), confidence: thread.confidence, status: "candidate" },
-      privacy: { level: "private", retention: "normal", allow_embedding: false, allow_llm_summary: true, allow_external_llm: false, allow_external_reader: false },
-      relations: { derived_from: evidenceIds },
-      memory: { kind: "episode", stability: "session" },
-      payload: { thread, algorithm: "rules-v1", minScore, limit },
-    };
-    written.push(store.insertRecord(record).id);
-    store.upsertWorkThread({
+    const stored = store.upsertWorkThread({
       id: thread.thread_id,
       title: thread.title,
       status: "candidate",
@@ -86,6 +57,11 @@ if (write) {
       reasons: thread.reasons,
       metadata: { algorithm: "rules-v1", candidate: thread },
     });
+    written.push(stored.id);
+  }
+  if (candidate_threads.length) {
+    const compiled = compileWorkThreadView({ write: true, min_score: minScore, max_threads: maxThreads, limit }, store);
+    written_views.push(compiled.view.id!);
   }
 }
 
@@ -101,4 +77,5 @@ console.log(JSON.stringify({
   diagnostics,
   candidate_threads,
   written,
+  written_views,
 }, null, 2));

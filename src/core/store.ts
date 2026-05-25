@@ -1,8 +1,11 @@
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { ContextArtifact, ContextConnector, ContextPackRequest, ContextQuery, ContextRecord, ContextSchema, ContextView, RuntimeEvent, RuntimeState, StoredContextConnector, StoredContextRecord, StoredContextView, StoredRuntimeEvent, StoredWorkThread, WorkThread } from "./types.js";
+import { activeContextView } from "./view-lifecycle.js";
+import { filterViewsByQuery } from "./view-query.js";
+import { rankViewsForSurfacing, surfacingPreferencesFromMemoryViews } from "./view-surfacing.js";
+import type { ContextArtifact, ContextConnector, ContextPackRequest, ContextQuery, ContextRecord, ContextSchema, ContextView, RuntimeEvent, RuntimeState, StoredContextArtifact, StoredContextConnector, StoredContextRecord, StoredContextSchema, StoredContextView, StoredRuntimeEvent, StoredWorkThread, WorkThread } from "./types.js";
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? {});
@@ -15,6 +18,11 @@ function parseJson<T>(value: string | null | undefined, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function parseJsonStringArray(value: string | null | undefined): string[] {
+  const parsed = parseJson<unknown>(value, []);
+  return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
 }
 
 function likeEscape(value: string): string {
@@ -185,7 +193,20 @@ export class ContextStore {
     }
   }
 
+  withConnectorDefaults(record: ContextRecord): ContextRecord {
+    const connectorId = record.source.connector;
+    if (!connectorId) return record;
+    const connector = this.getConnector(connectorId);
+    if (!connector) return record;
+    return {
+      ...record,
+      scope: { ...connector.default_scope, ...record.scope },
+      privacy: { ...connector.default_privacy, ...record.privacy },
+    };
+  }
+
   insertRecord(record: ContextRecord): StoredContextRecord {
+    record = this.withConnectorDefaults(record);
     const now = new Date().toISOString();
     const id = record.id ?? randomUUID();
     const time = {
@@ -255,7 +276,39 @@ export class ContextStore {
     return normalized;
   }
 
-  insertArtifact(artifact: ContextArtifact): ContextArtifact & { id: string; created_at: string } {
+  insertRecordWithDedupe(record: ContextRecord): { record?: StoredContextRecord; deduped?: boolean; duplicate_of?: string; reason?: string } {
+    const duplicate = this.findRecentDuplicateSnapshot(record);
+    if (duplicate) {
+      return {
+        record: duplicate,
+        deduped: true,
+        duplicate_of: duplicate.id,
+        reason: "duplicate browser snapshot within dedupe window",
+      };
+    }
+    return { record: this.insertRecord(withContentFingerprint(record)), deduped: false };
+  }
+
+  private findRecentDuplicateSnapshot(record: ContextRecord): StoredContextRecord | undefined {
+    if (!isDedupeCandidate(record)) return undefined;
+    const url = record.content?.url;
+    if (!url) return undefined;
+    const fingerprint = contentFingerprint(record.content?.text);
+    if (!fingerprint) return undefined;
+    const windowSeconds = Number(record.payload?.dedupe_window_seconds ?? process.env.CONTEXT_SNAPSHOT_DEDUPE_SECONDS ?? 120);
+    const windowStart = new Date(Date.now() - Math.max(0, windowSeconds) * 1000).toISOString();
+    const rows = this.db.prepare(`
+      select * from context_records
+      where schema_name = ?
+        and url = ?
+        and created_at >= ?
+      order by created_at desc
+      limit 20
+    `).all(record.schema.name, url, windowStart) as any[];
+    return rows.map(rowToRecord).find(existing => existing.payload?.content_fingerprint === fingerprint);
+  }
+
+  insertArtifact(artifact: ContextArtifact): StoredContextArtifact {
     const id = artifact.id ?? randomUUID();
     const created_at = new Date().toISOString();
     this.db.prepare(`
@@ -276,7 +329,20 @@ export class ContextStore {
     return { ...artifact, id, created_at };
   }
 
-  registerSchema(schema: ContextSchema): ContextSchema & { created_at: string } {
+  getArtifact(id: string): StoredContextArtifact | undefined {
+    const row = this.db.prepare(`select * from context_artifacts where id = ?`).get(id) as any;
+    return row ? rowToArtifact(row) : undefined;
+  }
+
+  listArtifacts(options: { record_id?: string; limit?: number } = {}): StoredContextArtifact[] {
+    const limit = options.limit ?? 50;
+    const rows = options.record_id
+      ? this.db.prepare(`select * from context_artifacts where record_id = ? order by created_at desc limit ?`).all(options.record_id, limit) as any[]
+      : this.db.prepare(`select * from context_artifacts order by created_at desc limit ?`).all(limit) as any[];
+    return rows.map(rowToArtifact);
+  }
+
+  registerSchema(schema: ContextSchema): StoredContextSchema {
     const created_at = new Date().toISOString();
     this.db.prepare(`
       insert or replace into context_schemas (
@@ -291,6 +357,24 @@ export class ContextStore {
       created_at,
     );
     return { ...schema, created_at };
+  }
+
+  listSchemas(options: { name?: string; version?: number; limit?: number } = {}): StoredContextSchema[] {
+    const limit = options.limit ?? 100;
+    const clauses: string[] = [];
+    const args: Array<string | number> = [];
+    if (options.name) {
+      clauses.push("name = ?");
+      args.push(options.name);
+    }
+    if (options.version) {
+      clauses.push("version = ?");
+      args.push(options.version);
+    }
+    args.push(limit);
+    const where = clauses.length ? `where ${clauses.join(" and ")}` : "";
+    const rows = this.db.prepare(`select * from context_schemas ${where} order by name asc, version desc limit ?`).all(...args) as any[];
+    return rows.map(rowToSchema);
   }
 
   registerConnector(connector: ContextConnector): StoredContextConnector {
@@ -425,12 +509,31 @@ export class ContextStore {
     return row ? rowToView(row) : undefined;
   }
 
-  listViews(options: { view_types?: string[]; limit?: number; scope?: ContextRecord["scope"]; timeWindow?: ContextPackRequest["time_window"] } = {}): StoredContextView[] {
+  listViews(options: {
+    view_types?: string[];
+    view_type_prefix?: string;
+    limit?: number;
+    scope?: ContextRecord["scope"];
+    timeWindow?: ContextPackRequest["time_window"];
+    active_only?: boolean;
+    status?: ContextView["status"];
+    compiler_id?: string;
+    source_record_id?: string;
+    source_view_id?: string;
+    updated_after?: string;
+  } = {}): StoredContextView[] {
     const limit = options.limit ?? 50;
     const rows = this.db.prepare(`select * from context_views order by updated_at desc limit ?`).all(Math.max(limit * 8, limit)) as any[];
     return rows
       .map(rowToView)
       .filter(view => !options.view_types?.length || options.view_types.includes(view.view_type))
+      .filter(view => !options.view_type_prefix || view.view_type.startsWith(options.view_type_prefix))
+      .filter(view => !options.active_only || activeContextView(view))
+      .filter(view => !options.status || view.status === options.status)
+      .filter(view => !options.compiler_id || view.compiler?.id === options.compiler_id)
+      .filter(view => !options.source_record_id || view.source_records?.includes(options.source_record_id))
+      .filter(view => !options.source_view_id || view.source_views?.includes(options.source_view_id))
+      .filter(view => !options.updated_after || Date.parse(view.updated_at) > Date.parse(options.updated_after))
       .filter(view => scopeMatches({ scope: view.scope } as StoredContextRecord, options.scope))
       .filter(view => viewTimeMatches(view, options.timeWindow))
       .slice(0, limit);
@@ -441,6 +544,7 @@ export class ContextStore {
     const timeWindow = normalizeTimeWindow(query.time_window);
     let records: StoredContextRecord[];
     if (query.mode === "thread" && query.thread_id) records = this.recordsForThread(query.thread_id, limit);
+    else if (query.mode === "source") records = this.recent(limit, query.scope, timeWindow);
     else if (query.query || query.goal) records = this.search(query.query ?? query.goal ?? "", limit, query.scope, timeWindow);
     else records = this.recent(limit, query.scope, timeWindow);
     return records
@@ -620,9 +724,26 @@ export class ContextStore {
     return [...byId.values()].slice(0, limit);
   }
 
+  getRecord(id: string): StoredContextRecord | undefined {
+    const row = this.db.prepare(`select * from context_records where id = ?`).get(id) as any;
+    return row ? rowToRecord(row) : undefined;
+  }
+
   recent(limit = 50, scope?: ContextRecord["scope"], timeWindow?: ContextPackRequest["time_window"]): StoredContextRecord[] {
     const all = this.db.prepare(`select * from context_records order by created_at desc limit ?`).all(Math.max(limit * 8, limit)) as any[];
     return all.map(rowToRecord).filter(r => scopeMatches(r, scope)).filter(r => timeMatches(r, timeWindow)).slice(0, limit);
+  }
+
+  recentBySourceFilter(sourceFilter: "screenpipe" | "browser" | "runtime" | "all", limit = 50, scope?: ContextRecord["scope"], timeWindow?: ContextPackRequest["time_window"]): StoredContextRecord[] {
+    if (sourceFilter === "all") return this.recent(limit, scope, timeWindow);
+    const predicate = sourceFilterPredicate(sourceFilter);
+    const rows = this.db.prepare(`
+      select * from context_records
+      where ${predicate.sql}
+      order by created_at desc
+      limit ?
+    `).all(...predicate.params, Math.max(limit * 8, limit)) as any[];
+    return rows.map(rowToRecord).filter(r => scopeMatches(r, scope)).filter(r => timeMatches(r, timeWindow)).slice(0, limit);
   }
 
   search(query: string, limit = 50, scope?: ContextRecord["scope"], timeWindow?: ContextPackRequest["time_window"]): StoredContextRecord[] {
@@ -648,14 +769,54 @@ export class ContextStore {
   buildPack(req: ContextPackRequest, extraRecords: StoredContextRecord[] = [], diagnostics: Record<string, unknown> = {}) {
     const limit = req.limit ?? 40;
     const timeWindow = normalizeTimeWindow(req.time_window);
-    const recent = this.recent(Math.ceil(limit / 2), req.scope, timeWindow);
-    const relevant = this.search(req.goal, limit, req.scope, timeWindow);
-    const threadRecords = req.thread_id ? this.recordsForThread(req.thread_id, limit) : [];
+    const recent = this.recent(Math.ceil(limit / 2), req.scope, timeWindow).filter(isPackVisibleRecord);
+    const relevant = this.search(req.goal, limit, req.scope, timeWindow).filter(isPackVisibleRecord);
+    const threadRecords = req.thread_id ? this.recordsForThread(req.thread_id, limit).filter(isPackVisibleRecord) : [];
     const byId = new Map<string, StoredContextRecord>();
-    for (const item of [...threadRecords, ...relevant, ...recent, ...extraRecords]) byId.set(item.id, item);
+    for (const item of [...threadRecords, ...relevant, ...recent, ...extraRecords.filter(isPackVisibleRecord)]) byId.set(item.id, item);
+    const surfacingPreferences = surfacingPreferencesFromMemoryViews(filterPackViews(this, this.listViews({ view_types: ["memory.surfacing_preference"], active_only: true, limit: 50 })));
+    const listedViews = filterPackViews(this, this.listViews({
+      view_types: req.view_types,
+      view_type_prefix: req.view_type_prefix,
+      scope: req.scope,
+      timeWindow,
+      active_only: true,
+      limit: Math.max(limit * 3, 20),
+    }));
+    const matchedViews = req.include_views ? filterViewsByQuery(rankViewsForSurfacing(listedViews, surfacingPreferences), req.goal).slice(0, limit) : [];
+    const views = expandSourceViews(this, matchedViews, limit);
+    const provenanceRecordIds = new Set<string>();
+    for (const view of views) {
+      for (const recordId of view.source_records ?? []) {
+        const record = this.getRecord(recordId);
+        if (record) {
+          provenanceRecordIds.add(record.id);
+          byId.set(record.id, record);
+        }
+      }
+    }
     const records = [...byId.values()]
-      .sort((a, b) => Date.parse(b.time?.observed_at ?? b.created_at) - Date.parse(a.time?.observed_at ?? a.created_at))
+      .sort((a, b) => {
+        const provenanceDelta = Number(provenanceRecordIds.has(b.id)) - Number(provenanceRecordIds.has(a.id));
+        if (provenanceDelta) return provenanceDelta;
+        return Date.parse(b.time?.observed_at ?? b.created_at) - Date.parse(a.time?.observed_at ?? a.created_at);
+      })
       .slice(0, limit);
+    const events = req.include_events ? this.listRuntimeEvents({
+      event_types: req.event_types,
+      actor_types: req.actor_types,
+      limit: Math.max(limit * 3, 20),
+      timeWindow,
+    }).filter(event => eventProvenanceValid(this, event)).slice(0, limit) : [];
+    const provenanceRecordIdList = [...provenanceRecordIds];
+    const packDiagnostics = {
+      ...diagnostics,
+      view_count: views.length,
+      event_count: events.length,
+      provenance_record_count: provenanceRecordIdList.length,
+      provenance_record_ids: provenanceRecordIdList,
+      surfacing_preferences: surfacingPreferences,
+    };
     return {
       version: 2,
       goal: req.goal,
@@ -665,19 +826,80 @@ export class ContextStore {
       time_window: timeWindow,
       generated_at: new Date().toISOString(),
       records,
-      diagnostics,
-      markdown: renderContextPack(req.goal, records, req.token_budget ?? 6000, diagnostics, timeWindow),
-      sources: records.map(r => ({
-        id: r.id,
-        schema: r.schema,
-        source: r.source,
-        url: r.content?.url,
-        path: r.content?.path,
-        observed_at: r.time?.observed_at,
-        created_at: r.created_at,
-      })),
+      views,
+      events,
+      diagnostics: packDiagnostics,
+      markdown: renderContextPack(req.goal, records, views, events, req.token_budget ?? 6000, packDiagnostics, timeWindow),
+      sources: [
+        ...records.map(r => ({
+          id: r.id,
+          kind: "record" as const,
+          uri: `context://records/${r.id}`,
+          schema: r.schema,
+          source: r.source,
+          url: r.content?.url,
+          path: r.content?.path,
+          observed_at: r.time?.observed_at,
+          created_at: r.created_at,
+        })),
+        ...views.map(view => ({
+          id: view.id,
+          kind: "view" as const,
+          title: view.title,
+          uri: `context://views/${view.id}`,
+          created_at: view.created_at,
+        })),
+        ...events.map(event => ({
+          id: event.id,
+          kind: "event" as const,
+          title: event.event_type,
+          uri: `context://events/${event.id}`,
+          created_at: event.created_at,
+        })),
+      ],
     };
   }
+}
+
+
+function isPackVisibleRecord(record: StoredContextRecord): boolean {
+  return /^(observation|feedback)(\.|$)/.test(record.schema.name);
+}
+
+function filterPackViews(store: ContextStore, views: StoredContextView[]): StoredContextView[] {
+  return views.filter(view => activeContextView(view) && viewProvenanceValid(store, view));
+}
+
+function viewProvenanceValid(store: ContextStore, view: StoredContextView): boolean {
+  for (const id of view.source_records ?? []) {
+    const record = store.getRecord(id);
+    if (!record || !isPackVisibleRecord(record) || !scopeCompatible(view.scope, record.scope)) return false;
+  }
+  for (const id of view.source_views ?? []) {
+    const sourceView = store.getView(id);
+    if (!sourceView || !activeContextView(sourceView) || !scopeCompatible(view.scope, sourceView.scope)) return false;
+  }
+  return true;
+}
+
+function eventProvenanceValid(store: ContextStore, event: StoredRuntimeEvent): boolean {
+  for (const id of event.related_records ?? []) {
+    const record = store.getRecord(id);
+    if (!record || !isPackVisibleRecord(record)) return false;
+  }
+  for (const id of event.related_views ?? []) {
+    const view = store.getView(id);
+    if (!view || !viewProvenanceValid(store, view)) return false;
+  }
+  return true;
+}
+
+function scopeCompatible(target?: ContextRecord["scope"], source?: ContextRecord["scope"]): boolean {
+  if (!target || !source) return true;
+  for (const key of ["project", "project_path", "repo", "domain", "app", "session"] as const) {
+    if (target[key] && source[key] && target[key] !== source[key]) return false;
+  }
+  return true;
 }
 
 function normalizeTimeWindow(timeWindow?: ContextPackRequest["time_window"]): ContextPackRequest["time_window"] | undefined {
@@ -685,6 +907,14 @@ function normalizeTimeWindow(timeWindow?: ContextPackRequest["time_window"]): Co
   const end = timeWindow.end_time ?? new Date().toISOString();
   const start = timeWindow.start_time ?? (timeWindow.minutes ? new Date(Date.parse(end) - timeWindow.minutes * 60_000).toISOString() : undefined);
   return { start_time: start, end_time: end, minutes: timeWindow.minutes };
+}
+
+function sourceFilterPredicate(sourceFilter: "screenpipe" | "browser" | "runtime"): { sql: string; params: string[] } {
+  const like = `%${sourceFilter}%`;
+  return {
+    sql: "(source_type = ? or connector like ? or schema_name like ?)",
+    params: [sourceFilter, like, like],
+  };
 }
 
 function timeMatches(record: StoredContextRecord, timeWindow?: ContextPackRequest["time_window"]): boolean {
@@ -699,10 +929,59 @@ function timeMatches(record: StoredContextRecord, timeWindow?: ContextPackReques
 
 function scopeMatches(record: StoredContextRecord, scope?: ContextRecord["scope"]): boolean {
   if (!scope) return true;
-  for (const key of ["project", "repo", "app", "domain", "session"] as const) {
+  for (const key of ["project", "project_path", "app", "session"] as const) {
     if (scope[key] && record.scope?.[key] !== scope[key]) return false;
   }
+  if (scope.domain && record.scope?.domain !== scope.domain && !(scope.project_path && !record.scope?.domain)) return false;
+  if (scope.repo && record.scope?.repo !== scope.repo && !(scope.project_path && !record.scope?.repo)) return false;
   return true;
+}
+
+function isDedupeCandidate(record: ContextRecord): boolean {
+  if (record.schema.name !== "observation.browser_page_snapshot") return false;
+  if (record.acquisition?.mode === "manual") return false;
+  if (record.payload?.dedupe === false) return false;
+  if (record.payload?.selected_text_length && Number(record.payload.selected_text_length) > 0) return false;
+  return true;
+}
+
+function withContentFingerprint(record: ContextRecord): ContextRecord {
+  if (!isDedupeCandidate(record)) return record;
+  const fingerprint = contentFingerprint(record.content?.text);
+  if (!fingerprint) return record;
+  return {
+    ...record,
+    payload: {
+      ...(record.payload ?? {}),
+      content_fingerprint: fingerprint,
+      content_text_length: normalizeTextForHash(record.content?.text).length,
+    },
+  };
+}
+
+function contentFingerprint(text?: string): string | undefined {
+  const normalized = normalizeTextForHash(text);
+  if (!normalized) return undefined;
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
+function normalizeTextForHash(text?: string): string {
+  return String(text ?? "").replace(/\s+/g, " ").trim();
+}
+
+
+function expandSourceViews(store: ContextStore, views: StoredContextView[], limit: number): StoredContextView[] {
+  const byId = new Map<string, StoredContextView>();
+  const visit = (view: StoredContextView, depth: number) => {
+    if (byId.has(view.id) || byId.size >= limit || depth > 3) return;
+    byId.set(view.id, view);
+    for (const sourceViewId of view.source_views ?? []) {
+      const sourceView = store.getView(sourceViewId);
+      if (sourceView && activeContextView(sourceView) && viewProvenanceValid(store, sourceView)) visit(sourceView, depth + 1);
+    }
+  };
+  for (const view of views) visit(view, 0);
+  return [...byId.values()].slice(0, limit);
 }
 
 function rowToRecord(row: any): StoredContextRecord {
@@ -727,6 +1006,31 @@ function rowToRecord(row: any): StoredContextRecord {
     payload: parseJson(row.payload_json, {}),
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function rowToArtifact(row: any): StoredContextArtifact {
+  return {
+    id: row.id,
+    record_id: row.record_id,
+    kind: row.kind,
+    mime_type: row.mime_type ?? undefined,
+    uri: row.uri,
+    sha256: row.sha256 ?? undefined,
+    size_bytes: row.size_bytes ?? undefined,
+    metadata: parseJson(row.metadata_json, {}),
+    created_at: row.created_at,
+  };
+}
+
+function rowToSchema(row: any): StoredContextSchema {
+  return {
+    name: row.name,
+    version: row.version,
+    description: row.description ?? undefined,
+    json_schema: parseJson(row.json_schema, {}),
+    example: parseJson(row.example_json, {}),
+    created_at: row.created_at,
   };
 }
 
@@ -774,8 +1078,8 @@ function rowToView(row: any): StoredContextView {
     title: row.title ?? undefined,
     summary: row.summary ?? undefined,
     status: row.status ?? undefined,
-    source_records: parseJson(row.source_records_json, []),
-    source_views: parseJson(row.source_views_json, []),
+    source_records: parseJsonStringArray(row.source_records_json),
+    source_views: parseJsonStringArray(row.source_views_json),
     compiler: parseJson(row.compiler_json, undefined),
     purpose: row.purpose ?? undefined,
     scope: parseJson(row.scope_json, {}),
@@ -812,9 +1116,9 @@ function rowToRuntimeEvent(row: any): StoredRuntimeEvent {
     subject_type: row.subject_type ?? undefined,
     subject_id: row.subject_id ?? undefined,
     plugin_id: row.plugin_id ?? undefined,
-    related_records: parseJson(row.related_records_json, []),
-    related_views: parseJson(row.related_views_json, []),
-    related_threads: parseJson(row.related_threads_json, []),
+    related_records: parseJsonStringArray(row.related_records_json),
+    related_views: parseJsonStringArray(row.related_views_json),
+    related_threads: parseJsonStringArray(row.related_threads_json),
     payload: parseJson(row.payload_json, {}),
     created_at: row.created_at,
   };
@@ -828,7 +1132,7 @@ function rowToRuntimeState(row: any): RuntimeState {
   };
 }
 
-function renderContextPack(goal: string, records: StoredContextRecord[], tokenBudget: number, diagnostics: Record<string, unknown> = {}, timeWindow?: ContextPackRequest["time_window"]): string {
+function renderContextPack(goal: string, records: StoredContextRecord[], views: StoredContextView[] = [], events: StoredRuntimeEvent[] = [], tokenBudget: number, diagnostics: Record<string, unknown> = {}, timeWindow?: ContextPackRequest["time_window"]): string {
   const approxChars = Math.max(1000, tokenBudget * 4);
   const parts: string[] = [
     `# Context Pack`,
@@ -856,6 +1160,41 @@ function renderContextPack(goal: string, records: StoredContextRecord[], tokenBu
       clipped ? `\n${clipped}` : "",
     );
     if (parts.join("\n").length > approxChars) break;
+  }
+
+  if (views.length) {
+    parts.push(``, `## Derived Views`);
+    for (const view of views) {
+      const text = `${view.summary ?? ""}\n${JSON.stringify(view.content ?? {})}`.replace(/\s+/g, " ").trim();
+      const clipped = text.length > 900 ? `${text.slice(0, 900)}…` : text;
+      parts.push(
+        ``,
+        `### ${view.title ?? view.view_type}`,
+        `- id: ${view.id}`,
+        `- view_type: ${view.view_type}`,
+        view.status ? `- status: ${view.status}` : "",
+        `- time: ${view.updated_at}`,
+        clipped ? `\n${clipped}` : "",
+      );
+      if (parts.join("\n").length > approxChars) break;
+    }
+  }
+
+  if (events.length) {
+    parts.push(``, `## Runtime Events`);
+    for (const event of events) {
+      parts.push(
+        ``,
+        `### ${event.event_type}`,
+        `- id: ${event.id}`,
+        `- actor: ${event.actor}`,
+        event.status ? `- status: ${event.status}` : "",
+        event.subject_type || event.subject_id ? `- subject: ${event.subject_type ?? "unknown"}/${event.subject_id ?? "unknown"}` : "",
+        `- time: ${event.created_at}`,
+        Object.keys(event.payload ?? {}).length ? `\n${JSON.stringify(event.payload)}` : "",
+      );
+      if (parts.join("\n").length > approxChars) break;
+    }
   }
 
   return parts.filter(Boolean).join("\n");

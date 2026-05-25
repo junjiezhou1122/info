@@ -8,6 +8,7 @@ const ScopeSchema = z.object({
   session: z.string().optional(),
   domain: z.string().optional(),
   project_path: z.string().optional(),
+  plugin_id: z.string().optional(),
 });
 
 const PrivacySchema = z.object({
@@ -18,6 +19,10 @@ const PrivacySchema = z.object({
   allow_external_reader: z.boolean().optional(),
   retention: z.enum(["ephemeral", "normal", "archive", "do_not_store"]).optional(),
 });
+
+const ViewTypeSchema = z.string()
+  .regex(/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$/, "invalid View type")
+  .refine(value => !/^(observation|feedback|episode|derived)(\.|$)/.test(value), "View type must not use record-like prefix");
 
 export const ContextRecordSchema = z.object({
   id: z.string().optional(),
@@ -151,7 +156,7 @@ export const RuntimeEventSchema = z.object({
 
 export const ContextViewSchema = z.object({
   id: z.string().optional(),
-  view_type: z.string().min(1),
+  view_type: ViewTypeSchema,
   title: z.string().optional(),
   summary: z.string().optional(),
   status: z.enum(["candidate", "accepted", "archived", "rejected"]).optional(),
@@ -190,6 +195,7 @@ export const ContextQuerySchema = z.object({
   schemas: z.array(z.string()).optional(),
   sources: z.array(z.string()).optional(),
   view_types: z.array(z.string()).optional(),
+  view_type_prefix: z.string().optional(),
   include_views: z.boolean().optional(),
   include_records: z.boolean().optional(),
   include_events: z.boolean().optional(),
@@ -204,8 +210,21 @@ export const ContextQuerySchema = z.object({
   token_budget: z.number().int().positive().optional(),
 });
 
+export const FeedbackInputSchema = z.object({
+  plugin_id: z.string().optional(),
+  type: z.string().min(1),
+  application_id: z.string().min(1),
+  view_id: z.string().optional(),
+  record_id: z.string().optional(),
+  value: z.unknown().optional(),
+  reason: z.string().optional(),
+  payload: z.record(z.unknown()).optional(),
+  privacy: PrivacySchema.optional(),
+});
+
 export const ContextPackRequestSchema = z.object({
   goal: z.string().min(1),
+  plugin_id: z.string().optional(),
   scope: ScopeSchema.optional(),
   thread_id: z.string().optional(),
   limit: z.number().int().positive().optional(),
@@ -235,4 +254,11 @@ export const ContextPackRequestSchema = z.object({
     window_name: z.string().optional(),
     browser_url: z.string().optional(),
   }).optional(),
+  include_views: z.boolean().optional(),
+  allow_external_llm: z.boolean().optional(),
+  view_types: z.array(z.string()).optional(),
+  view_type_prefix: z.string().optional(),
+  include_events: z.boolean().optional(),
+  event_types: z.array(z.string()).optional(),
+  actor_types: z.array(z.enum(["user", "system", "connector", "plugin", "agent"])).optional(),
 });
