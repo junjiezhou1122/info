@@ -155,12 +155,13 @@ function App() {
 }
 
 function ViewGraph({ families }: { families: ViewFamilySummary[] }) {
-  const shown = families.filter(family => family.count > 0 || ["evidence", "activity", "proposal", "memory"].includes(family.family));
+  const canonical = ["evidence", "activity", "proposal", "resource", "intent", "workflow", "memory"];
+  const shown = families.filter(family => family.count > 0 || canonical.includes(family.family));
   return (
     <section className="view-graph" aria-label="Memory view graph">
       <div className="view-graph-head">
         <span>Memory Views</span>
-        <b>Observation → EvidenceView → ActivityView → ProposalView → MemoryView</b>
+        <b>Observation → EvidenceView → ActivityView → ProposalView → Resource/Intent/Workflow → MemoryView</b>
       </div>
       <div className="view-family-list">
         {shown.map(family => <ViewFamily key={family.family} family={family} />)}

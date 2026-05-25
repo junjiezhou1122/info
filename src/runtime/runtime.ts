@@ -13,7 +13,7 @@ import { compileWorkThreadView } from "./work-thread-view.js";
 import { compileActivityTimeline } from "./activity-timeline.js";
 import { compileProjectTimeline } from "./project-timeline.js";
 import { compileEvidenceViews } from "./evidence-view.js";
-import { compileActivityViews, compileProposalViews } from "./memory-views.js";
+import { compileActivityViews, compileIntentViews, compileMemoryViews, compileProposalViews, compileResourceViews, compileWorkflowViews } from "./memory-views.js";
 
 export type RuntimeTickRequest = {
   window_minutes?: number;
@@ -428,6 +428,31 @@ function compileRuntimeViews(input: {
       activityViews: activities.views,
     }, input.store);
     out.push({ view_type: "proposal", view_count: proposals.views.length, title: "Proposal Views" });
+
+    const resources = compileResourceViews({
+      write: input.write,
+      proposalViews: proposals.views,
+    }, input.store);
+    out.push({ view_type: "resource", view_count: resources.views.length, title: "Resource Views" });
+
+    const intents = compileIntentViews({
+      write: input.write,
+      proposalViews: proposals.views,
+    }, input.store);
+    out.push({ view_type: "intent", view_count: intents.views.length, title: "Intent Views" });
+
+    const workflows = compileWorkflowViews({
+      write: input.write,
+      intentViews: intents.views,
+      resourceViews: resources.views,
+    }, input.store);
+    out.push({ view_type: "workflow", view_count: workflows.views.length, title: "Workflow Views" });
+
+    const memories = compileMemoryViews({
+      write: input.write,
+      workflowViews: workflows.views,
+    }, input.store);
+    out.push({ view_type: "memory", view_count: memories.views.length, title: "Memory Views" });
   } catch (error) {
     out.push({ view_type: "evidence", skipped: error instanceof Error ? error.message : String(error) });
   }

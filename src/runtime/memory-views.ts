@@ -4,6 +4,9 @@ import type { ContextView, StoredContextView } from "../core/types.js";
 
 export const ACTIVITY_VIEW_COMPILER_ID = "builtin.activity-view";
 export const PROPOSAL_VIEW_COMPILER_ID = "builtin.proposal-view";
+export const RESOURCE_VIEW_COMPILER_ID = "builtin.resource-view";
+export const INTENT_VIEW_COMPILER_ID = "builtin.intent-view";
+export const WORKFLOW_VIEW_COMPILER_ID = "builtin.workflow-view";
 export const MEMORY_VIEW_COMPILER_ID = "builtin.memory-view";
 
 export type CompileActivityViewsOptions = {
@@ -18,6 +21,32 @@ export type CompileProposalViewsOptions = {
   limit?: number;
   write?: boolean;
   activityViews?: Array<ContextView | StoredContextView>;
+};
+
+export type CompileResourceViewsOptions = {
+  limit?: number;
+  write?: boolean;
+  proposalViews?: Array<ContextView | StoredContextView>;
+};
+
+export type CompileIntentViewsOptions = {
+  limit?: number;
+  write?: boolean;
+  proposalViews?: Array<ContextView | StoredContextView>;
+};
+
+export type CompileWorkflowViewsOptions = {
+  limit?: number;
+  write?: boolean;
+  intentViews?: Array<ContextView | StoredContextView>;
+  resourceViews?: Array<ContextView | StoredContextView>;
+};
+
+export type CompileMemoryViewsOptions = {
+  limit?: number;
+  write?: boolean;
+  workflowViews?: Array<ContextView | StoredContextView>;
+  minOccurrences?: number;
 };
 
 export type CompileViewResult = {
@@ -109,6 +138,108 @@ export function compileProposalViews(options: CompileProposalViewsOptions = {}, 
   };
 }
 
+export function compileResourceViews(options: CompileResourceViewsOptions = {}, store = new ContextStore()): CompileViewResult {
+  const generatedAt = new Date().toISOString();
+  const limit = options.limit ?? 100;
+  const proposalViews = (options.proposalViews ?? store.listViews({
+    view_types: ["proposal"],
+    active_only: true,
+    limit,
+  }))
+    .filter(view => view.view_type === "proposal")
+    .slice(0, limit);
+  const views = proposalViews.flatMap(proposal => buildResourceViewsFromProposal(proposal, generatedAt, store));
+  const stored = (options.write ?? true) ? views.map(view => store.upsertView(view)) : views;
+
+  if (options.write ?? true) appendCompileEvent(store, RESOURCE_VIEW_COMPILER_ID, "resource", stored, { proposal_views_used: proposalViews.length, views_compiled: stored.length });
+
+  return {
+    ok: true,
+    compiler_id: RESOURCE_VIEW_COMPILER_ID,
+    generated_at: generatedAt,
+    views: stored,
+    source_views_used: proposalViews.length,
+  };
+}
+
+export function compileIntentViews(options: CompileIntentViewsOptions = {}, store = new ContextStore()): CompileViewResult {
+  const generatedAt = new Date().toISOString();
+  const limit = options.limit ?? 100;
+  const proposalViews = (options.proposalViews ?? store.listViews({
+    view_types: ["proposal"],
+    active_only: true,
+    limit,
+  }))
+    .filter(view => view.view_type === "proposal")
+    .slice(0, limit);
+  const views = proposalViews.flatMap(proposal => buildIntentViewsFromProposal(proposal, generatedAt, store));
+  const stored = (options.write ?? true) ? views.map(view => store.upsertView(view)) : views;
+
+  if (options.write ?? true) appendCompileEvent(store, INTENT_VIEW_COMPILER_ID, "intent", stored, { proposal_views_used: proposalViews.length, views_compiled: stored.length });
+
+  return {
+    ok: true,
+    compiler_id: INTENT_VIEW_COMPILER_ID,
+    generated_at: generatedAt,
+    views: stored,
+    source_views_used: proposalViews.length,
+  };
+}
+
+export function compileWorkflowViews(options: CompileWorkflowViewsOptions = {}, store = new ContextStore()): CompileViewResult {
+  const generatedAt = new Date().toISOString();
+  const limit = options.limit ?? 100;
+  const intentViews = (options.intentViews ?? store.listViews({
+    view_types: ["intent"],
+    active_only: true,
+    limit,
+  }))
+    .filter(view => view.view_type === "intent")
+    .slice(0, limit);
+  const resourceViews = (options.resourceViews ?? store.listViews({
+    view_types: ["resource"],
+    active_only: true,
+    limit: Math.max(limit * 2, limit + 20),
+  })).filter(view => view.view_type === "resource");
+  const views = intentViews.flatMap(intent => buildWorkflowViewsFromIntent(intent, resourceViews, generatedAt, store));
+  const stored = (options.write ?? true) ? views.map(view => store.upsertView(view)) : views;
+
+  if (options.write ?? true) appendCompileEvent(store, WORKFLOW_VIEW_COMPILER_ID, "workflow", stored, { intent_views_used: intentViews.length, resource_views_used: resourceViews.length, views_compiled: stored.length });
+
+  return {
+    ok: true,
+    compiler_id: WORKFLOW_VIEW_COMPILER_ID,
+    generated_at: generatedAt,
+    views: stored,
+    source_views_used: intentViews.length + resourceViews.length,
+  };
+}
+
+export function compileMemoryViews(options: CompileMemoryViewsOptions = {}, store = new ContextStore()): CompileViewResult {
+  const generatedAt = new Date().toISOString();
+  const limit = options.limit ?? 100;
+  const minOccurrences = options.minOccurrences ?? 2;
+  const workflowViews = (options.workflowViews ?? store.listViews({
+    view_types: ["workflow"],
+    active_only: true,
+    limit,
+  }))
+    .filter(view => view.view_type === "workflow")
+    .slice(0, limit);
+  const views = buildMemoryViewsFromWorkflows(workflowViews, generatedAt, minOccurrences);
+  const stored = (options.write ?? true) ? views.map(view => store.upsertView(view)) : views;
+
+  if (options.write ?? true) appendCompileEvent(store, MEMORY_VIEW_COMPILER_ID, "memory", stored, { workflow_views_used: workflowViews.length, min_occurrences: minOccurrences, views_compiled: stored.length });
+
+  return {
+    ok: true,
+    compiler_id: MEMORY_VIEW_COMPILER_ID,
+    generated_at: generatedAt,
+    views: stored,
+    source_views_used: workflowViews.length,
+  };
+}
+
 export function buildMemoryView(input: {
   id?: string;
   title: string;
@@ -139,6 +270,240 @@ export function buildMemoryView(input: {
     stability: input.stability ?? "project",
     lossiness: "high",
     privacy: { level: "private", retention: "normal", allow_embedding: true, allow_llm_summary: true, allow_external_llm: false },
+  };
+}
+
+function buildResourceViewsFromProposal(proposal: ContextView | StoredContextView, generatedAt: string, store: ContextStore): ContextView[] {
+  const activity = sourceActivityOf(proposal, store);
+  if (!activity) return [];
+  const proposals = proposedViewsOf(proposal)
+    .filter(item => stringValue(item.view_type) === "resource")
+    .filter(item => stringValue(item.decision) === "materialize_now");
+  return proposals.map(item => buildResourceView(proposal, activity, item, generatedAt)).filter((view): view is ContextView => Boolean(view));
+}
+
+function buildResourceView(proposal: ContextView | StoredContextView, activity: ContextView | StoredContextView, item: Record<string, unknown>, generatedAt: string): ContextView | undefined {
+  const resource = isRecord(activity.content?.resource) ? activity.content.resource : undefined;
+  const url = stringValue(resource?.url);
+  if (!url) return undefined;
+  const title = stringValue(resource?.title) ?? activity.title ?? url;
+  const domain = stringValue(resource?.domain) ?? stringValue(activity.content?.domain);
+  const kind = stringValue(item.kind) ?? (learningDomain(domain) ? "learning_material" : "web_resource");
+  const start = stringValue(activity.content?.start) ?? activity.scope?.time_range?.start;
+  const end = stringValue(activity.content?.end) ?? activity.scope?.time_range?.end;
+  const sourceViews = unique([proposal.id, activity.id].filter(isString));
+
+  return {
+    id: `resource:${kind}:${stableKey(`${url}|${activity.id ?? ""}|${proposal.id ?? ""}`)}`,
+    view_type: "resource",
+    title,
+    summary: `ResourceView(${kind}) from ActivityView ${activity.id}.`,
+    status: "candidate",
+    source_records: activity.source_records ?? proposal.source_records ?? [],
+    source_views: sourceViews,
+    compiler: { id: RESOURCE_VIEW_COMPILER_ID, version: "1", mode: "deterministic" },
+    purpose: "Materialize a reusable resource node from observed activity.",
+    scope: {
+      ...activity.scope,
+      domain,
+      plugin_id: RESOURCE_VIEW_COMPILER_ID,
+      time_range: { start, end },
+    },
+    content: {
+      kind,
+      resource: {
+        type: stringValue(resource?.type) ?? "url",
+        url,
+        title,
+        domain,
+      },
+      observed_activity: {
+        start,
+        end,
+        duration_minutes: numberValue(activity.content?.duration_minutes),
+        action: stringValue(activity.content?.action),
+      },
+      evidence_summary: isRecord(activity.content?.evidence_summary) ? activity.content.evidence_summary : undefined,
+      use_cases: ["future_retrieval", "answer_questions", "workflow_context"],
+      proposal: {
+        decision: stringValue(item.decision),
+        reason: stringValue(item.reason),
+        priority: numberValue(item.priority),
+      },
+    },
+    confidence: Math.min(0.96, average([numberValue(item.confidence) ?? 0.7, activity.confidence ?? 0.7])),
+    stability: "project",
+    lossiness: "low",
+    privacy: activity.privacy ?? proposal.privacy ?? { level: "private", retention: "normal", allow_external_llm: false },
+    metadata: { generated_at: generatedAt, proposal_view_id: proposal.id, activity_view_id: activity.id },
+  };
+}
+
+function buildIntentViewsFromProposal(proposal: ContextView | StoredContextView, generatedAt: string, store: ContextStore): ContextView[] {
+  const activity = sourceActivityOf(proposal, store);
+  if (!activity) return [];
+  const proposals = proposedViewsOf(proposal)
+    .filter(item => stringValue(item.view_type) === "intent")
+    .filter(item => ["materialize_now", "defer_or_agent"].includes(stringValue(item.decision) ?? ""));
+  return proposals.map(item => buildIntentView(proposal, activity, item, generatedAt)).filter((view): view is ContextView => Boolean(view));
+}
+
+function buildIntentView(proposal: ContextView | StoredContextView, activity: ContextView | StoredContextView, item: Record<string, unknown>, generatedAt: string): ContextView | undefined {
+  const activityKind = stringValue(activity.content?.kind);
+  const duration = numberValue(activity.content?.duration_minutes) ?? 0;
+  const resource = isRecord(activity.content?.resource) ? activity.content.resource : undefined;
+  const title = stringValue(resource?.title) ?? activity.title ?? "Activity";
+  const domain = stringValue(resource?.domain) ?? stringValue(activity.content?.domain);
+  const hypothesis = intentHypothesis(activity, domain, title);
+  const start = stringValue(activity.content?.start) ?? activity.scope?.time_range?.start;
+  const end = stringValue(activity.content?.end) ?? activity.scope?.time_range?.end;
+  const workflowKind = learningDomain(domain) ? "learning_session" : activityKind === "coding" ? "coding_session" : "research_session";
+
+  return {
+    id: `intent:candidate:${stableKey(`${activity.id ?? ""}|${hypothesis}|${proposal.id ?? ""}`)}`,
+    view_type: "intent",
+    title: `Possible intent: ${title}`,
+    summary: hypothesis,
+    status: "candidate",
+    source_records: activity.source_records ?? proposal.source_records ?? [],
+    source_views: unique([proposal.id, activity.id].filter(isString)),
+    compiler: { id: INTENT_VIEW_COMPILER_ID, version: "1", mode: "hybrid" },
+    purpose: "Represent a hypothesis about the user's goal without mutating the observed evidence.",
+    scope: {
+      ...activity.scope,
+      domain,
+      plugin_id: INTENT_VIEW_COMPILER_ID,
+      time_range: { start, end },
+    },
+    content: {
+      kind: stringValue(item.kind) ?? "candidate",
+      hypothesis,
+      supporting_signals: supportingSignalsForIntent(activity, title, duration, domain),
+      counter_signals: [
+        "No explicit user confirmation was captured.",
+        "Intent is inferred from activity and may be wrong.",
+      ],
+      suggested_workflow_kind: workflowKind,
+      proposed_by: proposal.id,
+    },
+    confidence: Math.min(0.9, average([numberValue(item.confidence) ?? 0.55, activity.confidence ?? 0.65])),
+    stability: "session",
+    lossiness: "high",
+    privacy: activity.privacy ?? proposal.privacy ?? { level: "private", retention: "normal", allow_external_llm: false },
+    metadata: { generated_at: generatedAt, proposal_view_id: proposal.id, activity_view_id: activity.id },
+  };
+}
+
+function buildWorkflowViewsFromIntent(intent: ContextView | StoredContextView, resourceViews: Array<ContextView | StoredContextView>, generatedAt: string, store: ContextStore): ContextView[] {
+  const activity = sourceActivityOf(intent, store);
+  if (!activity) return [];
+  const activityIds = activityViewIdsOf(intent);
+  const resources = resourceViews.filter(view => activityIds.some(id => view.source_views?.includes(id)));
+  const workflow = buildWorkflowView(intent, activity, resources, generatedAt);
+  return workflow ? [workflow] : [];
+}
+
+function buildWorkflowView(intent: ContextView | StoredContextView, activity: ContextView | StoredContextView, resources: Array<ContextView | StoredContextView>, generatedAt: string): ContextView | undefined {
+  const kind = stringValue(intent.content?.suggested_workflow_kind) ?? "research_session";
+  const start = stringValue(activity.content?.start) ?? activity.scope?.time_range?.start;
+  const end = stringValue(activity.content?.end) ?? activity.scope?.time_range?.end;
+  const topicCandidates = topicCandidatesForWorkflow(intent, activity, resources);
+  const title = workflowTitle(kind, topicCandidates, activity);
+  const sourceViews = unique([intent.id, ...resources.map(view => view.id), activity.id].filter(isString));
+
+  return {
+    id: `workflow:${kind}:${stableKey(`${sourceViews.join("|")}|${start ?? ""}|${end ?? ""}`)}`,
+    view_type: "workflow",
+    title,
+    summary: `${title} composed from IntentView, ResourceView, and ActivityView nodes.`,
+    status: "candidate",
+    source_records: unique([...(activity.source_records ?? []), ...(intent.source_records ?? []), ...resources.flatMap(view => view.source_records ?? [])]),
+    source_views: sourceViews,
+    compiler: { id: WORKFLOW_VIEW_COMPILER_ID, version: "1", mode: "hybrid" },
+    purpose: "Compose activity and intent into a reusable task/session structure.",
+    scope: {
+      ...activity.scope,
+      plugin_id: WORKFLOW_VIEW_COMPILER_ID,
+      time_range: { start, end },
+    },
+    content: {
+      kind,
+      phases: phasesForWorkflow(activity, resources),
+      topic_candidates: topicCandidates,
+      open_questions: openQuestionsForWorkflow(kind, intent),
+      activity: {
+        kind: stringValue(activity.content?.kind),
+        start,
+        end,
+        duration_minutes: numberValue(activity.content?.duration_minutes),
+        action: stringValue(activity.content?.action),
+      },
+      resources: resources.map(view => view.content?.resource).filter(isRecord),
+      intent: {
+        hypothesis: stringValue(intent.content?.hypothesis),
+        confidence: intent.confidence,
+      },
+    },
+    confidence: Math.min(0.9, average([intent.confidence ?? 0.6, activity.confidence ?? 0.65, ...resources.map(view => view.confidence ?? 0.7)])),
+    stability: "project",
+    lossiness: "high",
+    privacy: activity.privacy ?? intent.privacy ?? { level: "private", retention: "normal", allow_external_llm: false },
+    metadata: { generated_at: generatedAt, intent_view_id: intent.id, resource_view_ids: resources.map(view => view.id).filter(isString) },
+  };
+}
+
+function buildMemoryViewsFromWorkflows(workflowViews: Array<ContextView | StoredContextView>, generatedAt: string, minOccurrences: number): ContextView[] {
+  const learning = workflowViews.filter(view => stringValue(view.content?.kind) === "learning_session");
+  const groups = new Map<string, Array<ContextView | StoredContextView>>();
+  for (const view of learning) {
+    for (const topic of topicCandidatesOf(view)) {
+      const key = normalizedTopic(topic);
+      if (!key) continue;
+      groups.set(key, [...(groups.get(key) ?? []), view]);
+      break;
+    }
+  }
+
+  const views: ContextView[] = [];
+  for (const [topic, group] of groups) {
+    const uniqueGroup = uniqueById(group);
+    if (uniqueGroup.length < minOccurrences) continue;
+    views.push(buildRepeatedLearningMemory(topic, uniqueGroup, generatedAt));
+  }
+  return views;
+}
+
+function buildRepeatedLearningMemory(topic: string, workflows: Array<ContextView | StoredContextView>, generatedAt: string): ContextView {
+  const sourceViews = workflows.map(view => view.id).filter(isString);
+  const displayTopic = bestTopicLabel(topic, workflows);
+  return {
+    id: `memory:learning_interest:${stableKey(`${topic}|${sourceViews.join("|")}`)}`,
+    view_type: "memory",
+    title: `Learning interest: ${displayTopic}`,
+    summary: `Repeated WorkflowViews suggest an active learning interest in ${displayTopic}.`,
+    status: "candidate",
+    source_records: unique(workflows.flatMap(view => view.source_records ?? [])),
+    source_views: sourceViews,
+    compiler: { id: MEMORY_VIEW_COMPILER_ID, version: "1", mode: "hybrid" },
+    purpose: "Store durable behavior-changing learning interests only after repeated workflow evidence.",
+    content: {
+      kind: "learning_interest",
+      claim: `The user repeatedly spends focused sessions on ${displayTopic}.`,
+      applies_to: ["learning", "retrieval", "agent_context"],
+      future_use: [
+        `Surface related ${displayTopic} resources when answering memory/workflow questions.`,
+        "Prefer higher-level WorkflowViews over raw OCR when summarizing this topic.",
+      ],
+      evidence: {
+        workflow_count: workflows.length,
+        workflow_titles: workflows.map(view => view.title).filter(isString),
+      },
+    },
+    confidence: Math.min(0.9, average(workflows.map(view => view.confidence ?? 0.7)) + 0.08),
+    stability: "long_term",
+    lossiness: "high",
+    privacy: { level: "private", retention: "archive", allow_embedding: true, allow_llm_summary: true, allow_external_llm: false },
+    metadata: { generated_at: generatedAt, promotion_rule: "repeated_workflow_topic", occurrence_count: workflows.length },
   };
 }
 
@@ -313,6 +678,18 @@ function buildProposalView(activity: ContextView | StoredContextView, generatedA
   };
 }
 
+function appendCompileEvent(store: ContextStore, compilerId: string, viewType: string, views: Array<ContextView | StoredContextView>, payload: Record<string, unknown>) {
+  store.appendRuntimeEvent({
+    event_type: "view_compiled",
+    actor: "system",
+    status: "completed",
+    subject_type: "view",
+    plugin_id: compilerId,
+    related_views: views.map(view => view.id).filter(Boolean) as string[],
+    payload: { view_type: viewType, ...payload },
+  });
+}
+
 function activityGroupKey(view: ContextView | StoredContextView): string | undefined {
   const kind = stringValue(view.content?.kind);
   const subject = subjectOf(view);
@@ -421,6 +798,108 @@ function subjectOf(view: ContextView | StoredContextView): Record<string, string
     path: stringValue(view.content?.path),
     project: stringValue(view.content?.project),
   };
+}
+
+function sourceActivityOf(view: ContextView | StoredContextView, store: ContextStore): StoredContextView | undefined {
+  const id = activityViewIdsOf(view)[0];
+  return id ? store.getView(id) : undefined;
+}
+
+function activityViewIdsOf(view: ContextView | StoredContextView): string[] {
+  return (view.source_views ?? []).filter(id => id.startsWith("activity:"));
+}
+
+function proposedViewsOf(proposal: ContextView | StoredContextView): Array<Record<string, unknown>> {
+  const proposed = proposal.content?.proposed_views;
+  return Array.isArray(proposed) ? proposed.filter(isRecord) : [];
+}
+
+function intentHypothesis(activity: ContextView | StoredContextView, domain: string | undefined, title: string): string {
+  if (learningDomain(domain)) return `User may be studying or researching ${title}.`;
+  if (stringValue(activity.content?.kind) === "coding") return `User may be working on project code related to ${title}.`;
+  return `User may be trying to make progress on ${title}.`;
+}
+
+function supportingSignalsForIntent(activity: ContextView | StoredContextView, title: string, duration: number, domain: string | undefined): string[] {
+  const signals = [
+    `${duration || "some"} minutes of ${stringValue(activity.content?.action) ?? "activity"} around ${title}.`,
+  ];
+  if (domain) signals.push(`Domain observed: ${domain}.`);
+  const summary = isRecord(activity.content?.evidence_summary) ? activity.content.evidence_summary : {};
+  const evidenceViews = numberValue(summary.evidence_views);
+  if (evidenceViews) signals.push(`${evidenceViews} EvidenceViews support this ActivityView.`);
+  return signals;
+}
+
+function topicCandidatesForWorkflow(intent: ContextView | StoredContextView, activity: ContextView | StoredContextView, resources: Array<ContextView | StoredContextView>): string[] {
+  const resourceTitles = resources.map(view => {
+    const resource = isRecord(view.content?.resource) ? view.content.resource : {};
+    return stringValue(resource.title);
+  }).filter(isString);
+  const activityResource = isRecord(activity.content?.resource) ? activity.content.resource : {};
+  const domain = stringValue(activityResource.domain) ?? stringValue(activity.content?.domain);
+  const title = stringValue(activityResource.title) ?? activity.title;
+  const hypothesis = stringValue(intent.content?.hypothesis);
+  return unique([...resourceTitles, title, domain, ...keywordsFromText(hypothesis)].filter(isString)).slice(0, 8);
+}
+
+function phasesForWorkflow(activity: ContextView | StoredContextView, resources: Array<ContextView | StoredContextView>): string[] {
+  const phases = [];
+  const action = stringValue(activity.content?.action);
+  if (action === "watching_or_reading") phases.push("watched_or_read resource");
+  else if (action === "working_in_project") phases.push("worked in project");
+  else if (action) phases.push(action);
+  if (resources.length) phases.push("materialized resource context");
+  phases.push("formed intent hypothesis");
+  return phases;
+}
+
+function openQuestionsForWorkflow(kind: string, intent: ContextView | StoredContextView): string[] {
+  const questions = ["Should this workflow become durable memory?"];
+  if (kind === "learning_session") questions.push("Which concepts from this learning session should be retained?");
+  const counter = intent.content?.counter_signals;
+  if (Array.isArray(counter) && counter.length) questions.push("What explicit user signal would confirm the inferred intent?");
+  return questions;
+}
+
+function workflowTitle(kind: string, topics: string[], activity: ContextView | StoredContextView): string {
+  const prefix = kind === "learning_session" ? "Learning session" : kind === "coding_session" ? "Coding session" : "Research session";
+  return `${prefix}: ${topics[0] ?? activity.title ?? "activity"}`;
+}
+
+function topicCandidatesOf(workflow: ContextView | StoredContextView): string[] {
+  const topics = workflow.content?.topic_candidates;
+  return Array.isArray(topics) ? topics.filter(isString) : [];
+}
+
+function normalizedTopic(topic: string): string {
+  return topic.toLowerCase().replace(/https?:\/\/\S+/g, "").replace(/[^a-z0-9\u4e00-\u9fff]+/g, " ").trim().slice(0, 80);
+}
+
+function bestTopicLabel(topic: string, workflows: Array<ContextView | StoredContextView>): string {
+  for (const workflow of workflows) {
+    const match = topicCandidatesOf(workflow).find(candidate => normalizedTopic(candidate) === topic);
+    if (match) return match;
+  }
+  return topic;
+}
+
+function keywordsFromText(text?: string): string[] {
+  if (!text) return [];
+  const matches = text.match(/[A-Za-z][A-Za-z0-9-]{4,}/g) ?? [];
+  return unique(matches.map(value => value.toLowerCase())).slice(0, 4);
+}
+
+function uniqueById<T extends ContextView | StoredContextView>(views: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const view of views) {
+    const key = view.id ?? stableKey(JSON.stringify(view));
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(view);
+  }
+  return out;
 }
 
 function count(values: string[]): Record<string, number> {

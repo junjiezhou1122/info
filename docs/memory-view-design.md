@@ -889,13 +889,17 @@ advice.browser_ambient      -> analysis/advice namespace only if reused
 
 ## 12. Current Implementation Contract
 
-The first runtime slice now materializes the new View family design directly:
+The runtime now materializes the new View family design directly:
 
 ```text
 Observation
   -> EvidenceView   view_type = evidence
   -> ActivityView   view_type = activity
   -> ProposalView   view_type = proposal
+  -> ResourceView   view_type = resource
+  -> IntentView     view_type = intent
+  -> WorkflowView   view_type = workflow
+  -> MemoryView     view_type = memory, only after promotion rules
 ```
 
 Implementation files:
@@ -907,10 +911,15 @@ src/runtime/evidence-view.ts
 src/runtime/memory-views.ts
   EvidenceView -> ActivityView compiler
   ActivityView -> ProposalView compiler
+  ProposalView -> ResourceView compiler
+  ProposalView -> IntentView compiler
+  IntentView + ResourceView + ActivityView -> WorkflowView compiler
+  repeated WorkflowView topic -> MemoryView compiler
   MemoryView builder contract
 
 src/runtime/runtime.ts
-  runtime tick compiles evidence, then activity, then proposal
+  runtime tick compiles evidence, activity, proposal, resource, intent,
+  workflow, then memory
 
 ui/src/main.tsx
   displays current View family counts in the Timeline page
@@ -1002,6 +1011,92 @@ The current `ProposalView` content shape is:
     decision: "materialize_now" | "defer_or_agent" | "defer" | "reject";
     reason: string;
   }>;
+}
+```
+
+The current `ResourceView` content shape is:
+
+```ts
+{
+  kind: "learning_material" | "web_resource" | string;
+  resource: {
+    type: "url" | string;
+    url: string;
+    title?: string;
+    domain?: string;
+  };
+  observed_activity: {
+    start?: string;
+    end?: string;
+    duration_minutes?: number;
+    action?: string;
+  };
+  evidence_summary?: Record<string, unknown>;
+  use_cases: string[];
+  proposal: {
+    decision?: string;
+    reason?: string;
+    priority?: number;
+  };
+}
+```
+
+The current `IntentView` content shape is:
+
+```ts
+{
+  kind: "candidate";
+  hypothesis: string;
+  supporting_signals: string[];
+  counter_signals: string[];
+  suggested_workflow_kind: "learning_session" | "research_session" | "coding_session" | string;
+  proposed_by?: string;
+}
+```
+
+The current `WorkflowView` content shape is:
+
+```ts
+{
+  kind: "learning_session" | "research_session" | "coding_session" | string;
+  phases: string[];
+  topic_candidates: string[];
+  open_questions: string[];
+  activity: {
+    kind?: string;
+    start?: string;
+    end?: string;
+    duration_minutes?: number;
+    action?: string;
+  };
+  resources: Array<Record<string, unknown>>;
+  intent: {
+    hypothesis?: string;
+    confidence?: number;
+  };
+}
+```
+
+The current automatic `MemoryView` compiler is intentionally strict:
+
+```text
+single WorkflowView topic      -> no MemoryView
+repeated WorkflowView topic(s) -> MemoryView(kind="learning_interest")
+```
+
+Current generated `MemoryView` content extends the minimal contract with
+promotion evidence:
+
+```ts
+{
+  kind: "learning_interest";
+  claim: string;
+  applies_to: string[];
+  future_use: string[];
+  evidence: {
+    workflow_count: number;
+    workflow_titles: string[];
+  };
 }
 ```
 

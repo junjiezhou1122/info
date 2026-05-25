@@ -32,7 +32,7 @@
 .view-graph-head{display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin-bottom:8px}
 .view-graph-head span{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.04em;font-weight:700}
 .view-graph-head b{font-size:12px;color:#444;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.view-family-list{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.view-family-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:8px}
 .view-family{min-width:0;border:1px solid #ececea;border-radius:8px;background:#fafafa;padding:9px}
 .view-family.has-views{background:#f7fbf8;border-color:#dce9df}
 .view-family>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:8px}
