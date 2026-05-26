@@ -3620,7 +3620,7 @@ test("GET /context/views can return all Views for an Application list", async ()
   assert.equal(response.status, 200);
   assert.equal(body.ok, true);
   assert.equal(body.views.length, 70);
-  assert.equal(body.views[0].id, "evidence:http-all-69");
+  assert.deepEqual(new Set(body.views.map(view => view.id)), new Set(Array.from({ length: 70 }, (_, index) => `evidence:http-all-${String(index).padStart(2, "0")}`)));
 }));
 
 test("GET /context/views tolerates legacy malformed source_views JSON", async () => withStore(async (store) => {

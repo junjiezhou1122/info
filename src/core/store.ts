@@ -509,6 +509,33 @@ export class ContextStore {
     return row ? rowToView(row) : undefined;
   }
 
+  listViewFamilySummaries(options: { view_types?: string[]; active_only?: boolean } = {}): Array<{ family: string; count: number; latest?: StoredContextView; kinds: string[] }> {
+    const clauses: string[] = [];
+    const params: SQLInputValue[] = [];
+    if (options.view_types?.length) {
+      clauses.push(`view_type in (${options.view_types.map(() => "?").join(", ")})`);
+      params.push(...options.view_types);
+    }
+    if (options.active_only) clauses.push(`(status is null or status not in ('archived', 'rejected'))`);
+    const where = clauses.length ? ` where ${clauses.join(" and ")}` : "";
+    const rows = this.db.prepare(`select view_type as family, count(*) as count, max(updated_at) as latest_updated_at from context_views${where} group by view_type`).all(...params) as Array<{ family: string; count: number; latest_updated_at?: string }>;
+    return rows.map(row => {
+      const latest = this.db.prepare(`select * from context_views where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""} order by updated_at desc limit 1`).get(row.family) as any;
+      const kindRows = this.db.prepare(`select content_json from context_views where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""} order by updated_at desc limit 200`).all(row.family) as Array<{ content_json?: string }>;
+      const kinds = [...new Set(kindRows
+        .map(kindRow => parseJson<Record<string, unknown>>(kindRow.content_json, {}))
+        .map(content => typeof content.kind === "string" ? content.kind : undefined)
+        .filter((value): value is string => Boolean(value)))]
+        .slice(0, 12);
+      return {
+        family: row.family,
+        count: Number(row.count ?? 0),
+        latest: latest ? rowToView(latest) : undefined,
+        kinds,
+      };
+    });
+  }
+
   listViews(options: {
     view_types?: string[];
     view_type_prefix?: string;

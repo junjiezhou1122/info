@@ -529,6 +529,19 @@ export function createContextHttpHandler(store: ContextStore) {
       return send(res, 201, { ok: true, id: view.id, view, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
     }
 
+    if (req.method === "GET" && url.pathname === "/context/views/families") {
+      const viewTypes = url.searchParams.get("view_types")?.split(",").map(x => x.trim()).filter(Boolean);
+      const activeOnly = url.searchParams.get("active_only") !== "false";
+      const families = store.listViewFamilySummaries({ view_types: viewTypes, active_only: activeOnly })
+        .map(family => ({
+          family: family.family,
+          count: family.count,
+          kinds: family.kinds,
+          latest: family.latest ? summarizeViewForList(family.latest) : undefined,
+        }));
+      return send(res, 200, { ok: true, families });
+    }
+
     if (req.method === "GET" && url.pathname === "/context/views") {
       const limitParam = url.searchParams.get("limit");
       const limit = limitParam === "all" ? 0 : Number(limitParam ?? 50);

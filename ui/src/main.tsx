@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { fetchActivityTimeline, fetchContextView, fetchViewFamilies, screenpipeFrameUrl, syncScreenpipe } from "./api";
+import { fetchActivityTimeline, fetchContextView, fetchViewFamilies, fetchViewsByType, screenpipeFrameUrl, syncScreenpipe } from "./api";
 import type { ActivityTimelineResponse, ContextViewSummary, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewFamiliesResponse, ViewFamilySummary } from "./types";
 import "./styles.css";
 
@@ -238,25 +238,55 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
   const [selectedViewId, setSelectedViewId] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<ContextViewSummary | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [typeViews, setTypeViews] = useState<Record<string, ContextViewSummary[]>>({});
+  const [typeLoading, setTypeLoading] = useState(false);
+  const [typeStatus, setTypeStatus] = useState("");
   const families = response?.families ?? [];
-  const views = response?.views ?? [];
-  const aiViews = views.filter(view => compilerId(view).startsWith("ai."));
+  const familyByType = useMemo(() => new Map(families.map(family => [family.family, family])), [families]);
+  const views = typeViews[selectedType] ?? [];
+  const loadedViews = Object.values(typeViews).flat();
+  const aiViews = loadedViews.filter(view => compilerId(view).startsWith("ai."));
   const tabs = useMemo(() => VIEW_TYPE_ORDER.map(type => {
-    const typeViews = views.filter(view => view.view_type === type);
-    const aiCount = typeViews.filter(view => compilerId(view).startsWith("ai.")).length;
-    return { type, count: typeViews.length, aiCount };
-  }), [views]);
+    const family = familyByType.get(type);
+    const loaded = typeViews[type]?.length ?? 0;
+    const aiCount = typeViews[type]?.filter(view => compilerId(view).startsWith("ai.")).length ?? 0;
+    return { type, count: family?.count ?? 0, loaded, aiCount };
+  }), [familyByType, typeViews]);
   const selectedViews = useMemo(() => views
     .filter(view => view.view_type === selectedType)
     .sort((a, b) => Date.parse(b.updated_at ?? "") - Date.parse(a.updated_at ?? "")), [views, selectedType]);
   const selectedSummary = selectedViews.find(view => view.id === selectedViewId) ?? selectedViews[0];
   const activeView = selectedDetail?.id === selectedSummary?.id ? selectedDetail : selectedSummary;
+  const totalCount = families.reduce((sum, family) => sum + family.count, 0);
 
   useEffect(() => {
-    if (!views.length) return;
-    const currentHasViews = views.some(view => view.view_type === selectedType);
-    if (!currentHasViews) setSelectedType(tabs.find(tab => tab.count > 0)?.type ?? "intent");
-  }, [views, selectedType, tabs]);
+    if (!families.length) return;
+    const currentCount = familyByType.get(selectedType)?.count ?? 0;
+    if (currentCount === 0) setSelectedType(tabs.find(tab => tab.count > 0)?.type ?? "intent");
+  }, [families, familyByType, selectedType, tabs]);
+
+  useEffect(() => {
+    const familyCount = familyByType.get(selectedType)?.count ?? 0;
+    if (!familyCount || typeViews[selectedType]?.length) return;
+    let cancelled = false;
+    setTypeLoading(true);
+    setTypeStatus(`Loading ${viewFamilyLabel(selectedType)}…`);
+    fetchViewsByType(selectedType, { limit: viewPageSize(selectedType) })
+      .then(result => {
+        if (cancelled) return;
+        setTypeViews(prev => ({ ...prev, [selectedType]: result.views ?? [] }));
+        setTypeStatus(`${result.views?.length ?? 0}/${familyCount} ${viewFamilyLabel(selectedType)} loaded`);
+      })
+      .catch(error => {
+        if (!cancelled) setTypeStatus(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (!cancelled) setTypeLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedType, familyByType, typeViews]);
 
   useEffect(() => {
     if (!selectedViews.length) {
@@ -293,14 +323,31 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
     onInspect({ view: activeView, loading: detailLoading });
   }, [activeView, detailLoading, onInspect]);
 
-  if (loading) return <div className="empty-state">Loading memory views…</div>;
+  async function loadMore() {
+    const current = typeViews[selectedType] ?? [];
+    const familyCount = familyByType.get(selectedType)?.count ?? 0;
+    if (typeLoading || current.length >= familyCount) return;
+    setTypeLoading(true);
+    setTypeStatus(`Loading more ${viewFamilyLabel(selectedType)}…`);
+    try {
+      const result = await fetchViewsByType(selectedType, { limit: viewPageSize(selectedType) + current.length });
+      setTypeViews(prev => ({ ...prev, [selectedType]: result.views ?? [] }));
+      setTypeStatus(`${result.views?.length ?? 0}/${familyCount} ${viewFamilyLabel(selectedType)} loaded`);
+    } catch (error) {
+      setTypeStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTypeLoading(false);
+    }
+  }
+
+  if (loading) return <div className="empty-state">Loading memory view families…</div>;
   return (
     <>
       <section className="status-row views-status">
-        <Stat label="Active Views" value={views.length} />
-        <Stat label="AI Views" value={aiViews.length} />
-        <Stat label="Families" value={families.filter(family => family.count > 0).length} />
-        <div className="status-text">{status}</div>
+        <Stat label="Active Views" value={totalCount} />
+        <Stat label="Loaded" value={loadedViews.length} />
+        <Stat label="AI Loaded" value={aiViews.length} />
+        <div className="status-text">{typeStatus || status}</div>
       </section>
       <section className="view-type-tabs" aria-label="View type tabs">
         {tabs.map(tab => (
@@ -311,6 +358,7 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
           }}>
             <span>{viewFamilyLabel(tab.type)}</span>
             <b>{tab.count}</b>
+            {tab.loaded > 0 && <em>{tab.loaded} loaded</em>}
             {tab.aiCount > 0 && <em>{tab.aiCount} AI</em>}
           </button>
         ))}
@@ -320,14 +368,17 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
           <div className="view-list-head">
             <div>
               <b>{viewFamilyLabel(selectedType)}</b>
-              <span>{selectedViews.length} views</span>
+              <span>{selectedViews.length}/{familyByType.get(selectedType)?.count ?? 0} loaded</span>
             </div>
             <Tag>{viewTypePurpose(selectedType)}</Tag>
           </div>
           <div className="view-list-items">
             {selectedViews.length ? selectedViews.map(view => (
               <ViewListRow key={view.id} view={view} selected={view.id === selectedSummary?.id} onSelect={() => setSelectedViewId(view.id)} />
-            )) : <div className="empty-inline">No {viewFamilyLabel(selectedType)} yet.</div>}
+            )) : <div className="empty-inline">{typeLoading ? `Loading ${viewFamilyLabel(selectedType)}…` : `No ${viewFamilyLabel(selectedType)} yet.`}</div>}
+            {selectedViews.length < (familyByType.get(selectedType)?.count ?? 0) && (
+              <button className="load-more" type="button" onClick={loadMore} disabled={typeLoading}>{typeLoading ? "Loading…" : "Load more"}</button>
+            )}
           </div>
         </div>
       </section>
@@ -634,6 +685,12 @@ function viewFamilyLabel(family: string) {
     answer: "AnswerView",
   };
   return labels[family] ?? family;
+}
+
+function viewPageSize(type: string) {
+  if (type === "evidence" || type === "activity") return 120;
+  if (type === "visual_frame" || type === "proposal") return 80;
+  return 60;
 }
 
 function viewTypePurpose(type: string) {

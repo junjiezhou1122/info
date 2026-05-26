@@ -114,3 +114,10 @@ export type ViewFamiliesResponse = {
   views: ContextViewSummary[];
   families: ViewFamilySummary[];
 };
+
+export type ViewListResponse = {
+  ok: true;
+  views: ContextViewSummary[];
+  next_cursor?: string;
+  subscription?: { returned_count?: number };
+};

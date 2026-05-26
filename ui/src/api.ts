@@ -1,4 +1,4 @@
-import type { ActivityTimelineResponse, ContextViewSummary, RuntimeTickResponse, ViewFamiliesResponse } from "./types";
+import type { ActivityTimelineResponse, ContextViewSummary, RuntimeTickResponse, ViewFamiliesResponse, ViewListResponse } from "./types";
 
 const API_BASE = import.meta.env.VITE_CONTEXT_API_BASE ?? "http://localhost:3111";
 const DEFAULT_TIMEOUT_MS = 8_000;
@@ -52,24 +52,35 @@ export async function fetchActivityTimeline(options: { minutes?: number; limit?:
 
 export async function fetchViewFamilies(): Promise<ViewFamiliesResponse> {
   const familyOrder = ["evidence", "visual_frame", "audio", "activity", "activity_block", "proposal", "resource", "intent", "workflow", "memory"];
-  const results = await Promise.all(familyOrder.map(async family => {
-    const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=${family}&limit=all&active_only=true&summary_only=true`, undefined, 20_000);
-    if (!res.ok) throw new Error(`${family} view fetch failed: ${res.status}`);
-    const body = await res.json();
-    return Array.isArray(body.views) ? body.views : [];
-  }));
-  const views = results.flat();
+  const res = await fetchWithTimeout(`${API_BASE}/context/views/families?view_types=${familyOrder.join(",")}&active_only=true`, undefined, 8_000);
+  if (!res.ok) throw new Error(`view families fetch failed: ${res.status}`);
+  const body = await res.json();
+  const returned = Array.isArray(body.families) ? body.families : [];
+  const byFamily = new Map(returned.map((family: any) => [family.family, family]));
   const families = familyOrder.map(family => {
-    const familyViews = views.filter((view: any) => view.view_type === family);
-    const kinds = [...new Set(familyViews.map((view: any) => typeof view.content?.kind === "string" ? view.content.kind : undefined).filter(Boolean))] as string[];
+    const item = byFamily.get(family) as any;
     return {
       family,
-      count: familyViews.length,
-      kinds,
-      latest: familyViews[0],
+      count: Number(item?.count ?? 0),
+      kinds: Array.isArray(item?.kinds) ? item.kinds : [],
+      latest: item?.latest,
     };
   });
+  const views = families.map(family => family.latest).filter(Boolean) as ContextViewSummary[];
   return { ok: true, views, families };
+}
+
+export async function fetchViewsByType(viewType: string, options: { limit?: number; cursor?: string } = {}): Promise<ViewListResponse> {
+  const params = new URLSearchParams({
+    view_types: viewType,
+    limit: String(options.limit ?? 80),
+    active_only: "true",
+    summary_only: "true",
+  });
+  if (options.cursor) params.set("updated_after", options.cursor);
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?${params.toString()}`, undefined, 8_000);
+  if (!res.ok) throw new Error(`${viewType} views fetch failed: ${res.status}`);
+  return res.json();
 }
 
 export async function fetchContextView(viewId: string): Promise<ContextViewSummary> {
