@@ -259,6 +259,7 @@ function nextViewCursor(views: Array<{ updated_at?: string }>, fallback?: string
 }
 
 function viewListCandidateLimit(input: { limit: number; query?: string; pluginScoped: boolean }): number {
+  if (input.limit <= 0) return 0;
   if (input.pluginScoped) return Math.max(input.limit * 20, 200);
   return input.query ? Math.max(input.limit * 4, input.limit) : Math.max(input.limit * 3, 20);
 }
@@ -529,7 +530,8 @@ export function createContextHttpHandler(store: ContextStore) {
     }
 
     if (req.method === "GET" && url.pathname === "/context/views") {
-      const limit = Number(url.searchParams.get("limit") ?? 50);
+      const limitParam = url.searchParams.get("limit");
+      const limit = limitParam === "all" ? 0 : Number(limitParam ?? 50);
       const viewTypes = url.searchParams.get("view_types")?.split(",").map(x => x.trim()).filter(Boolean);
       const updatedAfter = url.searchParams.get("cursor") ?? url.searchParams.get("updated_after") ?? undefined;
       const query = url.searchParams.get("query") ?? undefined;
@@ -550,11 +552,13 @@ export function createContextHttpHandler(store: ContextStore) {
         scope: scopeFromSearchParams(url.searchParams),
       });
       const policyViews = filterViewsForPlugin(listedViews, store, plugin);
-      const views = filterViewsByQuery(rankViewsForSurfacing(policyViews, surfacingPreferences), query).slice(0, limit);
+      const filteredViews = filterViewsByQuery(rankViewsForSurfacing(policyViews, surfacingPreferences), query);
+      const views = limit <= 0 ? filteredViews : filteredViews.slice(0, limit);
+      const responseViews = url.searchParams.get("summary_only") === "true" ? views.map(summarizeViewForList) : views;
       const nextCursor = nextViewCursor(views, updatedAfter);
       return send(res, 200, {
         ok: true,
-        views,
+        views: responseViews,
         next_cursor: nextCursor,
         subscription: {
           cursor: nextCursor,
@@ -1011,6 +1015,8 @@ export function createContextHttpHandler(store: ContextStore) {
         project_snapshot_interval_seconds: body.project_snapshot_interval_seconds,
         ai_session_interval_seconds: body.ai_session_interval_seconds,
         compile_views: body.compile_views,
+        ai_view_compression: body.ai_view_compression,
+        llm: body.llm,
         view_compile_interval_seconds: body.view_compile_interval_seconds,
         work_thread_view_minutes: body.work_thread_view_minutes,
         activity_timeline_minutes: body.activity_timeline_minutes,
@@ -1086,6 +1092,32 @@ export function createContextHttpHandler(store: ContextStore) {
     return send(res, 500, { ok: false, error: error?.message ?? String(error) });
   }
   };
+}
+
+function summarizeViewForList(view: ContextView) {
+  return {
+    id: view.id,
+    view_type: view.view_type,
+    title: view.title,
+    summary: view.summary,
+    status: view.status,
+    source_record_count: view.source_records?.length ?? 0,
+    source_view_count: view.source_views?.length ?? 0,
+    confidence: view.confidence,
+    stability: view.stability,
+    lossiness: view.lossiness,
+    compiler: view.compiler,
+    updated_at: "updated_at" in view ? view.updated_at : undefined,
+    created_at: "created_at" in view ? view.created_at : undefined,
+    content: summarizeViewContent(view.content),
+  };
+}
+
+function summarizeViewContent(content: ContextView["content"]) {
+  const kind = typeof content?.kind === "string" ? content.kind : undefined;
+  const category = typeof content?.category === "string" ? content.category : undefined;
+  const timeRange = isPlainObject(content?.time_range) ? content.time_range : undefined;
+  return { kind, category, time_range: timeRange };
 }
 
 export function createContextHttpServer(store = new ContextStore()) {

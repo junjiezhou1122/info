@@ -5,6 +5,15 @@ export type ChatMessage = {
   content: string;
 };
 
+export type VisionContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+export type VisionMessage = {
+  role: "system" | "user" | "assistant";
+  content: string | VisionContentPart[];
+};
+
 export type LlmOptions = {
   base_url?: string;
   api_key?: string;
@@ -32,6 +41,14 @@ export function llmConfig(options: LlmOptions = {}) {
 }
 
 export async function chatCompletion(messages: ChatMessage[], options: LlmOptions = {}): Promise<LlmResult> {
+  return completion(messages, options, true);
+}
+
+export async function visionCompletion(messages: VisionMessage[], options: LlmOptions = {}): Promise<LlmResult> {
+  return completion(messages, options, false);
+}
+
+async function completion(messages: Array<ChatMessage | VisionMessage>, options: LlmOptions = {}, jsonMode: boolean): Promise<LlmResult> {
   const cfg = llmConfig(options);
   if (process.env.LLM_MOCK_RESPONSE) {
     return { ok: true, model: cfg.model, base_url: cfg.base_url, content: process.env.LLM_MOCK_RESPONSE };
@@ -60,7 +77,7 @@ export async function chatCompletion(messages: ChatMessage[], options: LlmOption
         messages,
         temperature: options.temperature ?? 0.2,
         max_tokens: options.max_tokens ?? 800,
-        response_format: { type: "json_object" },
+        ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       }),
     });
     if (!res.ok) return { ok: false, model: cfg.model, base_url: cfg.base_url, error: `${res.status} ${await res.text()}` };

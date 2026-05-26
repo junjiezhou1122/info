@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -523,8 +523,32 @@ export class ContextStore {
     updated_after?: string;
   } = {}): StoredContextView[] {
     const limit = options.limit ?? 50;
-    const rows = this.db.prepare(`select * from context_views order by updated_at desc limit ?`).all(Math.max(limit * 8, limit)) as any[];
-    return rows
+    const unbounded = options.limit !== undefined && options.limit <= 0;
+    const clauses: string[] = [];
+    const params: SQLInputValue[] = [];
+    if (options.view_types?.length) {
+      clauses.push(`view_type in (${options.view_types.map(() => "?").join(", ")})`);
+      params.push(...options.view_types);
+    }
+    if (options.view_type_prefix) {
+      clauses.push(`view_type like ?`);
+      params.push(`${options.view_type_prefix}%`);
+    }
+    if (options.status) {
+      clauses.push(`status = ?`);
+      params.push(options.status);
+    } else if (options.active_only) {
+      clauses.push(`(status is null or status not in ('archived', 'rejected'))`);
+    }
+    if (options.updated_after) {
+      clauses.push(`updated_at > ?`);
+      params.push(options.updated_after);
+    }
+    const where = clauses.length ? ` where ${clauses.join(" and ")}` : "";
+    const sql = `select * from context_views${where} order by updated_at desc${unbounded ? "" : " limit ?"}`;
+    if (!unbounded) params.push(Math.max(limit * 8, limit));
+    const rows = this.db.prepare(sql).all(...params) as any[];
+    const filtered = rows
       .map(rowToView)
       .filter(view => !options.view_types?.length || options.view_types.includes(view.view_type))
       .filter(view => !options.view_type_prefix || view.view_type.startsWith(options.view_type_prefix))
@@ -535,8 +559,8 @@ export class ContextStore {
       .filter(view => !options.source_view_id || view.source_views?.includes(options.source_view_id))
       .filter(view => !options.updated_after || Date.parse(view.updated_at) > Date.parse(options.updated_after))
       .filter(view => scopeMatches({ scope: view.scope } as StoredContextRecord, options.scope))
-      .filter(view => viewTimeMatches(view, options.timeWindow))
-      .slice(0, limit);
+      .filter(view => viewTimeMatches(view, options.timeWindow));
+    return unbounded ? filtered : filtered.slice(0, limit);
   }
 
   queryRecords(query: ContextQuery): StoredContextRecord[] {

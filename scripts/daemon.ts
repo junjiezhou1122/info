@@ -28,6 +28,10 @@ function parseArgs(argv: string[]): RuntimeTickRequest & { interval_seconds?: nu
     else if (arg === "--ai-session-interval") req.ai_session_interval_seconds = Number(argv[++i]);
     else if (arg === "--no-compile-views") req.compile_views = false;
     else if (arg === "--compile-views") req.compile_views = true;
+    else if (arg === "--ai-view-compression") req.ai_view_compression = true;
+    else if (arg === "--no-ai-view-compression") req.ai_view_compression = false;
+    else if (arg === "--visual-view-compression") req.visual_view_compression = true;
+    else if (arg === "--no-visual-view-compression") req.visual_view_compression = false;
     else if (arg === "--view-compile-interval") req.view_compile_interval_seconds = Number(argv[++i]);
     else if (arg === "--work-thread-minutes") req.work_thread_view_minutes = Number(argv[++i]);
     else if (arg === "--activity-minutes") req.activity_timeline_minutes = Number(argv[++i]);
@@ -41,6 +45,13 @@ function parseArgs(argv: string[]): RuntimeTickRequest & { interval_seconds?: nu
   if (process.env.RUNTIME_INTERPRET_INTERVAL_SECONDS) req.interpret_interval_seconds = Number(process.env.RUNTIME_INTERPRET_INTERVAL_SECONDS);
   if (process.env.RUNTIME_TIMELINE === "1") req.timeline = true;
   if (process.env.RUNTIME_TIMELINE === "0") req.timeline = false;
+  if (process.env.RUNTIME_COMPILE_VIEWS === "0") req.compile_views = false;
+  if (process.env.RUNTIME_COMPILE_VIEWS === "1") req.compile_views = true;
+  if (process.env.RUNTIME_AI_VIEW_COMPRESSION === "0") req.ai_view_compression = false;
+  if (process.env.RUNTIME_AI_VIEW_COMPRESSION === "1") req.ai_view_compression = true;
+  if (process.env.RUNTIME_VISUAL_VIEW_COMPRESSION === "0") req.visual_view_compression = false;
+  if (process.env.RUNTIME_VISUAL_VIEW_COMPRESSION === "1") req.visual_view_compression = true;
+  if (process.env.RUNTIME_VIEW_COMPILE_INTERVAL_SECONDS) req.view_compile_interval_seconds = Number(process.env.RUNTIME_VIEW_COMPILE_INTERVAL_SECONDS);
   if (process.env.RUNTIME_TIMELINE_INTERVAL_SECONDS) req.timeline_interval_seconds = Number(process.env.RUNTIME_TIMELINE_INTERVAL_SECONDS);
   if (process.env.RUNTIME_TIMELINE_MINUTES) req.timeline_minutes = Number(process.env.RUNTIME_TIMELINE_MINUTES);
   if (process.env.RUNTIME_TIMELINE_LIMIT) req.timeline_limit = Number(process.env.RUNTIME_TIMELINE_LIMIT);

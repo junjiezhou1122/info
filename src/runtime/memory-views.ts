@@ -291,10 +291,11 @@ function buildResourceView(proposal: ContextView | StoredContextView, activity: 
   const kind = stringValue(item.kind) ?? (learningDomain(domain) ? "learning_material" : "web_resource");
   const start = stringValue(activity.content?.start) ?? activity.scope?.time_range?.start;
   const end = stringValue(activity.content?.end) ?? activity.scope?.time_range?.end;
+  const observedDuration = boundedDurationMinutes(start, end, numberValue(activity.content?.duration_minutes));
   const sourceViews = unique([proposal.id, activity.id].filter(isString));
 
   return {
-    id: `resource:${kind}:${stableKey(`${url}|${activity.id ?? ""}|${proposal.id ?? ""}`)}`,
+    id: `resource:${kind}:${stableKey(normalizeResourceKey(url))}`,
     view_type: "resource",
     title,
     summary: `ResourceView(${kind}) from ActivityView ${activity.id}.`,
@@ -320,7 +321,7 @@ function buildResourceView(proposal: ContextView | StoredContextView, activity: 
       observed_activity: {
         start,
         end,
-        duration_minutes: numberValue(activity.content?.duration_minutes),
+        duration_minutes: observedDuration,
         action: stringValue(activity.content?.action),
       },
       evidence_summary: isRecord(activity.content?.evidence_summary) ? activity.content.evidence_summary : undefined,
@@ -600,6 +601,15 @@ function buildProposalView(activity: ContextView | StoredContextView, generatedA
   const duration = numberValue(activity.content?.duration_minutes) ?? 0;
 
   if (kind === "resource_consumption" && resource) {
+    const summary = isRecord(activity.content?.evidence_summary) ? activity.content.evidence_summary : {};
+    const metrics = isRecord(summary.metrics) ? summary.metrics : {};
+    const activeSeconds = numberValue(metrics.active_seconds_max) ?? numberValue(metrics.active_seconds_sum);
+    const scrollEvents = numberValue(metrics.scroll_events_sum) ?? 0;
+    const selectionCount = numberValue(metrics.selection_count_sum) ?? 0;
+    const selectedTextLength = numberValue(metrics.selected_text_length_sum) ?? 0;
+    const hasEngagement = activeSeconds === undefined
+      ? duration >= 5
+      : activeSeconds >= 15 || scrollEvents > 0 || selectionCount > 0 || selectedTextLength > 0;
     proposed.push({
       view_type: "resource",
       kind: learningDomain(domain) ? "learning_material" : "web_resource",
@@ -612,32 +622,20 @@ function buildProposalView(activity: ContextView | StoredContextView, generatedA
     proposed.push({
       view_type: "intent",
       kind: "candidate",
-      priority: duration >= 5 ? 0.72 : 0.55,
-      confidence: duration >= 5 ? 0.68 : 0.5,
+      priority: hasEngagement && duration >= 5 ? 0.72 : 0.35,
+      confidence: hasEngagement && duration >= 5 ? 0.68 : 0.35,
       cost: "medium",
-      decision: "defer_or_agent",
-      reason: "resource consumption may indicate a learning or research goal",
+      decision: hasEngagement && duration >= 5 ? "defer_or_agent" : "defer",
+      reason: hasEngagement ? "resource consumption may indicate a learning or research goal" : "page dwell without active browser engagement is weak evidence for intent",
     });
     proposed.push({
       view_type: "workflow",
       kind: learningDomain(domain) ? "learning_session" : "research_session",
-      priority: duration >= 10 ? 0.62 : 0.42,
-      confidence: duration >= 10 ? 0.58 : 0.45,
+      priority: hasEngagement && duration >= 10 ? 0.62 : 0.35,
+      confidence: hasEngagement && duration >= 10 ? 0.58 : 0.35,
       cost: "medium",
-      decision: duration >= 10 ? "defer_or_agent" : "defer",
-      reason: "workflow needs supporting notes, searches, chat, or repeated activity",
-    });
-  }
-
-  if (kind === "app_focus") {
-    proposed.push({
-      view_type: "intent",
-      kind: "candidate",
-      priority: 0.45,
-      confidence: 0.45,
-      cost: "medium",
-      decision: "defer",
-      reason: "app focus alone is weak evidence for intent",
+      decision: hasEngagement && duration >= 10 ? "defer_or_agent" : "defer",
+      reason: hasEngagement ? "workflow needs supporting notes, searches, chat, or repeated activity" : "workflow needs active engagement beyond passive page dwell",
     });
   }
 
@@ -733,7 +731,27 @@ function summarizeEvidence(group: Array<ContextView | StoredContextView>): Recor
       const signals = isRecord(view.content?.signals) ? view.content.signals : {};
       return Array.isArray(signals.frame_ids) ? signals.frame_ids.map(String) : [];
     })).slice(0, 20),
+    metrics: metricSummary(group),
   };
+}
+
+function metricSummary(group: Array<ContextView | StoredContextView>): Record<string, number> | undefined {
+  const values = new Map<string, number[]>();
+  for (const view of group) {
+    const signals = isRecord(view.content?.signals) ? view.content.signals : {};
+    const metrics = isRecord(signals.metrics) ? signals.metrics : {};
+    for (const [key, value] of Object.entries(metrics)) {
+      const numeric = numberValue(value);
+      if (numeric === undefined) continue;
+      values.set(key, [...(values.get(key) ?? []), numeric]);
+    }
+  }
+  const out: Record<string, number> = {};
+  for (const [key, nums] of values) {
+    out[`${key}_sum`] = Number(nums.reduce((sum, value) => sum + value, 0).toFixed(2));
+    out[`${key}_max`] = Number(Math.max(...nums).toFixed(2));
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function confidenceForGroup(group: Array<ContextView | StoredContextView>, kind: string): number {
@@ -751,7 +769,14 @@ function durationMinutes(start: string, end: string, group: Array<ContextView | 
     .filter((value): value is number => value !== undefined);
   const explicit = explicitSeconds.length ? Math.max(...explicitSeconds) / 60 : 0;
   const range = (Date.parse(end) - Date.parse(start)) / 60_000;
+  if (Number.isFinite(range) && range > 0 && group.length > 1) return Number(range.toFixed(2));
   return Number(Math.max(explicit, Number.isFinite(range) ? range : 0).toFixed(2));
+}
+
+function boundedDurationMinutes(start?: string, end?: string, fallback?: number): number | undefined {
+  const range = start && end ? (Date.parse(end) - Date.parse(start)) / 60_000 : undefined;
+  if (range !== undefined && Number.isFinite(range) && range > 0) return Number(range.toFixed(2));
+  return fallback !== undefined ? Number(fallback.toFixed(2)) : undefined;
 }
 
 function actionFor(kind: string): string {
@@ -914,6 +939,20 @@ function top(values: string[], limit: number): string[] {
 
 function compactArray(values: Array<string | undefined>): string[] {
   return values.filter(isString);
+}
+
+function normalizeResourceKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (/^(utm_|ref$|ref_)/i.test(key)) parsed.searchParams.delete(key);
+    }
+    parsed.hostname = parsed.hostname.toLowerCase();
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return url.trim();
+  }
 }
 
 function unique<T>(values: T[]): T[] {

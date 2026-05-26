@@ -507,9 +507,15 @@ async function getScreenpipeApiKey(): Promise<string | undefined> {
   if (process.env.SCREENPIPE_API_AUTH_KEY) return process.env.SCREENPIPE_API_AUTH_KEY;
   try {
     const { execFileSync } = await import("node:child_process");
-    const token = execFileSync("npm", ["exec", "--", "screenpipe@latest", "auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim().split(/\s+/).at(-1);
+    const token = execFileSync("screenpipe", ["auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim().split(/\s+/).at(-1);
     return token || undefined;
   } catch {
-    return undefined;
+    try {
+      const { execFileSync } = await import("node:child_process");
+      const token = execFileSync("npm", ["exec", "--", "screenpipe@latest", "auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim().split(/\s+/).at(-1);
+      return token || undefined;
+    } catch {
+      return undefined;
+    }
   }
 }

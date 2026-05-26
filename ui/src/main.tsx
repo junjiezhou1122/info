@@ -1,13 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { fetchActivityTimeline, fetchViewFamilies, screenpipeFrameUrl, syncScreenpipe } from "./api";
-import type { ActivityTimelineResponse, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewFamiliesResponse, ViewFamilySummary } from "./types";
+import { fetchActivityTimeline, fetchContextView, fetchViewFamilies, screenpipeFrameUrl, syncScreenpipe } from "./api";
+import type { ActivityTimelineResponse, ContextViewSummary, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewFamiliesResponse, ViewFamilySummary } from "./types";
 import "./styles.css";
 
 const POLL_MS = 15_000;
 const DEFAULT_MINUTES = 180;
+const VIEW_TYPE_ORDER = ["evidence", "visual_frame", "activity", "activity_block", "proposal", "resource", "intent", "workflow", "memory"];
 type SourceFilter = "screenpipe" | "browser" | "runtime" | "all";
 type DetailMode = "activity" | "debug";
+type ActiveTab = "timeline" | "views";
 type FramePreview = { frameId: string | number; title?: string };
 
 function App() {
@@ -15,14 +17,19 @@ function App() {
   const [viewFamilies, setViewFamilies] = useState<ViewFamiliesResponse | null>(null);
   const [lastTick, setLastTick] = useState<RuntimeTickResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [viewsLoading, setViewsLoading] = useState(false);
   const [live, setLive] = useState(true);
   const [status, setStatus] = useState("Connecting…");
+  const [viewStatus, setViewStatus] = useState("Views not loaded");
   const [minutes, setMinutes] = useState(DEFAULT_MINUTES);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [detailMode, setDetailMode] = useState<DetailMode>("activity");
+  const [activeTab, setActiveTab] = useState<ActiveTab>("timeline");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [viewInspector, setViewInspector] = useState<{ view?: ContextViewSummary; loading: boolean }>({ loading: false });
   const [previewFrame, setPreviewFrame] = useState<FramePreview | null>(null);
   const refreshSeq = useRef(0);
+  const viewRefreshSeq = useRef(0);
 
   async function refresh(quiet = false) {
     const seq = ++refreshSeq.current;
@@ -34,23 +41,8 @@ function App() {
       const next = await fetchActivityTimeline({ minutes, bucketMinutes: chooseBucket(minutes), includeLowLevelScreenpipe: true, dedupe: false, bucketItemLimit: false, summarizeHeartbeats: false, sourceFilter, mergeContinuous: true, mergeGapMinutes: 3 });
       if (seq !== refreshSeq.current) return;
       setTimeline(next);
-      fetchViewFamilies().then(setViewFamilies).catch(() => undefined);
       const windows = lastTick?.diagnostics?.screenpipe_activity?.count ?? 0;
       setStatus(`${next.records_used} records · ${next.buckets.length} buckets · ${windows} Screenpipe windows`);
-
-      if (sourceFilter === "browser" || sourceFilter === "runtime") return;
-      if (!quiet) setLoading(false);
-
-      if (!quiet) setStatus(`${next.records_used} records · ${next.buckets.length} buckets · syncing Screenpipe…`);
-      const tick = await syncScreenpipe(Math.min(30, Math.max(5, Math.round(minutes / 12))));
-      if (seq !== refreshSeq.current) return;
-      setLastTick(tick);
-      const synced = await fetchActivityTimeline({ minutes, bucketMinutes: chooseBucket(minutes), includeLowLevelScreenpipe: true, dedupe: false, bucketItemLimit: false, summarizeHeartbeats: false, sourceFilter, mergeContinuous: true, mergeGapMinutes: 3 });
-      if (seq !== refreshSeq.current) return;
-      setTimeline(synced);
-      fetchViewFamilies().then(setViewFamilies).catch(() => undefined);
-      const syncedWindows = tick.diagnostics?.screenpipe_activity?.count ?? 0;
-      setStatus(`${synced.records_used} records · ${synced.buckets.length} buckets · ${syncedWindows} Screenpipe windows`);
     } catch (error) {
       if (seq !== refreshSeq.current) return;
       setStatus(error instanceof Error ? error.message : String(error));
@@ -59,9 +51,50 @@ function App() {
     }
   }
 
+  async function refreshViews(quiet = false) {
+    const seq = ++viewRefreshSeq.current;
+    if (!quiet) {
+      setViewsLoading(true);
+      setViewStatus("Loading views…");
+    }
+    try {
+      const next = await fetchViewFamilies();
+      if (seq !== viewRefreshSeq.current) return;
+      setViewFamilies(next);
+      const aiViews = next.views.filter(view => compilerId(view).startsWith("ai.")).length;
+      setViewStatus(`${next.views.length} active views · ${aiViews} AI-compressed`);
+    } catch (error) {
+      if (seq !== viewRefreshSeq.current) return;
+      setViewStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (seq === viewRefreshSeq.current && !quiet) setViewsLoading(false);
+    }
+  }
+
+  async function syncNow() {
+    setLoading(true);
+    setStatus("Syncing Screenpipe…");
+    try {
+      const tick = await syncScreenpipe(Math.min(30, Math.max(5, Math.round(minutes / 12))));
+      setLastTick(tick);
+      const syncedWindows = tick.diagnostics?.screenpipe_activity?.count ?? 0;
+      setStatus(`${syncedWindows} Screenpipe windows synced · reloading timeline…`);
+      await refresh(true);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     refresh(false).catch(error => setStatus(error instanceof Error ? error.message : String(error)));
   }, [minutes, detailMode, sourceFilter]);
+
+  useEffect(() => {
+    if (activeTab !== "views") return;
+    refreshViews(false).catch(error => setViewStatus(error instanceof Error ? error.message : String(error)));
+  }, [activeTab]);
 
   useEffect(() => {
     if (!live) return;
@@ -84,7 +117,7 @@ function App() {
   const stats = useMemo(() => summarize(filteredBuckets, lastTick), [filteredBuckets, lastTick]);
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${activeTab === "views" ? "views-mode" : ""}`}>
       <aside className="sidebar">
         <div className="workspace-title">
           <div className="workspace-icon">I</div>
@@ -94,7 +127,8 @@ function App() {
           </div>
         </div>
         <nav className="nav-list" aria-label="App navigation">
-          <button className="nav-item active"><span>◷</span>Timeline</button>
+          <button className={`nav-item ${activeTab === "timeline" ? "active" : ""}`} onClick={() => setActiveTab("timeline")}><span>◷</span>Timeline</button>
+          <button className={`nav-item ${activeTab === "views" ? "active" : ""}`} onClick={() => setActiveTab("views")}><span>◇</span>Views</button>
         </nav>
         <div className="sidebar-foot">
           <div className={`live-dot ${live ? "on" : ""}`} />
@@ -106,56 +140,69 @@ function App() {
         <header className="page-header">
           <div>
             <div className="breadcrumb">Info / Screenpipe</div>
-            <h1>Timeline</h1>
-            <p>按时间整理最近 focus 的 app、网页和项目活动。</p>
+            <h1>{activeTab === "timeline" ? "Timeline" : "Memory Views"}</h1>
+            <p>{activeTab === "timeline" ? "按时间整理最近 focus 的 app、网页和项目活动。" : "查看 Observation 压缩出来的 EvidenceView、ActivityView、IntentView、WorkflowView 和 MemoryView。"}</p>
           </div>
           <div className="header-actions">
-            <select value={sourceFilter} onChange={event => setSourceFilter(event.target.value as SourceFilter)} aria-label="Timeline source">
-              <option value="all">All sources</option>
-              <option value="screenpipe">Screenpipe</option>
-              <option value="browser">Browser</option>
-              <option value="runtime">Runtime</option>
-            </select>
-            <select value={detailMode} onChange={event => setDetailMode(event.target.value as DetailMode)} aria-label="Timeline detail mode">
-              <option value="activity">Activity</option>
-              <option value="debug">Evidence debug</option>
-            </select>
-            <select value={minutes} onChange={event => setMinutes(Number(event.target.value))} aria-label="Timeline window">
-              <option value={60}>Last 1h</option>
-              <option value={180}>Last 3h</option>
-              <option value={480}>Last 8h</option>
-              <option value={1440}>Today</option>
-            </select>
-            <button className="secondary" onClick={() => setLive(value => !value)}>{live ? "Live" : "Paused"}</button>
-            <button onClick={() => refresh(false)} disabled={loading}>{loading ? "Syncing…" : "Sync"}</button>
+            {activeTab === "timeline" ? (
+              <>
+                <select value={sourceFilter} onChange={event => setSourceFilter(event.target.value as SourceFilter)} aria-label="Timeline source">
+                  <option value="all">All sources</option>
+                  <option value="screenpipe">Screenpipe</option>
+                  <option value="browser">Browser</option>
+                  <option value="runtime">Runtime</option>
+                </select>
+                <select value={detailMode} onChange={event => setDetailMode(event.target.value as DetailMode)} aria-label="Timeline detail mode">
+                  <option value="activity">Activity</option>
+                  <option value="debug">Evidence debug</option>
+                </select>
+                <select value={minutes} onChange={event => setMinutes(Number(event.target.value))} aria-label="Timeline window">
+                  <option value={60}>Last 1h</option>
+                  <option value={180}>Last 3h</option>
+                  <option value={480}>Last 8h</option>
+                  <option value={1440}>Today</option>
+                </select>
+                <button className="secondary" onClick={() => setLive(value => !value)}>{live ? "Live" : "Paused"}</button>
+                <button className="secondary" onClick={() => refresh(false)} disabled={loading}>{loading ? "Loading…" : "Reload"}</button>
+                <button onClick={syncNow} disabled={loading}>{loading ? "Syncing…" : "Sync Screenpipe"}</button>
+              </>
+            ) : (
+              <button onClick={() => refreshViews(false)} disabled={viewsLoading}>{viewsLoading ? "Loading…" : "Reload Views"}</button>
+            )}
           </div>
         </header>
 
-        <section className="status-row">
-          <Stat label="Items" value={stats.items} />
-          <Stat label="Screenpipe" value={stats.screenpipe} />
-          <Stat label="Last seen" value={stats.last} />
-          <div className="status-text">{sourceFilterLabel(sourceFilter)} · all evidence visible · {status}</div>
-        </section>
+        {activeTab === "timeline" ? (
+          <>
+            <section className="status-row">
+              <Stat label="Items" value={stats.items} />
+              <Stat label="Screenpipe" value={stats.screenpipe} />
+              <Stat label="Last seen" value={stats.last} />
+              <div className="status-text">{sourceFilterLabel(sourceFilter)} · local-first load · {status}</div>
+            </section>
 
-        <section className="context-row" aria-label="Top signals">
-          <Signal label="Sources" values={filteredSignals.top_sources} />
-          <Signal label="Apps" values={filteredSignals.top_apps} />
-          <Signal label="Domains" values={filteredSignals.top_domains} />
-        </section>
+            <section className="context-row" aria-label="Top signals">
+              <Signal label="Sources" values={filteredSignals.top_sources} />
+              <Signal label="Apps" values={filteredSignals.top_apps} />
+              <Signal label="Domains" values={filteredSignals.top_domains} />
+            </section>
 
-        <ViewGraph families={viewFamilies?.families ?? []} />
-
-        <Timeline buckets={filteredBuckets} loading={loading && !timeline} sourceFilter={sourceFilter} selectedItemId={selectedItemId} onSelect={setSelectedItemId} onOpenFrame={setPreviewFrame} />
+            <Timeline buckets={filteredBuckets} loading={loading && !timeline} sourceFilter={sourceFilter} selectedItemId={selectedItemId} onSelect={setSelectedItemId} onOpenFrame={setPreviewFrame} />
+          </>
+        ) : (
+          <MemoryViewsPanel response={viewFamilies} loading={viewsLoading && !viewFamilies} status={viewStatus} onInspect={setViewInspector} />
+        )}
       </main>
-      <Inspector item={selectedItem} onClose={() => setSelectedItemId(null)} onOpenFrame={setPreviewFrame} />
+      {activeTab === "views"
+        ? <aside className="view-inspector"><ViewDetail view={viewInspector.view} loading={viewInspector.loading} /></aside>
+        : <Inspector item={selectedItem} onClose={() => setSelectedItemId(null)} onOpenFrame={setPreviewFrame} />}
       <FrameLightbox preview={previewFrame} onClose={() => setPreviewFrame(null)} />
     </div>
   );
 }
 
 function ViewGraph({ families }: { families: ViewFamilySummary[] }) {
-  const canonical = ["evidence", "activity", "proposal", "resource", "intent", "workflow", "memory"];
+  const canonical = ["evidence", "visual_frame", "activity", "activity_block", "proposal", "resource", "intent", "workflow", "memory"];
   const shown = families.filter(family => family.count > 0 || canonical.includes(family.family));
   return (
     <section className="view-graph" aria-label="Memory view graph">
@@ -182,6 +229,161 @@ function ViewFamily({ family }: { family: ViewFamilySummary }) {
       <div>
         {(family.kinds.length ? family.kinds : ["waiting"]).slice(0, 4).map(kind => <Tag key={kind}>{kind}</Tag>)}
       </div>
+    </article>
+  );
+}
+
+function MemoryViewsPanel({ response, loading, status, onInspect }: { response: ViewFamiliesResponse | null; loading: boolean; status: string; onInspect: (state: { view?: ContextViewSummary; loading: boolean }) => void }) {
+  const [selectedType, setSelectedType] = useState("intent");
+  const [selectedViewId, setSelectedViewId] = useState<string | null>(null);
+  const [selectedDetail, setSelectedDetail] = useState<ContextViewSummary | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const families = response?.families ?? [];
+  const views = response?.views ?? [];
+  const aiViews = views.filter(view => compilerId(view).startsWith("ai."));
+  const tabs = useMemo(() => VIEW_TYPE_ORDER.map(type => {
+    const typeViews = views.filter(view => view.view_type === type);
+    const aiCount = typeViews.filter(view => compilerId(view).startsWith("ai.")).length;
+    return { type, count: typeViews.length, aiCount };
+  }), [views]);
+  const selectedViews = useMemo(() => views
+    .filter(view => view.view_type === selectedType)
+    .sort((a, b) => Date.parse(b.updated_at ?? "") - Date.parse(a.updated_at ?? "")), [views, selectedType]);
+  const selectedSummary = selectedViews.find(view => view.id === selectedViewId) ?? selectedViews[0];
+  const activeView = selectedDetail?.id === selectedSummary?.id ? selectedDetail : selectedSummary;
+
+  useEffect(() => {
+    if (!views.length) return;
+    const currentHasViews = views.some(view => view.view_type === selectedType);
+    if (!currentHasViews) setSelectedType(tabs.find(tab => tab.count > 0)?.type ?? "intent");
+  }, [views, selectedType, tabs]);
+
+  useEffect(() => {
+    if (!selectedViews.length) {
+      setSelectedViewId(null);
+      setSelectedDetail(null);
+      return;
+    }
+    if (!selectedViewId || !selectedViews.some(view => view.id === selectedViewId)) {
+      setSelectedViewId(selectedViews[0].id);
+      setSelectedDetail(null);
+    }
+  }, [selectedViews, selectedViewId]);
+
+  useEffect(() => {
+    if (!selectedViewId) return;
+    let cancelled = false;
+    setDetailLoading(true);
+    fetchContextView(selectedViewId)
+      .then(view => {
+        if (!cancelled) setSelectedDetail(view);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedDetail(null);
+      })
+      .finally(() => {
+        if (!cancelled) setDetailLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedViewId]);
+
+  useEffect(() => {
+    onInspect({ view: activeView, loading: detailLoading });
+  }, [activeView, detailLoading, onInspect]);
+
+  if (loading) return <div className="empty-state">Loading memory views…</div>;
+  return (
+    <>
+      <section className="status-row views-status">
+        <Stat label="Active Views" value={views.length} />
+        <Stat label="AI Views" value={aiViews.length} />
+        <Stat label="Families" value={families.filter(family => family.count > 0).length} />
+        <div className="status-text">{status}</div>
+      </section>
+      <section className="view-type-tabs" aria-label="View type tabs">
+        {tabs.map(tab => (
+          <button key={tab.type} className={tab.type === selectedType ? "active" : ""} onClick={() => {
+            setSelectedType(tab.type);
+            setSelectedViewId(null);
+            setSelectedDetail(null);
+          }}>
+            <span>{viewFamilyLabel(tab.type)}</span>
+            <b>{tab.count}</b>
+            {tab.aiCount > 0 && <em>{tab.aiCount} AI</em>}
+          </button>
+        ))}
+      </section>
+      <section className="view-reader" aria-label="Selected memory views">
+        <div className="view-list-panel">
+          <div className="view-list-head">
+            <div>
+              <b>{viewFamilyLabel(selectedType)}</b>
+              <span>{selectedViews.length} views</span>
+            </div>
+            <Tag>{viewTypePurpose(selectedType)}</Tag>
+          </div>
+          <div className="view-list-items">
+            {selectedViews.length ? selectedViews.map(view => (
+              <ViewListRow key={view.id} view={view} selected={view.id === selectedSummary?.id} onSelect={() => setSelectedViewId(view.id)} />
+            )) : <div className="empty-inline">No {viewFamilyLabel(selectedType)} yet.</div>}
+          </div>
+        </div>
+      </section>
+    </>
+  );
+}
+
+function ViewListRow({ view, selected, onSelect }: { view: ContextViewSummary; selected: boolean; onSelect: () => void }) {
+  const kind = typeof view.content?.kind === "string" ? view.content.kind : view.view_type;
+  const compiler = compilerId(view);
+  return (
+    <button className={`view-list-row ${selected ? "selected" : ""}`} onClick={onSelect}>
+      <div className="view-list-row-top">
+        <span>{kind}</span>
+        {typeof view.confidence === "number" && <b>{Math.round(view.confidence * 100)}%</b>}
+      </div>
+      <h3>{view.title || view.id}</h3>
+      {view.summary && <p>{view.summary}</p>}
+      <div className="view-list-row-meta">
+        <span>{compiler || "compiler unknown"}</span>
+        <span>{relativeTime(view.updated_at) || "—"}</span>
+      </div>
+    </button>
+  );
+}
+
+function ViewDetail({ view, loading }: { view?: ContextViewSummary; loading: boolean }) {
+  if (!view) return <article className="view-detail empty"><span>Select a view to inspect it.</span></article>;
+  const kind = typeof view.content?.kind === "string" ? view.content.kind : view.view_type;
+  const compiler = compilerId(view);
+  return (
+    <article className="view-detail">
+      <div className="view-detail-header">
+        <div>
+          <span>{viewFamilyLabel(view.view_type)} · {kind}</span>
+          <h2>{view.title || view.id}</h2>
+        </div>
+        {typeof view.confidence === "number" && <b>{Math.round(view.confidence * 100)}%</b>}
+      </div>
+      {view.summary && <p className="view-detail-summary">{view.summary}</p>}
+      <dl className="view-detail-meta">
+        <dt>compiler</dt><dd>{compiler || "unknown"}</dd>
+        <dt>updated</dt><dd>{view.updated_at ? new Date(view.updated_at).toLocaleString() : "—"}</dd>
+        <dt>source records</dt><dd>{sourceRecordCount(view)}</dd>
+        <dt>source views</dt><dd>{sourceViewCount(view)}</dd>
+        <dt>status</dt><dd>{view.status ?? "active"}</dd>
+        <dt>stability</dt><dd>{view.stability ?? "—"}</dd>
+      </dl>
+      <section className="view-detail-section">
+        <h3>View ID</h3>
+        <code>{view.id}</code>
+      </section>
+      <section className="view-detail-section">
+        <h3>Content</h3>
+        {loading ? <div className="empty-inline">Loading full view…</div> : <pre>{JSON.stringify(view.content ?? {}, null, 2)}</pre>}
+      </section>
     </article>
   );
 }
@@ -420,7 +622,9 @@ function sourceFilterLabel(filter: SourceFilter) {
 function viewFamilyLabel(family: string) {
   const labels: Record<string, string> = {
     evidence: "EvidenceView",
+    visual_frame: "VisualFrameView",
     activity: "ActivityView",
+    activity_block: "ActivityBlockView",
     proposal: "ProposalView",
     intent: "IntentView",
     workflow: "WorkflowView",
@@ -429,6 +633,51 @@ function viewFamilyLabel(family: string) {
     answer: "AnswerView",
   };
   return labels[family] ?? family;
+}
+
+function viewTypePurpose(type: string) {
+  const labels: Record<string, string> = {
+    evidence: "raw evidence",
+    visual_frame: "screen semantics",
+    activity: "time chunk",
+    activity_block: "10m block",
+    proposal: "next view",
+    resource: "material",
+    intent: "goal signal",
+    workflow: "work session",
+    memory: "agent memory",
+  };
+  return labels[type] ?? "view";
+}
+
+function compilerId(view: { compiler?: { id?: string } | string }) {
+  if (typeof view.compiler === "string") return view.compiler;
+  return view.compiler?.id ?? "";
+}
+
+function sourceRecordCount(view: ContextViewSummary) {
+  return view.source_record_count ?? view.source_records?.length ?? 0;
+}
+
+function sourceViewCount(view: ContextViewSummary) {
+  return view.source_view_count ?? view.source_views?.length ?? 0;
+}
+
+function groupViews(views: ViewFamiliesResponse["views"]) {
+  const order = ["evidence", "visual_frame", "activity", "activity_block", "proposal", "resource", "intent", "workflow", "memory"];
+  const byType = new Map<string, ViewFamiliesResponse["views"]>();
+  for (const view of views) {
+    const group = byType.get(view.view_type) ?? [];
+    group.push(view);
+    byType.set(view.view_type, group);
+  }
+  return [...byType.entries()]
+    .sort((a, b) => {
+      const ai = order.indexOf(a[0]);
+      const bi = order.indexOf(b[0]);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi) || a[0].localeCompare(b[0]);
+    })
+    .map(([type, groupedViews]) => ({ type, views: groupedViews.slice(0, 24) }));
 }
 
 function summarizeSignals(buckets: TimelineBucket[]) {

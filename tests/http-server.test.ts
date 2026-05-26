@@ -3603,6 +3603,26 @@ test("GET /context/views exposes Application-safe View filters", async () => wit
   assert.deepEqual(body.views.map(view => view.id), ["analysis:http-active"]);
 }));
 
+test("GET /context/views can return all Views for an Application list", async () => withStore(async (store) => {
+  for (let index = 0; index < 70; index += 1) {
+    store.upsertView({
+      id: `evidence:http-all-${String(index).padStart(2, "0")}`,
+      view_type: "evidence",
+      status: "candidate",
+      title: `Evidence ${index}`,
+      content: { kind: "screen", index },
+    });
+  }
+
+  const response = await request(store, "/context/views?view_types=evidence&active_only=true&summary_only=true&limit=all");
+  const body = response.body as { ok: boolean; views: Array<{ id: string; content?: Record<string, unknown> }> };
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.views.length, 70);
+  assert.equal(body.views[0].id, "evidence:http-all-69");
+}));
+
 test("GET /context/views tolerates legacy malformed source_views JSON", async () => withStore(async (store) => {
   store.insertRecord({
     id: "record:http-legacy-view-source",

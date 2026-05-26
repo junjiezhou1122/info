@@ -14,7 +14,7 @@ Observation
   -> EvidenceView
   -> ActivityView
   -> IntentView / WorkflowView
-  -> MemoryView
+  -> Memory Views
   -> Agent / App consumption
 ```
 
@@ -25,7 +25,7 @@ Fixed Observations
   -> normalized evidence nodes
   -> time/activity compression
   -> goal/workflow interpretation
-  -> durable memory views
+  -> memory-oriented views
   -> consumed by agents, apps, and other compilers
 ```
 
@@ -37,7 +37,7 @@ EvidenceView = normalized evidence from one or more observations
 ActivityView = time-based compression of evidence into "what happened"
 IntentView   = hypothesis about goal or task
 WorkflowView = structured task/session composed from activities and intents
-MemoryView   = durable View that changes future behavior
+MemoryView   = high-level memory-oriented View consumed by agents/apps
 ProposalView = control View that decides what Views should be created next
 ```
 
@@ -49,7 +49,7 @@ Observation
   -> ActivityView
   -> IntentView
   -> WorkflowView
-  -> MemoryView
+  -> Memory Views
 
 Any View can become input to another View.
 Agents and applications consume Views, not raw sensor logs by default.
@@ -91,7 +91,8 @@ One YouTube watch session
   -> ActivityView(kind="resource_consumption")
   -> IntentView(kind="learning_candidate")
   -> WorkflowView(kind="learning_session")
-  -> MemoryView(kind="learning_interest")
+  -> EpisodeMemoryView(kind="learning_episode")
+  -> SemanticMemoryView(kind="learning_interest")
 ```
 
 The original data stays fixed. The interpretations can evolve.
@@ -462,36 +463,55 @@ Example:
 
 ### L5 MemoryView
 
-MemoryViews are not just old summaries.
+MemoryView is a family name, not a single final artifact.
 
-A MemoryView is a durable View that should change future behavior.
+The important point is not "long-term only". The important point is:
+
+```text
+MemoryView = AI-compressed View that is meant to be consumed by an agent/app
+```
+
+Some MemoryViews are short-lived episode memories. Some are stable user or
+project memories. Some are procedural memories. They can feed each other and
+can be recompressed into higher-level MemoryViews.
 
 Examples:
 
 ```text
-MemoryView(kind="project_pattern")
-MemoryView(kind="user_preference")
-MemoryView(kind="learning_interest")
+MemoryView(kind="episode")
+MemoryView(kind="semantic_fact")
+MemoryView(kind="user_profile")
+MemoryView(kind="project_context")
 MemoryView(kind="workflow_recipe")
-MemoryView(kind="surfacing_preference")
-MemoryView(kind="routine_pattern")
+MemoryView(kind="agent_case")
+MemoryView(kind="agent_skill")
+MemoryView(kind="surfacing_policy")
 ```
 
 Suggested storage shape:
 
 ```text
 view_type = "memory"
-content.kind = "project_pattern" | "user_preference" | "learning_interest" | "workflow_recipe" | "surfacing_preference" | "routine_pattern" | "other"
+content.kind = "episode" | "semantic_fact" | "user_profile" | "project_context" | "workflow_recipe" | "agent_case" | "agent_skill" | "surfacing_policy" | "other"
 ```
 
-Entry conditions should be strict:
+Entry conditions depend on the memory kind:
 
 ```text
-user explicitly asked to remember
-or repeated signal appears over time
-or a View was used successfully in future answers
-or user feedback marked it useful
-or it changes routing/surfacing/policy
+episode memory:
+  created when a meaningful activity/workflow unit closes
+
+semantic/user/project memory:
+  created or updated when stable facts/preferences/context are observed
+
+procedural/skill memory:
+  created when a workflow or agent case has reusable steps
+
+policy/surfacing memory:
+  created when feedback changes what should be shown, hidden, or routed
+
+promotion to long-term:
+  requires explicit user instruction, repetition, positive feedback, or reuse
 ```
 
 Example:
@@ -722,6 +742,213 @@ Use deterministic compilers for structure.
 Use agents for ambiguous meaning.
 ```
 
+This should be read as a compiler strategy rule, not as a product shortcut.
+The current deterministic `IntentView`, `WorkflowView`, and `MemoryView`
+builders are scaffolding. They are useful for proving the graph and UI, but
+they are not the final intelligence layer.
+
+### 8.1 What EverCore / HyperMem Suggest
+
+EverCore and HyperMem both use a similar pattern:
+
+```text
+raw stream
+  -> LLM boundary detection
+  -> compact event unit
+  -> type-specific LLM extractors
+  -> retrieval indexes / graph / later consolidation
+```
+
+EverCore names the compact event unit `MemCell`.
+
+```text
+conversation messages
+  -> MemCell boundary detection
+  -> EpisodeMemory
+  -> AtomicFact
+  -> Profile
+  -> Foresight
+  -> AgentCase
+  -> AgentSkill
+```
+
+HyperMem names the hierarchy differently:
+
+```text
+conversation
+  -> Episode
+  -> Topic
+  -> Fact
+  -> hypergraph edges
+  -> coarse-to-fine retrieval
+```
+
+The transferable lesson is not the exact names. The lesson is:
+
+```text
+Do cheap structure first.
+Use AI where the system must decide semantic boundaries, intent, importance,
+future usefulness, or reusable patterns.
+Store each AI result as a typed View with provenance.
+```
+
+### 8.2 Compression Strategy By View
+
+Info should treat each View family as having its own compression strategy.
+
+```text
+EvidenceView
+  mode: deterministic
+  input: Observation
+  job: normalize source-specific records into auditable evidence
+  reason: this is attribution, not interpretation
+
+ActivityView
+  mode: deterministic first, hybrid later
+  input: EvidenceView
+  job: merge nearby evidence into time/activity blocks
+  reason: duration, app, URL, and focus windows are mostly structural
+
+ProposalView
+  mode: deterministic + heuristic
+  input: ActivityView
+  job: decide which expensive View compilers are worth running
+  reason: it is a cost-control and routing View
+
+ResourceView
+  mode: deterministic + external retrieval
+  input: EvidenceView / ProposalView / URL
+  job: normalize resources and enrich missing source content
+  reason: URL/title/domain are structural; content extraction may call external tools
+
+IntentView
+  mode: llm / agent
+  input: ActivityView + ResourceView + recent user prompts
+  job: infer what the user was probably trying to do
+  reason: intent is ambiguous and cannot be reliably rule-derived
+
+WorkflowView
+  mode: llm / agent
+  input: ActivityView + IntentView + ResourceView
+  job: compress a working session into steps, decisions, blockers, outputs
+  reason: workflow structure requires semantic judgment
+
+MemoryView
+  mode: llm / agent + promotion gates
+  input: ActivityView / IntentView / WorkflowView / existing MemoryView
+  job: create or update agent-consumable memory views
+  reason: memory requires semantic compression, not just structural grouping
+```
+
+### 8.3 When To Compress
+
+Compression should not run only because new data exists. It should run when
+the input has become a useful unit.
+
+Recommended triggers:
+
+```text
+Observation -> EvidenceView
+  immediately or on short runtime tick
+  cheap and deterministic
+
+EvidenceView -> ActivityView
+  every runtime tick
+  after enough elapsed time
+  when app/domain/project changes
+
+ActivityView -> ProposalView
+  after ActivityView creation
+  cheap gate for later expensive work
+
+ProposalView -> IntentView
+  when activity duration is meaningful
+  when there is a resource, selection, prompt, or repeated focus
+  when user asks "what was I doing?"
+
+IntentView + ResourceView -> WorkflowView
+  when a focus block closes
+  when app/project/domain changes
+  at session end
+  on explicit user request
+
+WorkflowView -> MemoryView
+  when a meaningful workflow/session closes
+  when repeated across sessions
+  when explicitly confirmed by the user
+  when reused successfully by an agent
+  during daily/session consolidation
+
+Views + external retrieval -> query response
+  on user query
+  answer can be ephemeral for now; no first-class AnswerView yet
+```
+
+This creates two loops:
+
+```text
+online loop:
+  cheap deterministic Views keep the UI and timeline current
+
+consolidation loop:
+  slower AI compilers turn meaningful closed units into Intent, Workflow,
+  and Memory Views
+```
+
+### 8.4 Compression Registry
+
+The implementation should move toward a registry rather than hard-coded
+compiler calls.
+
+```ts
+type CompressionStrategy = {
+  id: string;
+  output_view_type: string;
+  output_kind: string;
+  input_view_types: string[];
+  mode: "deterministic" | "llm" | "agent" | "hybrid";
+  trigger: string;
+  prompt_id?: string;
+  max_input_views?: number;
+  cost: "low" | "medium" | "high";
+  promotion?: {
+    required_repetition?: number;
+    requires_user_confirmation?: boolean;
+    requires_successful_reuse?: boolean;
+  };
+};
+```
+
+Example:
+
+```ts
+{
+  id: "ai.workflow.session.v1",
+  output_view_type: "workflow",
+  output_kind: "research_session",
+  input_view_types: ["activity", "intent", "resource"],
+  mode: "llm",
+  trigger: "focus_block_closed OR session_end OR explicit_request",
+  prompt_id: "workflow_session_v1",
+  max_input_views: 40,
+  cost: "medium"
+}
+```
+
+Every AI-compressed View should record:
+
+```text
+compiler.id
+compiler.version
+compiler.mode
+prompt_id
+model/provider if applicable
+source_views
+source_records only when directly cited
+lossiness
+confidence or quality note
+```
+
 ## 9. Lifecycle
 
 View lifecycle:
@@ -792,7 +1019,6 @@ WorkflowView
 MemoryView
 ProposalView
 ResourceView
-AnswerView
 ```
 
 Use simple storage `view_type` families where possible:
@@ -806,7 +1032,6 @@ workflow
 memory
 proposal
 resource
-answer
 ```
 
 Use `content.kind` for specialization:
@@ -830,7 +1055,7 @@ WorkflowView:
 
 MemoryView:
   view_type = memory
-  content.kind = project_pattern | user_preference | learning_interest | workflow_recipe | surfacing_preference | routine_pattern | other
+  content.kind = episode | semantic_fact | user_profile | project_context | workflow_recipe | agent_case | agent_skill | surfacing_policy | other
 ```
 
 This keeps the graph easy to query:
@@ -1102,39 +1327,47 @@ promotion evidence:
 
 ## 13. MemoryView Catalog
 
-`MemoryView` should stay stricter than other Views. It is only for durable,
-behavior-changing knowledge.
+`MemoryView` is the family of AI-compressed Views that agents/apps consume as
+memory. It is not only the final long-term layer.
+
+Some MemoryViews are near-term, like episode memory. Some are stable, like user
+profile or project context. Some are reusable procedures, like workflow recipes
+or agent skills.
 
 Recommended `content.kind` catalog:
 
 ```text
-project_pattern
-  A stable architectural or implementation pattern in this project.
-  Example: "Info keeps Observations fixed and generates purpose-specific Views."
+episode
+  A compressed record of one meaningful activity/session.
+  Example: "The user compared EverCore and HyperMem to design Info's View system."
 
-user_preference
-  A persistent user preference that should alter future answers or UI behavior.
+semantic_fact
+  A stable fact extracted from one or more episodes/workflows.
+  Example: "EverCore uses MemCell boundary detection before memory extraction."
+
+user_profile
+  A user preference, trait, goal, or working style.
   Example: "The user prefers simple schemas with family + kind over many top-level view types."
 
-learning_interest
-  A repeated or confirmed learning topic.
-  Example: "The user is actively studying memory systems and agent workflows."
+project_context
+  Stable project architecture, conventions, constraints, or current direction.
+  Example: "Info keeps Observations fixed and generates purpose-specific Views."
 
 workflow_recipe
   A reusable way to perform a task.
   Example: "When changing View compilers, write tests first, then update runtime, then verify UI."
 
-surfacing_preference
-  A preference about what should be shown, hidden, or ranked.
+agent_case
+  A compressed record of how an agent handled one task.
+  Example: "The agent inspected EverCore extractors, then updated the design doc."
+
+agent_skill
+  A reusable skill or procedure distilled from multiple cases.
+  Example: "For memory-system design, inspect boundary detection, extractors, prompts, and retrieval."
+
+surfacing_policy
+  A learned rule for showing, hiding, ranking, or routing Views.
   Example: "Hide low-level Screenpipe recorder activity by default, keep it available in debug."
-
-routine_pattern
-  A repeated activity pattern worth recognizing proactively.
-  Example: "Morning coding sessions often start with Screenpipe/runtime timeline inspection."
-
-tooling_constraint
-  A constraint that should prevent repeated mistakes.
-  Example: "Do not write derived intelligence as context_records; write it as context_views."
 ```
 
 Minimal `MemoryView` content:
@@ -1142,9 +1375,9 @@ Minimal `MemoryView` content:
 ```ts
 {
   kind: string;
-  claim: string;
-  applies_to: string[];
-  future_use: string[];
+  summary: string;
+  extracted_from: string[];
+  use_for: string[];
 }
 ```
 
@@ -1153,7 +1386,8 @@ Promotion rule:
 ```text
 EvidenceView and ActivityView can be deterministic candidates.
 IntentView and WorkflowView can be agent hypotheses.
-MemoryView should require explicit user instruction, repeated evidence, positive feedback, or successful reuse.
+MemoryView can be created from meaningful closed units.
+Only the stable subset should be promoted to long-term behavior-changing memory.
 ```
 
 ## 14. Summary

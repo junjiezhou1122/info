@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { homedir } from "node:os";
 import { ContextStore } from "../core/store.js";
+import type { LlmOptions } from "../core/llm.js";
 import type { ContextRecord, StoredContextRecord, StoredWorkThread } from "../core/types.js";
 import { fetchScreenpipeActivitySummary, fetchScreenpipeInputEvents, fetchScreenpipeRecords, fetchScreenpipeWorkspaceSignals } from "../connectors/screenpipe.js";
 import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "../connectors/ai-sessions.js";
@@ -14,6 +15,8 @@ import { compileActivityTimeline } from "./activity-timeline.js";
 import { compileProjectTimeline } from "./project-timeline.js";
 import { compileEvidenceViews } from "./evidence-view.js";
 import { compileActivityViews, compileIntentViews, compileMemoryViews, compileProposalViews, compileResourceViews, compileWorkflowViews } from "./memory-views.js";
+import { compileIntentViewsWithLlm, compileMemoryViewsWithLlm, compileWorkflowViewsWithLlm } from "./view-compression.js";
+import { compileActivityBlockViews, compileVisualFrameViews } from "./visual-views.js";
 
 export type RuntimeTickRequest = {
   window_minutes?: number;
@@ -31,6 +34,9 @@ export type RuntimeTickRequest = {
   project_snapshot_interval_seconds?: number;
   ai_session_interval_seconds?: number;
   compile_views?: boolean;
+  ai_view_compression?: boolean;
+  visual_view_compression?: boolean;
+  llm?: LlmOptions;
   view_compile_interval_seconds?: number;
   work_thread_view_minutes?: number;
   activity_timeline_minutes?: number;
@@ -336,12 +342,15 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
     last_view_compile_at: lastViewCompileAt,
   };
   if (shouldRunViewCompilers) {
-    compiledViews.push(...compileRuntimeViews({
+    compiledViews.push(...await compileRuntimeViews({
       store,
       write,
       records,
       activeWorkspace,
       windowMinutes,
+      aiViewCompression: req.ai_view_compression,
+      visualViewCompression: req.visual_view_compression ?? req.ai_view_compression,
+      llm: req.llm,
       workThreadMinutes: req.work_thread_view_minutes,
       activityMinutes: req.activity_timeline_minutes,
       projectMinutes: req.project_timeline_minutes,
@@ -395,16 +404,19 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
   };
 }
 
-function compileRuntimeViews(input: {
+async function compileRuntimeViews(input: {
   store: ContextStore;
   write: boolean;
   records?: StoredContextRecord[];
   activeWorkspace?: WorkspaceCandidate;
   windowMinutes: number;
+  aiViewCompression?: boolean;
+  visualViewCompression?: boolean;
+  llm?: LlmOptions;
   workThreadMinutes?: number;
   activityMinutes?: number;
   projectMinutes?: number;
-}): RuntimeTickResult["compiled_views"] {
+}): Promise<RuntimeTickResult["compiled_views"]> {
   const out: RuntimeTickResult["compiled_views"] = [];
   try {
     const compiled = compileEvidenceViews({
@@ -423,6 +435,25 @@ function compileRuntimeViews(input: {
     }, input.store);
     out.push({ view_type: "activity", records_used: compiled.records_used, view_count: activities.views.length, title: "Activity Views" });
 
+    let activityBlocks: Awaited<ReturnType<typeof compileActivityBlockViews>> | undefined;
+    if (input.visualViewCompression) {
+      const visualFrames = await compileVisualFrameViews({
+        write: input.write,
+        evidenceViews: compiled.views,
+        llm: input.llm,
+      }, input.store);
+      out.push({ view_type: "visual_frame", view_count: visualFrames.views.length, title: "AI VisualFrame Views" });
+
+      activityBlocks = await compileActivityBlockViews({
+        write: input.write,
+        visualFrameViews: visualFrames.views,
+        activityViews: activities.views,
+        llm: input.llm,
+        minutes: 10,
+      }, input.store);
+      out.push({ view_type: "activity_block", view_count: activityBlocks.views.length, title: "AI ActivityBlock Views" });
+    }
+
     const proposals = compileProposalViews({
       write: input.write,
       activityViews: activities.views,
@@ -435,24 +466,45 @@ function compileRuntimeViews(input: {
     }, input.store);
     out.push({ view_type: "resource", view_count: resources.views.length, title: "Resource Views" });
 
-    const intents = compileIntentViews({
+    const intents = input.aiViewCompression
+      ? await compileIntentViewsWithLlm({
+        write: input.write,
+        proposalViews: proposals.views,
+        activityBlockViews: activityBlocks?.views,
+        llm: input.llm,
+      }, input.store)
+      : compileIntentViews({
       write: input.write,
       proposalViews: proposals.views,
     }, input.store);
-    out.push({ view_type: "intent", view_count: intents.views.length, title: "Intent Views" });
+    out.push({ view_type: "intent", view_count: intents.views.length, title: input.aiViewCompression ? "AI Intent Views" : "Intent Views" });
 
-    const workflows = compileWorkflowViews({
+    const workflows = input.aiViewCompression
+      ? await compileWorkflowViewsWithLlm({
+        write: input.write,
+        intentViews: intents.views,
+        resourceViews: resources.views,
+        activityBlockViews: activityBlocks?.views,
+        llm: input.llm,
+      }, input.store)
+      : compileWorkflowViews({
       write: input.write,
       intentViews: intents.views,
       resourceViews: resources.views,
     }, input.store);
-    out.push({ view_type: "workflow", view_count: workflows.views.length, title: "Workflow Views" });
+    out.push({ view_type: "workflow", view_count: workflows.views.length, title: input.aiViewCompression ? "AI Workflow Views" : "Workflow Views" });
 
-    const memories = compileMemoryViews({
+    const memories = input.aiViewCompression
+      ? await compileMemoryViewsWithLlm({
+        write: input.write,
+        workflowViews: workflows.views,
+        llm: input.llm,
+      }, input.store)
+      : compileMemoryViews({
       write: input.write,
       workflowViews: workflows.views,
     }, input.store);
-    out.push({ view_type: "memory", view_count: memories.views.length, title: "Memory Views" });
+    out.push({ view_type: "memory", view_count: memories.views.length, title: input.aiViewCompression ? "AI Memory Views" : "Memory Views" });
   } catch (error) {
     out.push({ view_type: "evidence", skipped: error instanceof Error ? error.message : String(error) });
   }

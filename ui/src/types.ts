@@ -89,10 +89,16 @@ export type ContextViewSummary = {
   status?: string;
   source_records?: string[];
   source_views?: string[];
+  source_record_count?: number;
+  source_view_count?: number;
   confidence?: number;
   stability?: string;
   lossiness?: string;
+  compiler?: { id?: string; version?: string } | string;
+  metadata?: Record<string, unknown>;
+  scope?: Record<string, unknown>;
   content?: Record<string, unknown>;
+  created_at?: string;
   updated_at?: string;
 };
 

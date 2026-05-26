@@ -121,6 +121,50 @@ test("runtimeTick persists Screenpipe observations so activity timeline can disp
   }
 }));
 
+test("WorkThread and timeline suppress passive Warp focus and low-value Terminal OCR", () => withStore((store) => {
+  store.insertRecord({
+    id: "record:noise-local-project",
+    schema: { name: "observation.local_project", version: 1 },
+    source: { type: "local_project", connector: "runtime-snapshot" },
+    scope: { project: "info", project_path: "/Users/junjie/info", app: "terminal" },
+    content: {
+      title: "Local project snapshot: info",
+      path: "/Users/junjie/info",
+      text: "Working on VisualFrameView ActivityBlockView WorkflowView MemoryView quality.",
+    },
+    payload: { root: "/Users/junjie/info", cwd: "/Users/junjie/info" },
+    privacy: { level: "private", retention: "normal" },
+  });
+  store.insertRecord({
+    id: "record:noise-warp-focus",
+    schema: { name: "observation.screenpipe_activity_summary", version: 1 },
+    source: { type: "screenpipe", connector: "screenpipe-activity-summary" },
+    scope: { app: "Warp" },
+    content: { title: "Warp - ⠋ info", text: "" },
+    payload: { app_name: "Warp", window_name: "⠋ info", browser_url: "", minutes: 6, frame_count: 40 },
+    privacy: { level: "private", retention: "normal" },
+  });
+  store.insertRecord({
+    id: "record:noise-terminal-ocr",
+    schema: { name: "observation.screenpipe_activity", version: 1 },
+    source: { type: "screenpipe", connector: "screenpipe-local-api" },
+    scope: { app: "Terminal" },
+    content: { title: "Terminal - OCR", text: "random terminal prompt with no useful work signal" },
+    payload: { app_name: "Terminal", window_name: "Terminal - OCR", content_type: "OCR" },
+    privacy: { level: "private", retention: "normal" },
+  });
+
+  const workThread = compileWorkThreadView({ minutes: 60, write: false, min_score: 0.1 }, store);
+  const timeline = compileActivityTimeline({ minutes: 60, write: false }, store);
+  const debugTimeline = compileActivityTimeline({ minutes: 60, write: false, includeLowLevelScreenpipe: true }, store);
+
+  assert.deepEqual(workThread.view.source_records, ["record:noise-local-project"]);
+  assert.doesNotMatch(JSON.stringify(workThread.view.content), /record:noise-warp-focus|record:noise-terminal-ocr/);
+  assert.equal(timeline.buckets.flatMap(bucket => bucket.items).some(item => item.record_ids?.includes("record:noise-warp-focus")), false);
+  assert.equal(timeline.buckets.flatMap(bucket => bucket.items).some(item => item.record_ids?.includes("record:noise-terminal-ocr")), false);
+  assert.ok(debugTimeline.buckets.flatMap(bucket => bucket.items).some(item => item.record_ids?.includes("record:noise-terminal-ocr")));
+}));
+
 
 test("WorkThread View compiler ignores legacy derived and episode Records as evidence", async () => withStore(async (store) => {
   store.insertRecord({

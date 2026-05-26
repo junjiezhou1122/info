@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import { ContextStore } from "../core/store.js";
 import type { ContextRecord, ContextView, StoredContextRecord, StoredContextView } from "../core/types.js";
 import { buildCandidateThreads, extractFeatures, type CandidateThread } from "./correlation.js";
+import { isHighScreenNoise } from "./screen-noise.js";
 
 export const WORK_THREAD_VIEW_COMPILER_ID = "builtin.work-thread-view";
 
@@ -144,6 +145,7 @@ function selectCodingRecords(records: StoredContextRecord[]): StoredContextRecor
     .filter(record => record.schema.name !== "observation.browser_page_heartbeat")
     .filter(record => !record.schema.name.startsWith("derived."))
     .filter(record => !record.schema.name.startsWith("episode."))
+    .filter(record => !isHighScreenNoise(record))
     .filter(record => CODING_SCHEMAS.has(record.schema.name) || hasCodingSignal(record))
     .filter(record => record.privacy?.retention !== "do_not_store");
 }

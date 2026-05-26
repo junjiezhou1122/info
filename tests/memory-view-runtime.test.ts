@@ -102,6 +102,69 @@ test("ProposalView proposes resource, intent, and workflow Views from ActivityVi
   assert.ok(proposed.some(item => item.view_type === "workflow" && item.kind === "learning_session"));
 }));
 
+test("ProposalView defers intent and workflow for passive browser dwell", () => withStore((store) => {
+  const activity = store.upsertView({
+    id: "activity:passive-browser-dwell",
+    view_type: "activity",
+    title: "Lecture 1 - YouTube",
+    source_records: ["record:page"],
+    source_views: ["evidence:page"],
+    content: {
+      kind: "resource_consumption",
+      start: "2026-05-25T10:00:00.000Z",
+      end: "2026-05-25T11:00:00.000Z",
+      duration_minutes: 60,
+      app: "Chrome",
+      domain: "youtube.com",
+      resource: { type: "url", url: "https://www.youtube.com/watch?v=lecture", title: "Lecture 1 - YouTube", domain: "youtube.com" },
+      action: "watching_or_reading",
+      evidence_summary: {
+        evidence_views: 4,
+        kinds: { page: 4 },
+        origins: { "observation.browser_page_heartbeat": 4 },
+        metrics: {
+          active_seconds_sum: 0,
+          active_seconds_max: 0,
+          scroll_events_sum: 0,
+          selection_count_sum: 0,
+          selected_text_length_sum: 0,
+        },
+      },
+    },
+    confidence: 0.94,
+  });
+
+  const proposal = compileProposalViews({ write: true, activityViews: [activity] }, store).views[0];
+  const proposed = proposal.content?.proposed_views as Array<Record<string, unknown>>;
+
+  assert.ok(proposed.some(item => item.view_type === "resource" && item.decision === "materialize_now"));
+  assert.ok(proposed.some(item => item.view_type === "intent" && item.decision === "defer" && item.confidence === 0.35));
+  assert.ok(proposed.some(item => item.view_type === "workflow" && item.decision === "defer" && item.confidence === 0.35));
+}));
+
+test("ProposalView does not materialize app-focus-only activity", () => withStore((store) => {
+  const activity = store.upsertView({
+    id: "activity:app-focus-only",
+    view_type: "activity",
+    title: "Warp",
+    source_records: ["record:focus"],
+    source_views: ["evidence:focus"],
+    content: {
+      kind: "app_focus",
+      start: "2026-05-25T10:00:00.000Z",
+      end: "2026-05-25T10:05:00.000Z",
+      duration_minutes: 5,
+      app: "Warp",
+      action: "using_app",
+    },
+    confidence: 0.78,
+  });
+
+  const result = compileProposalViews({ write: true, activityViews: [activity] }, store);
+
+  assert.equal(result.views.length, 0);
+}));
+
 test("ResourceView materializes low-cost resource proposals with Activity provenance", () => withStore((store) => {
   const activity = store.upsertView({
     id: "activity:resource-materialize",
@@ -133,6 +196,39 @@ test("ResourceView materializes low-cost resource proposals with Activity proven
   assert.deepEqual(resource.source_views, [proposal.id, activity.id]);
   assert.deepEqual(resource.source_records, ["record:page"]);
   assert.equal(resource.lossiness, "low");
+}));
+
+test("ResourceView uses canonical URL identity across visits", () => withStore((store) => {
+  const makeActivity = (id: string, url: string) => store.upsertView({
+    id,
+    view_type: "activity",
+    title: "A2A docs",
+    source_records: [`record:${id}`],
+    source_views: [`evidence:${id}`],
+    content: {
+      kind: "resource_consumption",
+      start: "2026-05-25T10:00:00.000Z",
+      end: "2026-05-25T10:08:00.000Z",
+      duration_minutes: 8,
+      app: "Chrome",
+      domain: "example.com",
+      resource: { type: "url", url, title: "A2A docs", domain: "example.com" },
+      action: "watching_or_reading",
+      evidence_summary: { metrics: { active_seconds_max: 120 } },
+    },
+    confidence: 0.9,
+  });
+  const one = makeActivity("activity:resource-one", "https://example.com/docs?utm_source=x#intro");
+  const two = makeActivity("activity:resource-two", "https://example.com/docs");
+  const proposals = [
+    compileProposalViews({ write: true, activityViews: [one] }, store).views[0],
+    compileProposalViews({ write: true, activityViews: [two] }, store).views[0],
+  ];
+
+  const result = compileResourceViews({ write: true, proposalViews: proposals }, store);
+
+  assert.equal(new Set(result.views.map(view => view.id)).size, 1);
+  assert.equal(store.listViews({ view_types: ["resource"], limit: 10 }).length, 1);
 }));
 
 test("IntentView records hypotheses separately from observed Activity evidence", () => withStore((store) => {
@@ -266,6 +362,30 @@ test("MemoryView captures durable behavior-changing knowledge with provenance", 
   assert.match(String(memory.purpose), /future behavior/);
 });
 
+test("listViews filters by type before applying the visible limit", () => withStore((store) => {
+  store.upsertView({
+    id: "memory:older-visible",
+    view_type: "memory",
+    title: "Older memory",
+    content: { kind: "episode", summary: "Older memory" },
+    confidence: 0.8,
+  });
+  for (let index = 0; index < 30; index += 1) {
+    store.upsertView({
+      id: `activity:newer-${index}`,
+      view_type: "activity",
+      title: `Newer activity ${index}`,
+      content: { kind: "segment" },
+      confidence: 0.7,
+    });
+  }
+
+  const memories = store.listViews({ view_types: ["memory"], active_only: true, limit: 1 });
+
+  assert.equal(memories.length, 1);
+  assert.equal(memories[0].id, "memory:older-visible");
+}));
+
 test("runtimeTick compiles EvidenceView, ActivityView, and ProposalView families", async () => withStore(async (store) => {
   const base = Date.now() - 20 * 60_000;
   for (const [id, observedAt] of [
@@ -283,7 +403,7 @@ test("runtimeTick compiles EvidenceView, ActivityView, and ProposalView families
         url: "https://www.youtube.com/watch?v=memory",
         text: "Long-term memory and activity view design.",
       },
-      payload: { dwell_seconds: 180, scroll_depth: 0.2 },
+      payload: { dwell_seconds: 600, active_seconds: 120, scroll_depth: 0.2, scroll_events: 2 },
       privacy: { level: "private", retention: "normal", allow_external_llm: false },
     });
   }

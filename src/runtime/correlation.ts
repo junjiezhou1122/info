@@ -1,4 +1,5 @@
 import type { ContextRecord, StoredContextRecord } from "../core/types.js";
+import { isHighScreenNoise, screenNoiseLevel } from "./screen-noise.js";
 
 export type RecordFeatures = {
   id: string;
@@ -75,6 +76,7 @@ export function extractFeatures(record: StoredContextRecord): RecordFeatures {
     record.content?.path,
     JSON.stringify(payload),
   ].filter(Boolean).join("\n");
+  const noise = screenNoiseLevel(record);
   const url = record.content?.url ?? stringValue(payload.browser_url) ?? stringValue(payload.url);
   const domain = record.scope?.domain ?? domainFromUrl(url) ?? domainFromUrl(stringValue(payload.browser_url));
   const path = record.content?.path ?? stringValue(payload.path) ?? stringValue(payload.root) ?? stringValue(payload.cwd);
@@ -89,7 +91,7 @@ export function extractFeatures(record: StoredContextRecord): RecordFeatures {
     schema_name: record.schema.name,
     source_type: record.source.type,
     connector: record.source.connector,
-    app: record.scope?.app ?? stringValue(payload.app_name),
+    app: noise === "high" ? undefined : record.scope?.app ?? stringValue(payload.app_name),
     domain,
     url,
     path: projectPath ?? path,
@@ -98,8 +100,8 @@ export function extractFeatures(record: StoredContextRecord): RecordFeatures {
     session: record.scope?.session ?? stringValue(payload.session_id),
     title: record.content?.title,
     text: record.content?.text,
-    keywords: extractKeywords(rawText),
-    file_paths: extractFilePaths(rawText),
+    keywords: noise === "high" ? [] : extractKeywords(rawText),
+    file_paths: noise === "high" ? [] : extractFilePaths(rawText),
   };
 }
 
@@ -200,7 +202,7 @@ export function scorePair(a: RecordFeatures, b: RecordFeatures): PairEvidence {
 
 export function buildCandidateThreads(records: StoredContextRecord[], options: { minScore?: number; maxThreads?: number } = {}): CandidateThread[] {
   const minScore = options.minScore ?? 0.4;
-  const dedupedRecords = dedupeRecords(records);
+  const dedupedRecords = dedupeRecords(records).filter(record => !isHighScreenNoise(record));
   indexExplicitRelations(dedupedRecords);
   const features = dedupedRecords.map(extractFeatures);
   const anchors = chooseAnchors(dedupedRecords, features);

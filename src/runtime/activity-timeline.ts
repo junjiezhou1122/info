@@ -1,6 +1,7 @@
 import { ContextStore } from "../core/store.js";
 import { filterEventsForPlugin } from "../broker/context-broker.js";
 import type { ContextView, RuntimeEvent, StoredContextRecord, StoredContextView, StoredRuntimeEvent } from "../core/types.js";
+import { isHighScreenNoise, screenNoiseLevel } from "./screen-noise.js";
 
 export const ACTIVITY_TIMELINE_COMPILER_ID = "builtin.activity-timeline";
 
@@ -147,7 +148,7 @@ function recordMatchesSourceFilter(record: StoredContextRecord, filter: CompileA
 }
 
 function isDefaultActivityNoise(record: StoredContextRecord): boolean {
-  return isScreenpipeRecorderRecord(record) || isInfoTimelineSelfObservation(record);
+  return isHighScreenNoise(record) || isInfoTimelineSelfObservation(record);
 }
 
 function isScreenpipeRecorderRecord(record: StoredContextRecord): boolean {
@@ -707,6 +708,9 @@ function eventTitle(event: RuntimeEvent): string {
 
 function importanceOf(record: StoredContextRecord): number {
   if (typeof record.signal?.importance === "number") return record.signal.importance;
+  const noise = screenNoiseLevel(record);
+  if (noise === "high") return 0.05;
+  if (noise === "low") return 0.18;
   if (record.acquisition?.mode === "manual") return 0.9;
   if (record.schema.name === "observation.local_project") return 0.85;
   if (record.schema.name.includes("ai_session")) return 0.8;
