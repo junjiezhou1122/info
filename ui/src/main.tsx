@@ -241,6 +241,7 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
   const [typeViews, setTypeViews] = useState<Record<string, ContextViewSummary[]>>({});
   const [typeLoading, setTypeLoading] = useState(false);
   const [typeStatus, setTypeStatus] = useState("");
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const families = response?.families ?? [];
   const familyByType = useMemo(() => new Map(families.map(family => [family.family, family])), [families]);
   const views = typeViews[selectedType] ?? [];
@@ -323,6 +324,18 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
     onInspect({ view: activeView, loading: detailLoading });
   }, [activeView, detailLoading, onInspect]);
 
+  useEffect(() => {
+    const target = loadMoreRef.current;
+    const current = typeViews[selectedType] ?? [];
+    const familyCount = familyByType.get(selectedType)?.count ?? 0;
+    if (!target || current.length >= familyCount) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) void loadMore();
+    }, { root: null, rootMargin: "900px 0px", threshold: 0.01 });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [selectedType, selectedViews.length, typeLoading, familyByType, typeViews]);
+
   async function loadMore() {
     const current = typeViews[selectedType] ?? [];
     const familyCount = familyByType.get(selectedType)?.count ?? 0;
@@ -377,7 +390,9 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
               <ViewListRow key={view.id} view={view} selected={view.id === selectedSummary?.id} onSelect={() => setSelectedViewId(view.id)} />
             )) : <div className="empty-inline">{typeLoading ? `Loading ${viewFamilyLabel(selectedType)}…` : `No ${viewFamilyLabel(selectedType)} yet.`}</div>}
             {selectedViews.length < (familyByType.get(selectedType)?.count ?? 0) && (
-              <button className="load-more" type="button" onClick={loadMore} disabled={typeLoading}>{typeLoading ? "Loading…" : "Load more"}</button>
+              <div className="load-more-sentinel" ref={loadMoreRef}>
+                {typeLoading ? "Loading more…" : "Scroll for more"}
+              </div>
             )}
           </div>
         </div>
