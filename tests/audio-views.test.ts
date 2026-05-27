@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { ContextStore } from "../src/core/store.js";
 import { AI_AUDIO_VIEW_STRATEGY_ID, compileAudioViews, type AudioViewAnalyzer } from "../src/runtime/audio-views.js";
 import { buildEvidenceView } from "../src/runtime/evidence-view.js";
+import { normalizeScreenpipeResult } from "../src/connectors/screenpipe.js";
 
 function withStore(fn: (store: ContextStore) => Promise<void> | void) {
   const dir = mkdtempSync(join(tmpdir(), "info-audio-views-test-"));
@@ -115,3 +116,21 @@ test("AudioView compiler skips empty or too-short transcripts", () => withStore(
   assert.equal(result.views.length, 0);
   assert.equal(calls, 0);
 }));
+
+
+test("Screenpipe Audio search results normalize as audio records even when item.type is Audio", () => {
+  const record = normalizeScreenpipeResult({
+    type: "Audio",
+    content: {
+      chunk_id: 14901,
+      timestamp: "2026-05-26T23:03:46+08:00",
+      transcription: "这个之后你在这个任务上跑",
+      device_name: "System Audio",
+      speaker: { id: 41, name: "" },
+    },
+  }, 0, "http://localhost:3030");
+
+  assert.equal(record.schema.name, "observation.screenpipe_audio");
+  assert.equal(record.content?.text, "这个之后你在这个任务上跑");
+  assert.equal(record.payload?.audio_chunk_id, 14901);
+});

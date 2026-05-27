@@ -20,6 +20,7 @@ export type LlmOptions = {
   model?: string;
   temperature?: number;
   max_tokens?: number;
+  omit_max_tokens?: boolean;
   allow_external?: boolean;
 };
 
@@ -65,28 +66,34 @@ async function completion(messages: Array<ChatMessage | VisionMessage>, options:
     return { ok: false, model: cfg.model, base_url: cfg.base_url, error: "missing LLM_API_KEY/OPENAI_API_KEY" };
   }
 
-  try {
-    const res = await fetch(`${cfg.base_url}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(cfg.api_key ? { Authorization: `Bearer ${cfg.api_key}` } : {}),
-      },
-      body: JSON.stringify({
-        model: cfg.model,
-        messages,
-        temperature: options.temperature ?? 0.2,
-        max_tokens: options.max_tokens ?? 800,
-        ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
-      }),
-    });
-    if (!res.ok) return { ok: false, model: cfg.model, base_url: cfg.base_url, error: `${res.status} ${await res.text()}` };
-    const json = await res.json() as any;
-    const content = json.choices?.[0]?.message?.content;
-    return { ok: Boolean(content), model: cfg.model, base_url: cfg.base_url, content, error: content ? undefined : "empty completion" };
-  } catch (error: any) {
-    return { ok: false, model: cfg.model, base_url: cfg.base_url, error: error?.message ?? String(error) };
+  const body = JSON.stringify({
+    model: cfg.model,
+    messages,
+    temperature: options.temperature ?? 0.2,
+    ...(options.omit_max_tokens ? {} : { max_tokens: options.max_tokens ?? 800 }),
+    ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+  });
+  let lastError = "";
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const res = await fetch(`${cfg.base_url}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(cfg.api_key ? { Authorization: `Bearer ${cfg.api_key}` } : {}),
+        },
+        body,
+      });
+      if (!res.ok) return { ok: false, model: cfg.model, base_url: cfg.base_url, error: `${res.status} ${await res.text()}` };
+      const json = await res.json() as any;
+      const content = json.choices?.[0]?.message?.content;
+      return { ok: Boolean(content), model: cfg.model, base_url: cfg.base_url, content, error: content ? undefined : "empty completion" };
+    } catch (error: any) {
+      lastError = error?.message ?? String(error);
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+    }
   }
+  return { ok: false, model: cfg.model, base_url: cfg.base_url, error: lastError || "completion failed" };
 }
 
 export function parseJsonObject(text: string): Record<string, unknown> | undefined {

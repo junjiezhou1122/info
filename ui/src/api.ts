@@ -1,4 +1,4 @@
-import type { ActivityTimelineResponse, ContextViewSummary, RuntimeTickResponse, ViewFamiliesResponse, ViewListResponse } from "./types";
+import type { ActivityTimelineResponse, ContextViewSummary, RuntimeSettings, RuntimeSettingsResponse, RuntimeTickResponse, ViewFamiliesResponse, ViewListResponse } from "./types";
 
 const API_BASE = import.meta.env.VITE_CONTEXT_API_BASE ?? "http://localhost:3111";
 const DEFAULT_TIMEOUT_MS = 8_000;
@@ -22,6 +22,32 @@ export async function syncScreenpipe(windowMinutes = 15): Promise<RuntimeTickRes
     }),
   }, 12_000);
   if (!res.ok) throw new Error(`screenpipe sync failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runRuntimeTick(body: Record<string, unknown>): Promise<RuntimeTickResponse> {
+  const res = await fetchWithTimeout(`${API_BASE}/runtime/tick`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }, 180_000);
+  if (!res.ok) throw new Error(`runtime tick failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchRuntimeSettings(): Promise<RuntimeSettingsResponse> {
+  const res = await fetchWithTimeout(`${API_BASE}/runtime/settings`, undefined, 8_000);
+  if (!res.ok) throw new Error(`runtime settings fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function saveRuntimeSettings(settings: RuntimeSettings): Promise<RuntimeSettingsResponse> {
+  const res = await fetchWithTimeout(`${API_BASE}/runtime/settings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  }, 12_000);
+  if (!res.ok) throw new Error(`runtime settings save failed: ${res.status}`);
   return res.json();
 }
 

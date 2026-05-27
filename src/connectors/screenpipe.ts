@@ -120,7 +120,7 @@ function pickWindow(item: any): string | undefined {
 
 function pickContentType(item: any): string | undefined {
   const c = item.content ?? item;
-  return item.type ?? c.content_type ?? c.type;
+  return c.content_type ?? c.type ?? item.type;
 }
 
 function isAudioContentType(value: string | undefined): boolean {
@@ -131,6 +131,17 @@ function pickAudioChunkId(item: any): string | number | undefined {
   const c = item.content ?? item;
   const value = c.audio_chunk_id ?? c.chunk_id ?? item.audio_chunk_id ?? item.chunk_id;
   return typeof value === "string" || typeof value === "number" ? value : undefined;
+}
+
+function isAudioResult(item: any): boolean {
+  const contentType = pickContentType(item);
+  if (isAudioContentType(contentType)) return true;
+  const c = item.content ?? item;
+  return pickAudioChunkId(item) !== undefined
+    || c.transcription !== undefined
+    || c.transcription_id !== undefined
+    || item.transcription !== undefined
+    || item.transcription_id !== undefined;
 }
 
 function pickTranscriptionId(item: any): string | number | undefined {
@@ -200,7 +211,7 @@ export function normalizeScreenpipeResult(item: any, index: number, screenpipeUr
 
   const schemaName = String(content_type ?? "").toLowerCase() === "input"
     ? "observation.screenpipe_input_event"
-    : isAudioContentType(content_type)
+    : isAudioResult(item)
       ? "observation.screenpipe_audio"
       : "observation.screenpipe_activity";
   const record: ContextRecord = {

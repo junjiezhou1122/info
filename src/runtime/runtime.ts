@@ -38,10 +38,30 @@ export type RuntimeTickRequest = {
   ai_view_compression?: boolean;
   visual_view_compression?: boolean;
   llm?: LlmOptions;
+  vision_llm?: LlmOptions;
+  visual_frame_limit?: number;
+  visual_frame_concurrency?: number;
+  visual_frame_sample_seconds?: number;
   view_compile_interval_seconds?: number;
   work_thread_view_minutes?: number;
   activity_timeline_minutes?: number;
   project_timeline_minutes?: number;
+};
+
+export const RUNTIME_SETTINGS_KEY = "runtime_settings";
+
+export type RuntimeSettings = {
+  compile_views?: boolean;
+  ai_view_compression?: boolean;
+  visual_view_compression?: boolean;
+  ai_paused?: boolean;
+  visual_paused?: boolean;
+  view_compile_interval_seconds?: number;
+  visual_frame_limit?: number;
+  visual_frame_concurrency?: number;
+  visual_frame_sample_seconds?: number;
+  llm?: LlmOptions;
+  vision_llm?: LlmOptions;
 };
 
 export type WorkspaceCandidate = {
@@ -84,6 +104,64 @@ export type RuntimeStatus = {
   runtime_state: Array<{ key: string; updated_at: string; value: Record<string, unknown> }>;
 };
 
+export function defaultRuntimeSettings(): RuntimeSettings {
+  return {
+    compile_views: true,
+    ai_view_compression: true,
+    visual_view_compression: true,
+    ai_paused: false,
+    visual_paused: false,
+    view_compile_interval_seconds: 120,
+    visual_frame_limit: Number(process.env.RUNTIME_VISUAL_FRAME_LIMIT ?? 0),
+    visual_frame_concurrency: Number(process.env.RUNTIME_VISUAL_FRAME_CONCURRENCY ?? 6),
+    visual_frame_sample_seconds: Number(process.env.RUNTIME_VISUAL_FRAME_SAMPLE_SECONDS ?? 45),
+    llm: compactLlmOptions({
+      base_url: process.env.AI_VIEW_LLM_BASE_URL ?? process.env.LLM_BASE_URL,
+      api_key: process.env.AI_VIEW_LLM_API_KEY ?? process.env.LLM_API_KEY,
+      model: process.env.AI_VIEW_LLM_MODEL ?? process.env.LLM_MODEL,
+      allow_external: true,
+      omit_max_tokens: true,
+    }),
+    vision_llm: compactLlmOptions({
+      base_url: process.env.VISION_LLM_BASE_URL,
+      api_key: process.env.VISION_LLM_API_KEY,
+      model: process.env.VISION_LLM_MODEL,
+      allow_external: true,
+      omit_max_tokens: true,
+    }),
+  };
+}
+
+export function runtimeSettings(store = new ContextStore()): RuntimeSettings {
+  const saved = sanitizeRuntimeSettings(store.getRuntimeState(RUNTIME_SETTINGS_KEY)?.value ?? {});
+  return {
+    ...defaultRuntimeSettings(),
+    ...saved,
+    llm: mergeLlm(defaultRuntimeSettings().llm, saved.llm),
+    vision_llm: mergeLlm(defaultRuntimeSettings().vision_llm, saved.vision_llm),
+  };
+}
+
+export function saveRuntimeSettings(input: Record<string, unknown>, store = new ContextStore()): RuntimeSettings {
+  const current = runtimeSettings(store);
+  const next = sanitizeRuntimeSettings({
+    ...current,
+    ...input,
+    llm: mergeLlm(current.llm, isRecord(input.llm) ? input.llm : undefined),
+    vision_llm: mergeLlm(current.vision_llm, isRecord(input.vision_llm) ? input.vision_llm : undefined),
+  });
+  store.setRuntimeState(RUNTIME_SETTINGS_KEY, next as Record<string, unknown>);
+  return next;
+}
+
+export function publicRuntimeSettings(settings: RuntimeSettings): RuntimeSettings {
+  return {
+    ...settings,
+    llm: redactLlm(settings.llm),
+    vision_llm: redactLlm(settings.vision_llm),
+  };
+}
+
 export function runtimeStatus(store = new ContextStore()): RuntimeStatus {
   return {
     ok: true,
@@ -97,6 +175,7 @@ export function runtimeStatus(store = new ContextStore()): RuntimeStatus {
 
 export async function runtimeTick(req: RuntimeTickRequest = {}, store = new ContextStore()): Promise<RuntimeTickResult> {
   const generatedAt = new Date().toISOString();
+  const settings = runtimeSettings(store);
   const windowMinutes = req.window_minutes ?? 10;
   const timeWindow = { minutes: windowMinutes };
   const includeScreenpipe = req.include_screenpipe ?? true;
@@ -177,6 +256,21 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
       error: screenpipe.error,
     };
     screenpipeRecords.push(...screenpipe.records);
+
+    const screenpipeAudio = await fetchScreenpipeRecords({
+      limit: Math.max(req.screenpipe_limit ?? 8, Number(process.env.RUNTIME_SCREENPIPE_AUDIO_LIMIT ?? 20)),
+      content_type: "audio",
+      start_time: `${windowMinutes}m ago`,
+      end_time: "now",
+    });
+    diagnostics.screenpipe_audio = {
+      ok: screenpipeAudio.ok,
+      url: screenpipeAudio.url,
+      query: screenpipeAudio.query,
+      count: screenpipeAudio.records.length,
+      error: screenpipeAudio.error,
+    };
+    screenpipeRecords.push(...screenpipeAudio.records);
   }
   if (write && screenpipeRecords.length) {
     for (const record of dedupeRecords(screenpipeRecords)) {
@@ -332,12 +426,20 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
     }
   }
 
-  const shouldCompileViews = req.compile_views ?? true;
-  const viewCompileIntervalSeconds = req.view_compile_interval_seconds ?? 120;
+  const effectiveLlm = mergeLlm(settings.llm, req.llm);
+  const effectiveVisionLlm = mergeLlm(settings.vision_llm, req.vision_llm);
+  const shouldCompileViews = req.compile_views ?? settings.compile_views ?? true;
+  const effectiveAiCompression = settings.ai_paused ? false : (req.ai_view_compression ?? settings.ai_view_compression ?? true);
+  const effectiveVisualCompression = settings.visual_paused ? false : (req.visual_view_compression ?? settings.visual_view_compression ?? effectiveAiCompression);
+  const viewCompileIntervalSeconds = req.view_compile_interval_seconds ?? settings.view_compile_interval_seconds ?? 120;
   const lastViewCompileAt = stringValue(previousTick.last_view_compile_at);
   const shouldRunViewCompilers = shouldCompileViews && (force || secondsSince(lastViewCompileAt) >= viewCompileIntervalSeconds);
   diagnostics.view_compile = {
     enabled: shouldCompileViews,
+    ai_view_compression: effectiveAiCompression,
+    visual_view_compression: effectiveVisualCompression,
+    ai_paused: settings.ai_paused,
+    visual_paused: settings.visual_paused,
     interval_seconds: viewCompileIntervalSeconds,
     skipped: !shouldRunViewCompilers,
     last_view_compile_at: lastViewCompileAt,
@@ -349,9 +451,13 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
       records,
       activeWorkspace,
       windowMinutes,
-      aiViewCompression: req.ai_view_compression,
-      visualViewCompression: req.visual_view_compression ?? req.ai_view_compression,
-      llm: req.llm,
+      aiViewCompression: effectiveAiCompression,
+      visualViewCompression: effectiveVisualCompression,
+      llm: effectiveLlm,
+      visionLlm: effectiveVisionLlm,
+      visualFrameLimit: req.visual_frame_limit ?? settings.visual_frame_limit,
+      visualFrameConcurrency: req.visual_frame_concurrency ?? settings.visual_frame_concurrency,
+      visualFrameSampleSeconds: req.visual_frame_sample_seconds ?? settings.visual_frame_sample_seconds,
       workThreadMinutes: req.work_thread_view_minutes,
       activityMinutes: req.activity_timeline_minutes,
       projectMinutes: req.project_timeline_minutes,
@@ -414,6 +520,10 @@ async function compileRuntimeViews(input: {
   aiViewCompression?: boolean;
   visualViewCompression?: boolean;
   llm?: LlmOptions;
+  visionLlm?: LlmOptions;
+  visualFrameLimit?: number;
+  visualFrameConcurrency?: number;
+  visualFrameSampleSeconds?: number;
   workThreadMinutes?: number;
   activityMinutes?: number;
   projectMinutes?: number;
@@ -448,7 +558,10 @@ async function compileRuntimeViews(input: {
       const visualFrames = await compileVisualFrameViews({
         write: input.write,
         evidenceViews: compiled.views,
-        llm: input.llm,
+        llm: input.visionLlm,
+        limit: input.visualFrameLimit,
+        concurrency: input.visualFrameConcurrency,
+        sampleIntervalSeconds: input.visualFrameSampleSeconds,
       }, input.store);
       out.push({ view_type: "visual_frame", view_count: visualFrames.views.length, title: "AI VisualFrame Views" });
 
@@ -817,6 +930,69 @@ function expandUserPath(path: string): string {
   if (withoutFileScheme === "~") return homedir();
   if (withoutFileScheme.startsWith("~/")) return `${homedir()}/${withoutFileScheme.slice(2)}`;
   return withoutFileScheme;
+}
+
+function sanitizeRuntimeSettings(input: Record<string, unknown>): RuntimeSettings {
+  const out: RuntimeSettings = {};
+  for (const key of ["compile_views", "ai_view_compression", "visual_view_compression", "ai_paused", "visual_paused"] as const) {
+    if (typeof input[key] === "boolean") out[key] = input[key];
+  }
+  const numbers: Array<[keyof RuntimeSettings, unknown]> = [
+    ["view_compile_interval_seconds", input.view_compile_interval_seconds],
+    ["visual_frame_limit", input.visual_frame_limit],
+    ["visual_frame_concurrency", input.visual_frame_concurrency],
+    ["visual_frame_sample_seconds", input.visual_frame_sample_seconds],
+  ];
+  for (const [key, value] of numbers) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) (out as Record<string, unknown>)[key] = Math.floor(n);
+  }
+  if (isRecord(input.llm)) out.llm = compactLlmOptions(input.llm);
+  if (isRecord(input.vision_llm)) out.vision_llm = compactLlmOptions(input.vision_llm);
+  return out;
+}
+
+function mergeLlm(base?: LlmOptions, override?: Record<string, unknown> | LlmOptions): LlmOptions | undefined {
+  const merged = compactLlmOptions({ ...(base ?? {}), ...(override ?? {}) });
+  return Object.keys(merged).length ? merged : undefined;
+}
+
+function compactLlmOptions(input: Record<string, unknown>): LlmOptions {
+  const out: LlmOptions = {};
+  const baseUrl = stringValue(input.base_url);
+  const apiKey = stringValue(input.api_key);
+  const model = stringValue(input.model);
+  if (baseUrl) out.base_url = baseUrl;
+  if (apiKey && !isRedactedSecret(apiKey)) out.api_key = apiKey;
+  if (model) out.model = model;
+  const temperature = Number(input.temperature);
+  if (Number.isFinite(temperature)) out.temperature = temperature;
+  const maxTokens = Number(input.max_tokens);
+  if (Number.isFinite(maxTokens) && maxTokens > 0) out.max_tokens = Math.floor(maxTokens);
+  if (typeof input.omit_max_tokens === "boolean") out.omit_max_tokens = input.omit_max_tokens;
+  if (typeof input.allow_external === "boolean") out.allow_external = input.allow_external;
+  return out;
+}
+
+function redactLlm(llm?: LlmOptions): LlmOptions | undefined {
+  if (!llm) return undefined;
+  return {
+    ...llm,
+    api_key: llm.api_key ? redactSecret(llm.api_key) : undefined,
+  };
+}
+
+function redactSecret(secret: string): string {
+  if (secret.length <= 10) return "********";
+  return `${secret.slice(0, 3)}…${secret.slice(-4)}`;
+}
+
+function isRedactedSecret(secret: string): boolean {
+  return secret.includes("…") || /^\*+$/.test(secret);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function stringValue(value: unknown): string | undefined {

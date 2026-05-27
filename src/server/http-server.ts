@@ -6,7 +6,7 @@ import { ContextArtifactSchema, ContextConnectorSchema, ContextPackRequestSchema
 import { enrichWithJinaReader, shouldAutoEnrichBrowserRecord } from "../connectors/enrichment.js";
 import { fetchScreenpipeFrameImage, fetchScreenpipeRecords } from "../connectors/screenpipe.js";
 import { aiSessionRefToRecord, locateAiSessions } from "../connectors/ai-sessions.js";
-import { runtimeStatus, runtimeTick } from "../runtime/runtime.js";
+import { publicRuntimeSettings, runtimeSettings, runtimeStatus, runtimeTick, saveRuntimeSettings } from "../runtime/runtime.js";
 import { compileObservationTimeline } from "../runtime/timeline.js";
 import { compileActivityTimeline } from "../runtime/activity-timeline.js";
 import { compileProjectTimeline } from "../runtime/project-timeline.js";
@@ -1031,7 +1031,12 @@ export function createContextHttpHandler(store: ContextStore) {
         ai_session_interval_seconds: body.ai_session_interval_seconds,
         compile_views: body.compile_views,
         ai_view_compression: body.ai_view_compression,
+        visual_view_compression: body.visual_view_compression,
+        visual_frame_limit: body.visual_frame_limit,
+        visual_frame_concurrency: body.visual_frame_concurrency,
+        visual_frame_sample_seconds: body.visual_frame_sample_seconds,
         llm: body.llm,
+        vision_llm: body.vision_llm,
         view_compile_interval_seconds: body.view_compile_interval_seconds,
         work_thread_view_minutes: body.work_thread_view_minutes,
         activity_timeline_minutes: body.activity_timeline_minutes,
@@ -1039,6 +1044,23 @@ export function createContextHttpHandler(store: ContextStore) {
       }, store);
       store.appendRuntimeEvent({ event_type: "runtime_tick_completed", actor: "system", status: "completed", subject_type: "runtime", subject_id: "runtime_tick", related_threads: result.written_threads, related_records: result.evidence.written_records, payload: { active_workspace: result.active_workspace, evidence: result.evidence, candidate_count: result.candidate_threads.length } });
       return send(res, 200, result);
+    }
+
+    if (req.method === "GET" && url.pathname === "/runtime/settings") {
+      const pluginParam = url.searchParams.get("plugin_id");
+      const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
+      if (pluginParam) return send(res, 403, { ok: false, error: "plugins cannot read raw runtime settings", plugin_id: pluginParam, plugin_loaded: Boolean(plugin) });
+      return send(res, 200, { ok: true, settings: publicRuntimeSettings(runtimeSettings(store)) });
+    }
+
+    if (req.method === "POST" && url.pathname === "/runtime/settings") {
+      const body = await readJson(req);
+      const pluginParam = url.searchParams.get("plugin_id") ?? (typeof body.plugin_id === "string" ? body.plugin_id : undefined);
+      const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
+      if (pluginParam) return send(res, 403, { ok: false, error: "plugins cannot update runtime settings", plugin_id: pluginParam, plugin_loaded: Boolean(plugin) });
+      const settings = saveRuntimeSettings(body, store);
+      store.appendRuntimeEvent({ event_type: "runtime_settings_updated", actor: "user", status: "completed", subject_type: "runtime", subject_id: "runtime_settings", payload: { settings: publicRuntimeSettings(settings) } });
+      return send(res, 200, { ok: true, settings: publicRuntimeSettings(settings) });
     }
 
     if (req.method === "GET" && url.pathname === "/runtime/status") {
@@ -1132,7 +1154,26 @@ function summarizeViewContent(content: ContextView["content"]) {
   const kind = typeof content?.kind === "string" ? content.kind : undefined;
   const category = typeof content?.category === "string" ? content.category : undefined;
   const timeRange = isPlainObject(content?.time_range) ? content.time_range : undefined;
-  return { kind, category, time_range: timeRange };
+  const summary: Record<string, unknown> = { kind, category, time_range: timeRange };
+  if (kind === "audio" || kind === "transcript_semantics") {
+    const transcriptExcerpt = stringSummary(content?.transcript_excerpt ?? content?.transcript, 360);
+    if (transcriptExcerpt) summary.transcript_excerpt = transcriptExcerpt;
+    if (typeof content?.speaker_label === "string") summary.speaker_label = content.speaker_label;
+    if (typeof content?.device_name === "string") summary.device_name = content.device_name;
+    if (typeof content?.transcript_quality === "string") summary.transcript_quality = content.transcript_quality;
+    const topics = Array.isArray(content?.topics) ? content.topics.filter(item => typeof item === "string").slice(0, 5) : [];
+    if (topics.length) summary.topics = topics;
+    const intents = Array.isArray(content?.stated_intents) ? content.stated_intents.filter(item => typeof item === "string").slice(0, 3) : [];
+    if (intents.length) summary.stated_intents = intents;
+  }
+  return summary;
+}
+
+function stringSummary(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
 export function createContextHttpServer(store = new ContextStore()) {

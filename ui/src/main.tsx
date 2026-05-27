@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { fetchActivityTimeline, fetchContextView, fetchViewFamilies, fetchViewsByType, screenpipeFrameUrl, syncScreenpipe } from "./api";
-import type { ActivityTimelineResponse, ContextViewSummary, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewFamiliesResponse, ViewFamilySummary } from "./types";
+import { fetchActivityTimeline, fetchContextView, fetchRuntimeSettings, fetchViewFamilies, fetchViewsByType, runRuntimeTick, saveRuntimeSettings, screenpipeFrameUrl, syncScreenpipe } from "./api";
+import type { ActivityTimelineResponse, ContextViewSummary, RuntimeSettings, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewFamiliesResponse, ViewFamilySummary } from "./types";
 import "./styles.css";
 
 const POLL_MS = 15_000;
@@ -9,7 +9,7 @@ const DEFAULT_MINUTES = 180;
 const VIEW_TYPE_ORDER = ["evidence", "visual_frame", "audio", "activity", "activity_block", "proposal", "resource", "intent", "workflow", "memory"];
 type SourceFilter = "screenpipe" | "browser" | "runtime" | "all";
 type DetailMode = "activity" | "debug";
-type ActiveTab = "timeline" | "views";
+type ActiveTab = "timeline" | "views" | "settings";
 type FramePreview = { frameId: string | number; title?: string };
 
 function App() {
@@ -21,6 +21,7 @@ function App() {
   const [live, setLive] = useState(true);
   const [status, setStatus] = useState("Connecting…");
   const [viewStatus, setViewStatus] = useState("Views not loaded");
+  const [settingsStatus, setSettingsStatus] = useState("Settings not loaded");
   const [minutes, setMinutes] = useState(DEFAULT_MINUTES);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [detailMode, setDetailMode] = useState<DetailMode>("activity");
@@ -129,6 +130,7 @@ function App() {
         <nav className="nav-list" aria-label="App navigation">
           <button className={`nav-item ${activeTab === "timeline" ? "active" : ""}`} onClick={() => setActiveTab("timeline")}><span>◷</span>Timeline</button>
           <button className={`nav-item ${activeTab === "views" ? "active" : ""}`} onClick={() => setActiveTab("views")}><span>◇</span>Views</button>
+          <button className={`nav-item ${activeTab === "settings" ? "active" : ""}`} onClick={() => setActiveTab("settings")}><span>⚙</span>Settings</button>
         </nav>
         <div className="sidebar-foot">
           <div className={`live-dot ${live ? "on" : ""}`} />
@@ -140,8 +142,8 @@ function App() {
         <header className="page-header">
           <div>
             <div className="breadcrumb">Info / Screenpipe</div>
-            <h1>{activeTab === "timeline" ? "Timeline" : "Memory Views"}</h1>
-            <p>{activeTab === "timeline" ? "按时间整理最近 focus 的 app、网页和项目活动。" : "查看 Observation 压缩出来的 EvidenceView、ActivityView、IntentView、WorkflowView 和 MemoryView。"}</p>
+            <h1>{activeTab === "timeline" ? "Timeline" : activeTab === "views" ? "Memory Views" : "Runtime Settings"}</h1>
+            <p>{activeTab === "timeline" ? "按时间整理最近 focus 的 app、网页和项目活动。" : activeTab === "views" ? "查看 Observation 压缩出来的 EvidenceView、ActivityView、IntentView、WorkflowView 和 MemoryView。" : "控制 VisionFrame、ActivityBlock、Intent 和 Workflow 压缩的模型与开关。"}</p>
           </div>
           <div className="header-actions">
             {activeTab === "timeline" ? (
@@ -166,8 +168,10 @@ function App() {
                 <button className="secondary" onClick={() => refresh(false)} disabled={loading}>{loading ? "Loading…" : "Reload"}</button>
                 <button onClick={syncNow} disabled={loading}>{loading ? "Syncing…" : "Sync Screenpipe"}</button>
               </>
-            ) : (
+            ) : activeTab === "views" ? (
               <button onClick={() => refreshViews(false)} disabled={viewsLoading}>{viewsLoading ? "Loading…" : "Reload Views"}</button>
+            ) : (
+              <button onClick={() => setSettingsStatus("Reload settings from panel")}>Runtime Controls</button>
             )}
           </div>
         </header>
@@ -189,16 +193,209 @@ function App() {
 
             <Timeline buckets={filteredBuckets} loading={loading && !timeline} sourceFilter={sourceFilter} selectedItemId={selectedItemId} onSelect={setSelectedItemId} onOpenFrame={setPreviewFrame} />
           </>
-        ) : (
+        ) : activeTab === "views" ? (
           <MemoryViewsPanel response={viewFamilies} loading={viewsLoading && !viewFamilies} status={viewStatus} onInspect={setViewInspector} />
+        ) : (
+          <RuntimeSettingsPanel initialStatus={settingsStatus} onStatus={setSettingsStatus} onTick={setLastTick} />
         )}
       </main>
       {activeTab === "views"
         ? <aside className="view-inspector"><ViewDetail view={viewInspector.view} loading={viewInspector.loading} /></aside>
+        : activeTab === "settings"
+          ? <aside className="inspector empty"><span>{settingsStatus}</span></aside>
         : <Inspector item={selectedItem} onClose={() => setSelectedItemId(null)} onOpenFrame={setPreviewFrame} />}
       <FrameLightbox preview={previewFrame} onClose={() => setPreviewFrame(null)} />
     </div>
   );
+}
+
+function RuntimeSettingsPanel({ initialStatus, onStatus, onTick }: { initialStatus: string; onStatus: (status: string) => void; onTick: (tick: RuntimeTickResponse) => void }) {
+  const [settings, setSettings] = useState<RuntimeSettings | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [status, setStatus] = useState(initialStatus);
+
+  useEffect(() => {
+    void loadSettings();
+  }, []);
+
+  useEffect(() => {
+    onStatus(status);
+  }, [status, onStatus]);
+
+  async function loadSettings() {
+    setLoading(true);
+    setStatus("Loading runtime settings…");
+    try {
+      const response = await fetchRuntimeSettings();
+      setSettings(response.settings);
+      setStatus("Runtime settings loaded");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveSettings() {
+    if (!settings) return;
+    setSaving(true);
+    setStatus("Saving runtime settings…");
+    try {
+      const response = await saveRuntimeSettings(stripEmptySecrets(settings));
+      setSettings(response.settings);
+      setStatus("Runtime settings saved");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function runAiTick() {
+    if (!settings) return;
+    setRunning(true);
+    setStatus("Running AI tick…");
+    try {
+      const tick = await runRuntimeTick({
+        include_screenpipe: true,
+        include_ai_sessions: false,
+        include_git: false,
+        force: true,
+        window_minutes: 30,
+        screenpipe_limit: 80,
+        compile_views: true,
+        ai_view_compression: !settings.ai_paused && settings.ai_view_compression !== false,
+        visual_view_compression: !settings.visual_paused && settings.visual_view_compression !== false,
+      });
+      onTick(tick);
+      const compiled = Array.isArray(tick.compiled_views) ? tick.compiled_views.length : 0;
+      setStatus(`AI tick finished · ${compiled} compiler results`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  function update(patch: RuntimeSettings) {
+    setSettings(prev => ({ ...(prev ?? {}), ...patch }));
+  }
+
+  function updateLlm(kind: "llm" | "vision_llm", patch: RuntimeSettings["llm"]) {
+    setSettings(prev => ({ ...(prev ?? {}), [kind]: { ...(prev?.[kind] ?? {}), ...(patch ?? {}) } }));
+  }
+
+  if (loading && !settings) return <div className="empty-state">Loading runtime settings…</div>;
+  const value = settings ?? {};
+  return (
+    <section className="settings-panel" aria-label="Runtime settings">
+      <section className="status-row settings-status">
+        <Stat label="Vision" value={value.visual_paused ? "Paused" : value.visual_view_compression === false ? "Off" : "On"} />
+        <Stat label="AI Views" value={value.ai_paused ? "Paused" : value.ai_view_compression === false ? "Off" : "On"} />
+        <Stat label="Interval" value={`${value.view_compile_interval_seconds ?? 120}s`} />
+        <div className="status-text">{status}</div>
+      </section>
+
+      <div className="settings-grid">
+        <article className="settings-card">
+          <div className="settings-card-head">
+            <div>
+              <span>Vision parsing</span>
+              <h2>VisualFrameView</h2>
+            </div>
+            <label className="toggle-line">
+              <input type="checkbox" checked={!value.visual_paused} onChange={event => update({ visual_paused: !event.target.checked })} />
+              <span>{value.visual_paused ? "Paused" : "Active"}</span>
+            </label>
+          </div>
+          <label className="field-line">
+            <span>Enable visual compiler</span>
+            <input type="checkbox" checked={value.visual_view_compression !== false} onChange={event => update({ visual_view_compression: event.target.checked })} />
+          </label>
+          <TextField label="Base URL" value={value.vision_llm?.base_url} onChange={next => updateLlm("vision_llm", { base_url: next })} />
+          <TextField label="Model" value={value.vision_llm?.model} onChange={next => updateLlm("vision_llm", { model: next })} />
+          <PasswordField label="API key" value={value.vision_llm?.api_key} onChange={next => updateLlm("vision_llm", { api_key: next })} />
+          <NumberField label="Frame limit" value={value.visual_frame_limit} min={0} onChange={next => update({ visual_frame_limit: next })} />
+          <NumberField label="Concurrency" value={value.visual_frame_concurrency} min={1} onChange={next => update({ visual_frame_concurrency: next })} />
+          <NumberField label="Sample seconds" value={value.visual_frame_sample_seconds} min={0} onChange={next => update({ visual_frame_sample_seconds: next })} />
+        </article>
+
+        <article className="settings-card">
+          <div className="settings-card-head">
+            <div>
+              <span>Text compression</span>
+              <h2>ActivityBlock / Intent / Workflow</h2>
+            </div>
+            <label className="toggle-line">
+              <input type="checkbox" checked={!value.ai_paused} onChange={event => update({ ai_paused: !event.target.checked })} />
+              <span>{value.ai_paused ? "Paused" : "Active"}</span>
+            </label>
+          </div>
+          <label className="field-line">
+            <span>Enable AI view compression</span>
+            <input type="checkbox" checked={value.ai_view_compression !== false} onChange={event => update({ ai_view_compression: event.target.checked })} />
+          </label>
+          <TextField label="Base URL" value={value.llm?.base_url} onChange={next => updateLlm("llm", { base_url: next })} />
+          <TextField label="Model" value={value.llm?.model} onChange={next => updateLlm("llm", { model: next })} />
+          <PasswordField label="API key" value={value.llm?.api_key} onChange={next => updateLlm("llm", { api_key: next })} />
+          <NumberField label="Temperature" value={value.llm?.temperature} min={0} step={0.1} onChange={next => updateLlm("llm", { temperature: next })} />
+          <NumberField label="Compile interval seconds" value={value.view_compile_interval_seconds} min={0} onChange={next => update({ view_compile_interval_seconds: next })} />
+          <label className="field-line">
+            <span>Omit max_tokens</span>
+            <input type="checkbox" checked={value.llm?.omit_max_tokens !== false} onChange={event => updateLlm("llm", { omit_max_tokens: event.target.checked })} />
+          </label>
+        </article>
+      </div>
+
+      <div className="settings-actions">
+        <button className="secondary" onClick={loadSettings} disabled={loading || saving || running}>{loading ? "Loading…" : "Reload"}</button>
+        <button className="secondary" onClick={runAiTick} disabled={!settings || running || saving}>{running ? "Running…" : "Run AI tick"}</button>
+        <button onClick={saveSettings} disabled={!settings || saving || running}>{saving ? "Saving…" : "Save settings"}</button>
+      </div>
+    </section>
+  );
+}
+
+function TextField({ label, value, onChange }: { label: string; value?: string; onChange: (value: string) => void }) {
+  return (
+    <label className="field-line">
+      <span>{label}</span>
+      <input value={value ?? ""} onChange={event => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+function PasswordField({ label, value, onChange }: { label: string; value?: string; onChange: (value: string) => void }) {
+  return (
+    <label className="field-line">
+      <span>{label}</span>
+      <input type="password" placeholder={value ? "saved" : ""} value={isRedactedSecret(value) ? "" : value ?? ""} onChange={event => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+function NumberField({ label, value, min, step = 1, onChange }: { label: string; value?: number; min?: number; step?: number; onChange: (value: number | undefined) => void }) {
+  return (
+    <label className="field-line">
+      <span>{label}</span>
+      <input type="number" min={min} step={step} value={value ?? ""} onChange={event => onChange(event.target.value === "" ? undefined : Number(event.target.value))} />
+    </label>
+  );
+}
+
+function stripEmptySecrets(settings: RuntimeSettings): RuntimeSettings {
+  const clean = structuredClone(settings);
+  for (const key of ["llm", "vision_llm"] as const) {
+    if (clean[key]?.api_key === "") delete clean[key]?.api_key;
+    if (isRedactedSecret(clean[key]?.api_key)) delete clean[key]?.api_key;
+  }
+  return clean;
+}
+
+function isRedactedSecret(secret?: string) {
+  return Boolean(secret && (secret.includes("…") || /^\*+$/.test(secret)));
 }
 
 function ViewGraph({ families }: { families: ViewFamilySummary[] }) {
@@ -403,6 +600,8 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
 function ViewListRow({ view, selected, onSelect }: { view: ContextViewSummary; selected: boolean; onSelect: () => void }) {
   const kind = typeof view.content?.kind === "string" ? view.content.kind : view.view_type;
   const compiler = compilerId(view);
+  const primaryText = view.view_type === "audio" ? audioListText(view) : view.summary;
+  const audioTags = view.view_type === "audio" ? audioListTags(view) : [];
   return (
     <button className={`view-list-row ${selected ? "selected" : ""}`} onClick={onSelect}>
       <div className="view-list-row-top">
@@ -410,13 +609,38 @@ function ViewListRow({ view, selected, onSelect }: { view: ContextViewSummary; s
         {typeof view.confidence === "number" && <b>{Math.round(view.confidence * 100)}%</b>}
       </div>
       <h3>{view.title || view.id}</h3>
-      {view.summary && <p>{view.summary}</p>}
+      {primaryText && <p>{primaryText}</p>}
+      {audioTags.length > 0 && <div className="view-list-row-tags">{audioTags.map(tag => <Tag key={tag}>{tag}</Tag>)}</div>}
       <div className="view-list-row-meta">
         <span>{compiler || "compiler unknown"}</span>
         <span>{relativeTime(view.updated_at) || "—"}</span>
       </div>
     </button>
   );
+}
+
+function audioListText(view: ContextViewSummary): string | undefined {
+  return stringContent(view, "transcript_excerpt") || view.summary;
+}
+
+function audioListTags(view: ContextViewSummary): string[] {
+  const tags = [
+    stringContent(view, "transcript_quality"),
+    stringContent(view, "speaker_label"),
+    stringContent(view, "device_name"),
+    ...stringArrayContent(view, "topics").slice(0, 3),
+  ];
+  return [...new Set(tags.filter((tag): tag is string => Boolean(tag)))];
+}
+
+function stringContent(view: ContextViewSummary, key: string): string | undefined {
+  const value = view.content?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stringArrayContent(view: ContextViewSummary, key: string): string[] {
+  const value = view.content?.[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
 }
 
 function ViewDetail({ view, loading }: { view?: ContextViewSummary; loading: boolean }) {

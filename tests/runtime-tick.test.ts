@@ -81,6 +81,19 @@ test("runtimeTick persists Screenpipe observations so activity timeline can disp
     if (url.pathname === "/elements") return Response.json([]);
     if (url.pathname === "/search") {
       if (url.searchParams.get("content_type") === "input") return Response.json([]);
+      if (url.searchParams.get("content_type") === "audio") {
+        return Response.json({
+          data: [{
+            type: "Audio",
+            content: {
+              chunk_id: 14901,
+              timestamp: new Date().toISOString(),
+              transcription: "讨论 audio view 应该完整展示",
+              device_name: "EarPods Microphone",
+            },
+          }],
+        });
+      }
       return Response.json({
         data: [{
           type: "ocr",
@@ -109,10 +122,11 @@ test("runtimeTick persists Screenpipe observations so activity timeline can disp
     const timeline = compileActivityTimeline({ minutes: 60, write: false }, store);
 
     assert.equal(result.ok, true);
-    assert.equal(result.evidence.screenpipe_records, 2);
+    assert.equal(result.evidence.screenpipe_records, 3);
     assert.deepEqual(new Set(result.evidence.written_records), new Set(persisted.map(record => record.id)));
     assert.ok(persisted.some(record => record.schema.name === "observation.screenpipe_activity_summary"));
     assert.ok(persisted.some(record => record.schema.name === "observation.screenpipe_activity"));
+    assert.ok(persisted.some(record => record.schema.name === "observation.screenpipe_audio"));
     assert.ok(timeline.buckets.flatMap(bucket => bucket.items).some(item => item.source.startsWith("screenpipe/")));
   } finally {
     globalThis.fetch = originalFetch;

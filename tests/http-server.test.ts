@@ -3603,6 +3603,33 @@ test("GET /context/views exposes Application-safe View filters", async () => wit
   assert.deepEqual(body.views.map(view => view.id), ["analysis:http-active"]);
 }));
 
+test("GET /context/views summary includes lightweight AudioView fields", async () => withStore(async (store) => {
+  store.upsertView({
+    id: "audio:http-summary",
+    view_type: "audio",
+    status: "candidate",
+    title: "Audio summary",
+    summary: "Audio semantic summary",
+    content: {
+      kind: "audio",
+      transcript_excerpt: "我们需要把 audio view 显示完整一点",
+      speaker_label: "speaker:7",
+      device_name: "EarPods Microphone",
+      transcript_quality: "clear",
+      topics: ["AudioView", "UI"],
+    },
+  });
+
+  const response = await request(store, "/context/views?view_types=audio&active_only=true&summary_only=true&limit=20");
+  const body = response.body as { ok: boolean; views: Array<{ content?: Record<string, unknown> }> };
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.views[0].content?.transcript_excerpt, "我们需要把 audio view 显示完整一点");
+  assert.equal(body.views[0].content?.device_name, "EarPods Microphone");
+  assert.deepEqual(body.views[0].content?.topics, ["AudioView", "UI"]);
+}));
+
 test("GET /context/views can return all Views for an Application list", async () => withStore(async (store) => {
   for (let index = 0; index < 70; index += 1) {
     store.upsertView({

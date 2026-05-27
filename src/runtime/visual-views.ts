@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { fetchScreenpipeFrameImage } from "../connectors/screenpipe.js";
+import { loadDotEnv } from "../core/env.js";
 import { parseJsonObject, visionCompletion, type LlmOptions } from "../core/llm.js";
 import { ContextStore } from "../core/store.js";
 import type { ContextView, StoredContextView } from "../core/types.js";
@@ -277,6 +278,7 @@ async function analyzeFrameWithVision(
   prompt: string,
   options: CompileVisualFrameViewsOptions,
 ): Promise<VisualFrameAnalyzerResponse> {
+  loadDotEnv();
   const image = await fetchScreenpipeFrameImage(frameId);
   if (!image.ok) return { ok: false, error: image.error };
   const base64 = Buffer.from(image.bytes).toString("base64");
@@ -294,9 +296,12 @@ async function analyzeFrameWithVision(
     },
   ], {
     ...options.llm,
+    base_url: options.llm?.base_url ?? process.env.VISION_LLM_BASE_URL,
+    api_key: options.llm?.api_key ?? process.env.VISION_LLM_API_KEY,
     model: options.model ?? process.env.VISION_LLM_MODEL ?? "qwen3-vl-235b-a22b-instruct",
     temperature: options.llm?.temperature ?? 0.1,
-    max_tokens: options.llm?.max_tokens ?? 900,
+    max_tokens: options.llm?.max_tokens ?? (Number(process.env.VISION_LLM_MAX_TOKENS || 0) || undefined),
+    omit_max_tokens: options.llm?.max_tokens === undefined && !process.env.VISION_LLM_MAX_TOKENS,
     allow_external: options.llm?.allow_external ?? true,
   });
   if (!llm.ok || !llm.content) return { ok: false, model: llm.model, base_url: llm.base_url, error: llm.error ?? "vision failed" };

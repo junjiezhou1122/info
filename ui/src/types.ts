@@ -81,6 +81,35 @@ export type RuntimeTickResponse = {
   };
 };
 
+export type LlmRuntimeSettings = {
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  temperature?: number;
+  max_tokens?: number;
+  omit_max_tokens?: boolean;
+  allow_external?: boolean;
+};
+
+export type RuntimeSettings = {
+  compile_views?: boolean;
+  ai_view_compression?: boolean;
+  visual_view_compression?: boolean;
+  ai_paused?: boolean;
+  visual_paused?: boolean;
+  view_compile_interval_seconds?: number;
+  visual_frame_limit?: number;
+  visual_frame_concurrency?: number;
+  visual_frame_sample_seconds?: number;
+  llm?: LlmRuntimeSettings;
+  vision_llm?: LlmRuntimeSettings;
+};
+
+export type RuntimeSettingsResponse = {
+  ok: true;
+  settings: RuntimeSettings;
+};
+
 export type ContextViewSummary = {
   id: string;
   view_type: string;
