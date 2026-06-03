@@ -1,16 +1,38 @@
-# Source layout
+# Source Layout
 
-This project is intentionally a single npm package for now. The source is split by runtime responsibility:
+`src/` is the host application layer: HTTP server, runtime orchestration,
+program registry, local storage, and persistence. Reusable connector, View,
+browser-extension, UI, and adapter implementations live under `packages/`.
 
 - `core/` — stable substrate types, schemas, SQLite store, env, LLM client.
-- `connectors/` — adapters for external/local sources: Screenpipe, browser enrichment, local project/git, AI session locator.
-- `runtime/` — background tick, workspace resolver, candidate thread correlation.
+- `runtime/` — host runtime tick, workspace resolver, candidate thread
+  correlation, timelines, feedback, triggers, and provenance utilities.
 - `threads/` — WorkThread evidence maps, display interpreter, split/merge ops.
 - `broker/` — ContextBroker / ContextPack assembly for plugins and agents.
 - `plugins/` — plugin registry and built-in plugin compilers.
+- `programs/` — Program runtime, built-in Programs, and host capability
+  registration.
 - `server/` — standalone HTTP server and iii worker entrypoints.
 
-Keep raw observations in `core` types/store. Put source-specific acquisition in `connectors`, derived organization in `runtime`/`threads`/`broker`, and app-specific memory compilers in `plugins`.
+Keep raw observations in `core` types/store. Put source-specific acquisition in
+`packages/connectors`, reusable derived representations in `packages/views`, and
+agent/runtime integration in `packages/adapters`. Keep `src/runtime`,
+`src/programs`, `src/broker`, and `src/server` focused on host orchestration.
+
+Boundary rule of thumb:
+
+- `src/core` defines the stable data substrate that packages may import.
+- `src/server`, `src/runtime`, `src/programs`, and `src/broker` wire the local
+  application together and may import package implementations.
+- New connector acquisition code belongs in `packages/connectors`.
+- New reusable View compilers belong in `packages/views`.
+- New external agent or protocol execution belongs in `packages/adapters`.
+- Browser extension and runtime UI code stay under their package directories,
+  with root scripts delegating to those package build/runtime boundaries.
+
+The old package-backed `src/connectors/*` and selected `src/runtime/*` re-export
+shims have been archived. New code should import package implementations from
+`packages/` directly.
 
 ## Runtime event log and timeline views
 

@@ -1,0 +1,214 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #15110c;
+      --muted: #746b60;
+      --line: #d8d0c2;
+      --paper: #fbf7ef;
+      --panel: #fffdf8;
+      --accent: #0f766e;
+      --accent-dark: #0b4f49;
+      --warn: #9a3412;
+      --shadow: 0 14px 34px rgba(47, 37, 24, 0.14);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      width: 430px;
+      max-height: 640px;
+      margin: 0;
+      overflow: auto;
+      color: var(--ink);
+      background:
+        linear-gradient(135deg, rgba(15, 118, 110, 0.09), transparent 34%),
+        repeating-linear-gradient(0deg, rgba(21, 17, 12, 0.025), rgba(21, 17, 12, 0.025) 1px, transparent 1px, transparent 6px),
+        var(--paper);
+      font: 13px ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+    }
+
+    .shell { padding: 14px; }
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: start;
+      margin-bottom: 12px;
+    }
+    h1 { margin: 0; font-size: 17px; line-height: 1.1; letter-spacing: 0; }
+    .subtitle { color: var(--muted); font-size: 11px; margin-top: 4px; }
+    .live-pill {
+      border: 1px solid rgba(15, 118, 110, 0.35);
+      background: rgba(15, 118, 110, 0.1);
+      color: var(--accent-dark);
+      border-radius: 999px;
+      padding: 5px 8px;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .panel {
+      background: rgba(255, 253, 248, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 11px;
+      margin: 10px 0;
+    }
+    .page-title { font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
+    .meta { color: var(--muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .stack { display: grid; gap: 8px; }
+    label.small { color: var(--muted); font-size: 11px; display: block; margin-bottom: 4px; }
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fffdfa;
+      color: var(--ink);
+      padding: 8px;
+      font: inherit;
+    }
+    textarea { min-height: 64px; resize: vertical; }
+    button {
+      border: 1px solid #0b4f49;
+      border-radius: 7px;
+      background: var(--accent);
+      color: white;
+      font: inherit;
+      padding: 9px 10px;
+      cursor: pointer;
+    }
+    button.secondary { background: #fffdfa; color: var(--ink); border-color: var(--line); }
+    button.warn { background: #fffdfa; color: var(--warn); border-color: rgba(154, 52, 18, 0.35); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .toolbar { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .quick-prompts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .quick-prompts button { padding: 7px 5px; font-size: 11px; }
+    .view-card {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: var(--panel);
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px;
+      margin: 7px 0;
+    }
+    .view-card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.13); }
+    .view-top { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; }
+    .view-card h2 { font-size: 13px; line-height: 1.25; margin: 5px 0; overflow-wrap: anywhere; }
+    .view-card p { margin: 0; color: #3b342b; line-height: 1.35; max-height: 54px; overflow: hidden; }
+    .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+    .tag {
+      border: 1px solid rgba(15, 118, 110, 0.25);
+      border-radius: 999px;
+      color: var(--accent-dark);
+      background: rgba(15, 118, 110, 0.07);
+      padding: 2px 6px;
+      font-size: 10px;
+    }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 120px;
+      overflow: auto;
+      background: #231f1a;
+      color: #f7efe2;
+      padding: 9px;
+      border-radius: 7px;
+      margin: 8px 0 0;
+    }
+    details summary { cursor: pointer; color: var(--muted); margin: 10px 0 6px; }
+    .field-line { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--muted); }
+    .field-line input[type="checkbox"] { width: auto; }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <h1>Info Browser Console</h1>
+        <div class="subtitle">Capture page context, retrieve Views, ask Claude Code.</div>
+      </div>
+      <div id="liveState" class="live-pill">connecting</div>
+    </header>
+
+    <section class="panel">
+      <div id="pageTitle" class="page-title">Loading current tab...</div>
+      <div id="pageMeta" class="meta"></div>
+      <div id="visitMeta" class="meta"></div>
+    </section>
+
+    <section class="panel stack">
+      <div>
+        <label class="small" for="askQuestion">Question for Claude Code</label>
+        <textarea id="askQuestion" placeholder="What should I understand or extract from this page?"></textarea>
+      </div>
+      <div class="quick-prompts" aria-label="Common browser questions">
+        <button class="secondary quick" data-prompt="Summarize this page into the facts I should remember.">Summarize</button>
+        <button class="secondary quick" data-prompt="Explain how this page connects to my current Info runtime work.">Project link</button>
+        <button class="secondary quick" data-prompt="Extract reusable ideas, references, and open questions from this page.">Extract</button>
+      </div>
+      <div class="toolbar">
+        <button id="save">Save & Analyze</button>
+        <button id="ask" class="secondary">Ask Claude Code</button>
+      </div>
+      <pre id="result">Ready.</pre>
+    </section>
+
+    <section class="panel stack">
+      <div class="grid">
+        <div>
+          <label class="small" for="viewScope">View scope</label>
+          <select id="viewScope">
+            <option value="related">Related Views</option>
+            <option value="agent">Agent analysis</option>
+            <option value="writing">Writing assist</option>
+            <option value="all">All View types</option>
+          </select>
+        </div>
+        <div>
+          <label class="small" for="viewLimit">Limit</label>
+          <input id="viewLimit" type="number" min="3" max="40" step="1" value="12" />
+        </div>
+      </div>
+      <div>
+        <label class="small" for="viewQuery">Search all retrievable Views</label>
+        <input id="viewQuery" type="text" placeholder="Current tab title/domain is used by default" />
+      </div>
+      <div class="toolbar">
+        <button id="refreshViews" class="secondary">Refresh Views</button>
+        <button id="useful" class="secondary">Mark useful</button>
+      </div>
+      <button id="dismiss" class="warn">Dismiss selected View</button>
+      <div id="views" aria-live="polite"></div>
+    </section>
+
+    <details>
+      <summary>Settings</summary>
+      <section class="panel">
+        <label class="field-line"><input id="captureStream" type="checkbox" /> Record browser event stream</label>
+        <label class="field-line"><input id="snapshotOnVisit" type="checkbox" /> Snapshot page on visit</label>
+        <label class="field-line"><input id="allowExternalLlm" type="checkbox" /> Allow Claude Code / external local runtime</label>
+        <label class="small" for="heartbeatSeconds">Heartbeat seconds</label>
+        <input id="heartbeatSeconds" type="number" min="5" step="5" />
+        <label class="small" for="viewPollSeconds" style="margin-top:8px">View poll seconds</label>
+        <input id="viewPollSeconds" type="number" min="3" step="1" />
+        <label class="small" for="agentRuntime" style="margin-top:8px">Agent runtime</label>
+        <select id="agentRuntime">
+          <option value="claude_code">claude_code</option>
+          <option value="acp_stdio">acp_stdio</option>
+          <option value="local_mock">local_mock</option>
+        </select>
+        <label class="small" for="endpoint" style="margin-top:8px">Context endpoint</label>
+        <input id="endpoint" type="text" />
+      </section>
+    </details>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

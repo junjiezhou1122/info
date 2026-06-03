@@ -1,7 +1,7 @@
 import { ContextStore } from "../core/store.js";
 import { filterEventsForPlugin } from "../broker/context-broker.js";
 import type { ContextView, RuntimeEvent, StoredContextRecord, StoredContextView, StoredRuntimeEvent } from "../core/types.js";
-import { isHighScreenNoise, screenNoiseLevel } from "./screen-noise.js";
+import { screenNoiseLevel } from "./screen-noise.js";
 
 export const ACTIVITY_TIMELINE_COMPILER_ID = "builtin.activity-timeline";
 
@@ -148,7 +148,9 @@ function recordMatchesSourceFilter(record: StoredContextRecord, filter: CompileA
 }
 
 function isDefaultActivityNoise(record: StoredContextRecord): boolean {
-  return isHighScreenNoise(record) || isInfoTimelineSelfObservation(record);
+  if (isInfoTimelineSelfObservation(record)) return true;
+  if (isScreenpipeRecorderRecord(record)) return true;
+  return false;
 }
 
 function isScreenpipeRecorderRecord(record: StoredContextRecord): boolean {
@@ -338,104 +340,6 @@ function continuousGroupToItem(group: ActivityTimelineItem[]): ActivityTimelineI
     event_ids: eventIds.length ? eventIds : last.event_ids,
     stats,
   };
-}
-
-function buildActivityEpisodeItems(records: StoredContextRecord[], runtimeEvents: StoredRuntimeEvent[]): ActivityTimelineItem[] {
-  const byEpisode = new Map<string, StoredContextRecord[]>();
-  for (const record of records) {
-    const key = `${bucketLabel(recordTime(record), 15)}|${focusKey(record)}`;
-    byEpisode.set(key, [...(byEpisode.get(key) ?? []), record]);
-  }
-
-  const items = [...byEpisode.values()].map(records => episodeToItem(records));
-  for (const event of runtimeEvents) items.push(runtimeEventToItem(event));
-
-  return items
-    .sort((a, b) => Date.parse(b.observed_at) - Date.parse(a.observed_at))
-    .filter((item, index, all) => index === all.findIndex(other => dedupeKey(other) === dedupeKey(item)));
-}
-
-function episodeToItem(records: StoredContextRecord[]): ActivityTimelineItem {
-  const sorted = [...records].sort((a, b) => Date.parse(recordTime(a)) - Date.parse(recordTime(b)));
-  const first = sorted[0];
-  const last = sorted.at(-1) ?? first;
-  const recordItems = sorted.map(recordToItem);
-  const app = top(recordItems.map(item => item.app).filter(Boolean) as string[], 1)[0];
-  const domain = top(recordItems.map(item => item.domain).filter(Boolean) as string[], 1)[0];
-  const project = top(recordItems.map(item => item.project).filter(Boolean) as string[], 1)[0];
-  const sourceTypes = top(sorted.map(record => record.source.type), 3);
-  const source = sourceTypes.length === 1 ? `activity/${sourceTypes[0]}` : "activity/mixed";
-  const duration = episodeDurationMinutes(sorted);
-  const schemas = top(sorted.map(record => record.schema.name), 6);
-  const frameIds = uniqueFrameIds(sorted).slice(0, 8);
-  const title = episodeTitle(recordItems, app, domain, project);
-  const focus = [app, domain, project].filter(Boolean).join(" · ");
-  const highlights = top(recordItems.map(item => item.title).filter(Boolean), 3).filter(title => title !== focus);
-
-  return {
-    id: `episode:${focusKey(first)}:${bucketLabel(recordTime(first), 15)}:${hashKey(sorted.map(record => record.id).join("|"))}`,
-    kind: "activity_episode",
-    source,
-    title,
-    subtitle: `${focus || sourceLabel(first)}${duration ? ` · ${formatMinutes(duration)}` : ""}${sorted.length > 1 ? ` · ${sorted.length} signals` : ""}`,
-    url: first.content?.url ?? sorted.map(record => record.content?.url).find(Boolean),
-    path: first.content?.path ?? sorted.map(record => record.content?.path).find(Boolean),
-    app,
-    domain,
-    project,
-    text: highlights.length ? highlights.join(" · ") : textOf(last),
-    observed_at: recordTime(last),
-    importance: Math.max(...recordItems.map(item => item.importance), 0.45),
-    record_ids: sorted.map(record => record.id),
-    stats: {
-      start: episodeStart(first),
-      end: recordTime(last),
-      duration_minutes: duration,
-      samples: sorted.length,
-      source_schemas: schemas,
-      sources: sourceTypes,
-      frame_ids: frameIds.length ? frameIds : undefined,
-      frame_id: frameIds[0],
-      urls: top(sorted.map(record => record.content?.url).filter(Boolean) as string[], 5),
-    },
-  };
-}
-
-function episodeTitle(items: ActivityTimelineItem[], app?: string, domain?: string, project?: string): string {
-  const best = items.find(item => item.url && item.title)?.title ?? items.find(item => item.title)?.title;
-  if (app && best && !best.toLowerCase().startsWith(app.toLowerCase())) return `${app} - ${best}`;
-  if (best) return best;
-  if (domain) return `Web activity - ${domain}`;
-  if (project) return `Project activity - ${project}`;
-  if (app) return `${app} activity`;
-  return "Activity";
-}
-
-function focusKey(record: StoredContextRecord): string {
-  const domain = domainOf(record);
-  if (domain) return `domain:${domain}`;
-  const project = projectOf(record);
-  if (project) return `project:${project}`;
-  const app = appOf(record);
-  if (app) return `app:${app}`;
-  return `source:${sourceLabel(record)}`;
-}
-
-function episodeStart(record: StoredContextRecord): string {
-  const observedMs = Date.parse(recordTime(record));
-  if (Number.isNaN(observedMs)) return recordTime(record);
-  const minutes = Number(record.payload?.minutes);
-  if (Number.isFinite(minutes) && minutes > 0) return new Date(observedMs - minutes * 60_000).toISOString();
-  return recordTime(record);
-}
-
-function episodeDurationMinutes(records: StoredContextRecord[]): number | undefined {
-  const explicit = maxNumber(records.map(record => record.payload?.minutes));
-  if (explicit !== undefined && explicit > 0) return explicit;
-  const times = records.map(record => Date.parse(recordTime(record))).filter(Number.isFinite);
-  if (times.length < 2) return undefined;
-  const minutes = (Math.max(...times) - Math.min(...times)) / 60_000;
-  return minutes > 0 ? minutes : undefined;
 }
 
 function recordToItem(record: StoredContextRecord): ActivityTimelineItem {

@@ -25,6 +25,13 @@ function parseArgs(argv: string[]): RuntimeTickRequest {
     else if (arg === "--work-thread-minutes") req.work_thread_view_minutes = Number(argv[++i]);
     else if (arg === "--activity-minutes") req.activity_timeline_minutes = Number(argv[++i]);
     else if (arg === "--project-timeline-minutes") req.project_timeline_minutes = Number(argv[++i]);
+    else if (arg === "--background-tasks") req.process_background_tasks = true;
+    else if (arg === "--no-background-tasks") req.process_background_tasks = false;
+    else if (arg === "--background-task-limit") req.background_task_limit = Number(argv[++i]);
+    else if (arg === "--toolsmith-artifacts") req.process_toolsmith_artifacts = true;
+    else if (arg === "--no-toolsmith-artifacts") req.process_toolsmith_artifacts = false;
+    else if (arg === "--toolsmith-artifact-limit") req.toolsmith_artifact_limit = Number(argv[++i]);
+    else if (arg === "--toolsmith-artifact-output-dir") req.toolsmith_artifact_output_dir = argv[++i];
   }
   if (process.env.RUNTIME_PROJECT) req.project_hints = [...(req.project_hints ?? []), process.env.RUNTIME_PROJECT];
   if (process.env.RUNTIME_WINDOW_MINUTES) req.window_minutes = Number(process.env.RUNTIME_WINDOW_MINUTES);
@@ -40,6 +47,13 @@ function parseArgs(argv: string[]): RuntimeTickRequest {
   if (process.env.RUNTIME_WORK_THREAD_MINUTES) req.work_thread_view_minutes = Number(process.env.RUNTIME_WORK_THREAD_MINUTES);
   if (process.env.RUNTIME_ACTIVITY_TIMELINE_MINUTES) req.activity_timeline_minutes = Number(process.env.RUNTIME_ACTIVITY_TIMELINE_MINUTES);
   if (process.env.RUNTIME_PROJECT_TIMELINE_MINUTES) req.project_timeline_minutes = Number(process.env.RUNTIME_PROJECT_TIMELINE_MINUTES);
+  if (process.env.RUNTIME_BACKGROUND_TASKS === "1") req.process_background_tasks = true;
+  if (process.env.RUNTIME_BACKGROUND_TASKS === "0") req.process_background_tasks = false;
+  if (process.env.RUNTIME_BACKGROUND_TASK_LIMIT) req.background_task_limit = Number(process.env.RUNTIME_BACKGROUND_TASK_LIMIT);
+  if (process.env.RUNTIME_TOOLSMITH_ARTIFACTS === "1") req.process_toolsmith_artifacts = true;
+  if (process.env.RUNTIME_TOOLSMITH_ARTIFACTS === "0") req.process_toolsmith_artifacts = false;
+  if (process.env.RUNTIME_TOOLSMITH_ARTIFACT_LIMIT) req.toolsmith_artifact_limit = Number(process.env.RUNTIME_TOOLSMITH_ARTIFACT_LIMIT);
+  if (process.env.TOOLSMITH_SANDBOX_DIR) req.toolsmith_artifact_output_dir = process.env.TOOLSMITH_SANDBOX_DIR;
   return req;
 }
 

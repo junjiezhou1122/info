@@ -5,19 +5,26 @@ import { homedir } from "node:os";
 import { ContextStore } from "../core/store.js";
 import type { LlmOptions } from "../core/llm.js";
 import type { ContextRecord, StoredContextRecord, StoredWorkThread } from "../core/types.js";
-import { fetchScreenpipeActivitySummary, fetchScreenpipeInputEvents, fetchScreenpipeRecords, fetchScreenpipeWorkspaceSignals } from "../connectors/screenpipe.js";
-import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "../connectors/ai-sessions.js";
+import { fetchScreenpipeActivitySummary, fetchScreenpipeInputEvents, fetchScreenpipeRecords, fetchScreenpipeWorkspaceSignals } from "../../packages/connectors/screenpipe/index.js";
+import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "../../packages/connectors/ai-sessions/index.js";
 import { buildCandidateThreads, type CandidateThread } from "./correlation.js";
-import { buildLocalProjectSnapshotRecord } from "../connectors/local-project.js";
+import { buildLocalProjectSnapshotRecord } from "../../packages/connectors/local-project/index.js";
 import { buildThreadEvidenceMap } from "../threads/thread-evidence.js";
 import { compileWorkThreadView } from "./work-thread-view.js";
 import { compileActivityTimeline } from "./activity-timeline.js";
 import { compileProjectTimeline } from "./project-timeline.js";
-import { compileEvidenceViews } from "./evidence-view.js";
-import { compileActivityViews, compileIntentViews, compileMemoryViews, compileProposalViews, compileResourceViews, compileWorkflowViews } from "./memory-views.js";
-import { compileIntentViewsWithLlm, compileMemoryViewsWithLlm, compileWorkflowViewsWithLlm } from "./view-compression.js";
-import { compileActivityBlockViews, compileVisualFrameViews } from "./visual-views.js";
-import { compileAudioViews } from "./audio-views.js";
+import { compileEvidenceViews } from "../../packages/views/evidence/index.js";
+import { compileActivityViews } from "../../packages/views/activity/index.js";
+import { compileProposalViews } from "../../packages/views/proposal/index.js";
+import { compileResourceViews } from "../../packages/views/resource/index.js";
+import { compileIntentViews, compileIntentViewsWithLlm } from "../../packages/views/intent/index.js";
+import { compileWorkflowViews, compileWorkflowViewsWithLlm } from "../../packages/views/workflow/index.js";
+import { compileMemoryViews, compileMemoryViewsWithLlm } from "../../packages/views/memory/index.js";
+import { compileActivityBlockViews } from "../../packages/views/activity-block/index.js";
+import { compileVisualFrameViews } from "../../packages/views/visual-frame/index.js";
+import { compileAudioViews } from "../../packages/views/audio/index.js";
+import { processAmbientBackgroundTasks } from "./background-tasks.js";
+import { processToolsmithSandboxArtifacts } from "./toolsmith-artifacts.js";
 
 export type RuntimeTickRequest = {
   window_minutes?: number;
@@ -46,6 +53,11 @@ export type RuntimeTickRequest = {
   work_thread_view_minutes?: number;
   activity_timeline_minutes?: number;
   project_timeline_minutes?: number;
+  process_background_tasks?: boolean;
+  background_task_limit?: number;
+  process_toolsmith_artifacts?: boolean;
+  toolsmith_artifact_limit?: number;
+  toolsmith_artifact_output_dir?: string;
 };
 
 export const RUNTIME_SETTINGS_KEY = "runtime_settings";
@@ -107,8 +119,8 @@ export type RuntimeStatus = {
 export function defaultRuntimeSettings(): RuntimeSettings {
   return {
     compile_views: true,
-    ai_view_compression: true,
-    visual_view_compression: true,
+    ai_view_compression: false,
+    visual_view_compression: false,
     ai_paused: false,
     visual_paused: false,
     view_compile_interval_seconds: 120,
@@ -463,6 +475,37 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
       projectMinutes: req.project_timeline_minutes,
     }));
     diagnostics.compiled_views = compiledViews;
+  }
+
+  const shouldProcessBackgroundTasks = req.process_background_tasks ?? process.env.RUNTIME_BACKGROUND_TASKS === "1";
+  if (shouldProcessBackgroundTasks) {
+    const backgroundTasks = await processAmbientBackgroundTasks({
+      limit: req.background_task_limit,
+      write,
+    }, store);
+    diagnostics.background_tasks = backgroundTasks;
+    compiledViews.push({
+      view_type: "background_tasks",
+      view_count: backgroundTasks.processed,
+      title: "Ambient Background Tasks",
+      skipped: backgroundTasks.skipped ? `${backgroundTasks.skipped} skipped` : undefined,
+    });
+  }
+
+  const shouldProcessToolsmithArtifacts = req.process_toolsmith_artifacts ?? process.env.RUNTIME_TOOLSMITH_ARTIFACTS === "1";
+  if (shouldProcessToolsmithArtifacts) {
+    const toolsmithArtifacts = processToolsmithSandboxArtifacts({
+      limit: req.toolsmith_artifact_limit,
+      write,
+      output_dir: req.toolsmith_artifact_output_dir,
+    }, store);
+    diagnostics.toolsmith_artifacts = toolsmithArtifacts;
+    compiledViews.push({
+      view_type: "toolsmith_artifacts",
+      view_count: toolsmithArtifacts.processed,
+      title: "Toolsmith Sandbox Artifacts",
+      skipped: toolsmithArtifacts.skipped ? `${toolsmithArtifacts.skipped} skipped` : undefined,
+    });
   }
 
   if (write) {

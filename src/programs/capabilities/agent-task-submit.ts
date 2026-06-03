@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { createDefaultAgentRuntimeAdapter, type AgentMcpServerConfig, type AgentTaskOutput, type AgentTaskOutputView } from "../../../packages/adapters/agent-runtime/index.js";
 import type { ContextRecord, ContextView, StoredContextRecord, StoredContextView } from "../../core/types.js";
 import type { Capability, CapabilityRunResult, ContextSignal } from "../types.js";
 
@@ -12,6 +12,7 @@ export type AgentTaskPayload = {
     purpose?: string;
   };
   constraints?: Record<string, unknown>;
+  mcp_servers?: AgentMcpServerConfig[];
 };
 
 export const agentTaskSubmitCapability: Capability = {
@@ -24,7 +25,7 @@ export const agentTaskSubmitCapability: Capability = {
   default_autonomy: "suggest",
   produces: ["agent_task.result", "view.from_agent_task"],
 
-  run({ signal, store, payload, program, dry_run }): CapabilityRunResult {
+  async run({ signal, store, payload, program, dry_run }): Promise<CapabilityRunResult> {
     const task = normalizeTask(payload?.task);
     if (agentTaskHasCallerSelectedSkills(payload?.task)) return { ok: false, reason: "agent task must not include skills or tools; external runtime owns them" };
     if (!task.goal) return { ok: false, reason: "agent task missing goal" };
@@ -33,42 +34,105 @@ export const agentTaskSubmitCapability: Capability = {
     const viewTypeError = validateAgentTaskViewType(viewType);
     if (viewTypeError) return { ok: false, reason: viewTypeError, diagnostics: { output_view_type: viewType } };
     const runtime = task.runtime ?? defaultAgentTaskRuntime();
-    if (runtime === "claude_code") return runClaudeCodeAgentTask({ task, signal, store, requestedByProgram: program?.id, dryRun: Boolean(dry_run) });
-    if (runtime !== "local_mock") return { ok: false, reason: `agent runtime adapter not available: ${runtime}`, diagnostics: { runtime } };
+    const provenance = agentTaskProvenance(task, signal, store);
+    const runtimeTask = toRuntimeTask(task, runtime, signal, provenance, Boolean(dry_run));
+    const selection = createDefaultAgentRuntimeAdapter(runtime);
+    if (!selection.adapter) return { ok: false, reason: selection.reason ?? `agent runtime adapter not available: ${runtime}`, diagnostics: { runtime } };
+
+    if (dry_run) {
+      const result = await selection.adapter.submit(runtimeTask, { signal, mcpServers: task.mcp_servers ?? [] });
+      return {
+        ok: result.ok,
+        reason: result.reason,
+        diagnostics: {
+          ...result.diagnostics,
+          runtime,
+          task_goal: task.goal,
+          output_view_type: task.output_contract?.view_type,
+          context_source_count: provenanceCount(provenance),
+        },
+      };
+    }
+
+    const privacyDenial = agentTaskPrivacyDenial(runtime, signal, provenance, store);
+    if (privacyDenial) {
+      return {
+        ok: false,
+        reason: privacyDenial.reason,
+        diagnostics: {
+          runtime,
+          policy_denied: true,
+          policy: privacyDenial.policy,
+          related_records: privacyDenial.related_records,
+          related_views: privacyDenial.related_views,
+          task_goal: task.goal,
+          context_source_count: provenanceCount(provenance),
+        },
+      };
+    }
+
+    const submitted = agentTaskSubmittedEvent(task, provenance, runtime, program?.id);
+    const result = await selection.adapter.submit(runtimeTask, { signal, mcpServers: task.mcp_servers ?? [] });
+    if (!result.ok || !result.output) {
+      const reason = result.reason || `${runtime} agent task failed`;
+      return {
+        ok: false,
+        reason,
+        events: [
+          submitted,
+          {
+            event_type: "agent_task.failed",
+            actor: "agent",
+            status: "failed",
+            subject_type: "plugin",
+            subject_id: "capability.agent_task.submit",
+            plugin_id: "capability.agent_task.submit",
+            related_records: provenance.source_records,
+            related_views: provenance.source_views,
+            payload: { runtime, goal: task.goal, reason, requested_by_program: program?.id },
+          },
+        ],
+        diagnostics: {
+          ...result.diagnostics,
+          runtime,
+          error: reason,
+          task_goal: task.goal,
+          context_source_count: provenanceCount(provenance),
+        },
+      };
+    }
 
     const object = loadSignalObject(signal, store);
-    const provenance = agentTaskProvenance(task, signal, store);
-    const view = buildLocalMockView({
+    const evidenceViews = buildAgentReturnedViews({
       task,
       signal,
       object,
+      output: result.output,
       provenance,
       store,
       compilerId: "capability.agent_task.submit",
       requestedByProgram: program?.id,
+      runtime,
     });
+    const view = buildAgentOutputView({
+      task,
+      signal,
+      object,
+      output: result.output,
+      provenance,
+      store,
+      compilerId: "capability.agent_task.submit",
+      requestedByProgram: program?.id,
+      runtime,
+      extraSourceViews: evidenceViews.map(item => item.id!),
+    });
+    const views = [...evidenceViews, view];
     return {
       ok: true,
-      reason: `submitted agent task to ${runtime} and received ${view.view_type}`,
-      views: [view],
+      reason: `submitted agent task to ${runtime} and received ${views.length} View${views.length === 1 ? "" : "s"}`,
+      views,
       events: [
-        {
-          event_type: "agent_task.submitted",
-          actor: "system",
-          status: "started",
-          subject_type: "plugin",
-          subject_id: "capability.agent_task.submit",
-          plugin_id: "capability.agent_task.submit",
-          related_records: provenance.source_records,
-          related_views: provenance.source_views,
-          payload: {
-            runtime,
-            goal: task.goal,
-            output_contract: task.output_contract,
-            constraints: task.constraints,
-            requested_by_program: program?.id,
-          },
-        },
+        submitted,
         {
           event_type: "agent_task.completed",
           actor: "agent",
@@ -77,196 +141,23 @@ export const agentTaskSubmitCapability: Capability = {
           subject_id: "capability.agent_task.submit",
           plugin_id: "capability.agent_task.submit",
           related_records: provenance.source_records,
-          related_views: [...provenance.source_views, view.id!],
-          payload: {
-            runtime,
-            goal: task.goal,
-            output_view_id: view.id,
-            output_view_type: view.view_type,
-            output_contract: task.output_contract,
-            requested_by_program: program?.id,
-          },
+          related_views: [...provenance.source_views, ...views.map(item => item.id!)],
+          payload: { runtime, goal: task.goal, output_view_id: view.id, output_view_ids: views.map(item => item.id!), output_view_type: view.view_type, evidence_view_count: evidenceViews.length, output_contract: task.output_contract, requested_by_program: program?.id },
         },
       ],
       diagnostics: {
+        ...result.diagnostics,
         runtime,
         output_view_type: view.view_type,
         output_view_id: view.id,
+        output_view_ids: views.map(item => item.id!),
+        evidence_view_count: evidenceViews.length,
         task_goal: task.goal,
         context_source_count: provenanceCount(provenance),
       },
     };
   },
 };
-
-function runClaudeCodeAgentTask(input: {
-  task: AgentTaskPayload;
-  signal: ContextSignal;
-  store: { getRecord(id: string): StoredContextRecord | undefined; getView(id: string): StoredContextView | undefined };
-  requestedByProgram?: string;
-  dryRun?: boolean;
-}): CapabilityRunResult {
-  const { task, signal, store, requestedByProgram, dryRun } = input;
-  const runtime = "claude_code";
-  const provenance = agentTaskProvenance(task, signal, store);
-  const prompt = buildClaudeCodePrompt(task, signal, provenance);
-  const toolPolicy = claudeCodeToolPolicy(task);
-  if (dryRun) {
-    return {
-      ok: true,
-      reason: "dry_run previewed Claude Code agent task",
-      diagnostics: {
-        runtime,
-        dry_run: true,
-        prompt_preview: prompt.slice(0, 4000),
-        task_goal: task.goal,
-        output_view_type: task.output_contract?.view_type,
-        context_source_count: provenanceCount(provenance),
-        tool_policy: toolPolicy,
-      },
-    };
-  }
-  const privacyDenial = agentTaskPrivacyDenial(runtime, signal, provenance, store);
-  if (privacyDenial) {
-    return {
-      ok: false,
-      reason: privacyDenial.reason,
-      diagnostics: {
-        runtime,
-        policy_denied: true,
-        policy: privacyDenial.policy,
-        related_records: privacyDenial.related_records,
-        related_views: privacyDenial.related_views,
-        task_goal: task.goal,
-        context_source_count: provenanceCount(provenance),
-      },
-    };
-  }
-
-  const submitted = agentTaskSubmittedEvent(task, provenance, runtime, requestedByProgram);
-  try {
-    const output = runClaudeCode(prompt, task);
-    const object = loadSignalObject(signal, store);
-    const view = buildAgentOutputView({
-      task,
-      signal,
-      object,
-      output,
-      provenance,
-      store,
-      compilerId: "capability.agent_task.submit",
-      requestedByProgram,
-      runtime,
-    });
-    return {
-      ok: true,
-      reason: `submitted agent task to ${runtime} and received ${view.view_type}`,
-      views: [view],
-      events: [
-        submitted,
-        {
-          event_type: "agent_task.completed",
-          actor: "agent",
-          status: "completed",
-          subject_type: "plugin",
-          subject_id: "capability.agent_task.submit",
-          plugin_id: "capability.agent_task.submit",
-          related_records: provenance.source_records,
-          related_views: [...provenance.source_views, view.id!],
-          payload: { runtime, goal: task.goal, output_view_id: view.id, output_view_type: view.view_type, output_contract: task.output_contract, requested_by_program: requestedByProgram },
-        },
-      ],
-      diagnostics: {
-        runtime,
-        output_view_type: view.view_type,
-        output_view_id: view.id,
-        task_goal: task.goal,
-        context_source_count: provenanceCount(provenance),
-      },
-    };
-  } catch (error) {
-    const reason = `Claude Code agent task failed: ${errorMessage(error)}`;
-    return {
-      ok: false,
-      reason,
-      events: [
-        submitted,
-        {
-          event_type: "agent_task.failed",
-          actor: "agent",
-          status: "failed",
-          subject_type: "plugin",
-          subject_id: "capability.agent_task.submit",
-          plugin_id: "capability.agent_task.submit",
-          related_records: provenance.source_records,
-          related_views: provenance.source_views,
-          payload: { runtime, goal: task.goal, reason, requested_by_program: requestedByProgram },
-        },
-      ],
-      diagnostics: { runtime, error: reason, task_goal: task.goal, context_source_count: provenanceCount(provenance) },
-    };
-  }
-}
-
-function buildLocalMockView(input: {
-  task: AgentTaskPayload;
-  signal: ContextSignal;
-  object?: StoredContextRecord | StoredContextView;
-  provenance: AgentTaskProvenance;
-  store: { getRecord(id: string): StoredContextRecord | undefined; getView(id: string): StoredContextView | undefined };
-  compilerId: string;
-  requestedByProgram?: string;
-}): ContextView {
-  const { task, signal, object, provenance, store, compilerId, requestedByProgram } = input;
-  const title = task.output_contract?.title ?? `Agent task result: ${signal.title ?? signal.object_id}`;
-  const summary = summarize(task, signal, object);
-  return {
-    id: `${task.output_contract?.view_type}:${stableKey(`${task.runtime ?? "local_mock"}:${task.goal}:${signal.object_id}`)}`,
-    view_type: task.output_contract?.view_type ?? "analysis.agent_task",
-    title: title.slice(0, 180),
-    summary,
-    status: "candidate",
-    source_records: provenance.source_records,
-    source_views: provenance.source_views,
-    compiler: { id: compilerId, version: "0.1.0", mode: "hybrid" },
-    purpose: task.output_contract?.purpose ?? "Structured View produced by a generic external agent task adapter.",
-    scope: {
-      domain: signal.domain,
-      project: signal.project,
-      project_path: signal.project_path,
-      repo: signal.repo,
-      app: signal.app,
-      plugin_id: requestedByProgram ?? compilerId,
-    },
-    content: {
-      summary,
-      key_points: keyPoints(task, signal),
-      agent_task: {
-        runtime: task.runtime ?? "local_mock",
-        goal: task.goal,
-        output_contract: task.output_contract,
-        constraints: task.constraints,
-      },
-      agent_output: {
-        summary,
-        key_points: keyPoints(task, signal),
-        confidence: 0.5,
-        output_contract: task.output_contract,
-      },
-      context_pack_markdown_excerpt: task.context_pack?.markdown?.slice(0, 1200),
-    },
-    confidence: 0.5,
-    stability: "session",
-    lossiness: "medium",
-    privacy: mergedPrivacy(provenance, store) ?? (object && "privacy" in object ? object.privacy : undefined),
-    metadata: {
-      agent_runtime: task.runtime ?? "local_mock",
-      requested_by_program: requestedByProgram,
-      source_object_type: signal.object_type,
-      source_object_kind: signal.object_kind,
-    },
-  };
-}
 
 function buildAgentOutputView(input: {
   task: AgentTaskPayload;
@@ -278,8 +169,9 @@ function buildAgentOutputView(input: {
   compilerId: string;
   requestedByProgram?: string;
   runtime: string;
+  extraSourceViews?: string[];
 }): ContextView {
-  const { task, signal, object, output, provenance, store, compilerId, requestedByProgram, runtime } = input;
+  const { task, signal, object, output, provenance, store, compilerId, requestedByProgram, runtime, extraSourceViews = [] } = input;
   const summary = output.summary || summarize(task, signal, object);
   return {
     id: `${task.output_contract?.view_type}:${stableKey(`${runtime}:${task.goal}:${signal.object_id}`)}`,
@@ -288,7 +180,7 @@ function buildAgentOutputView(input: {
     summary,
     status: "candidate",
     source_records: provenance.source_records,
-    source_views: provenance.source_views,
+    source_views: unique([...provenance.source_views, ...extraSourceViews]),
     compiler: { id: compilerId, version: "0.1.0", mode: "hybrid" },
     purpose: task.output_contract?.purpose ?? "Structured View produced by a generic external agent task adapter.",
     scope: {
@@ -331,43 +223,75 @@ function buildAgentOutputView(input: {
   };
 }
 
-type AgentTaskOutput = {
-  summary: string;
-  analysis?: string;
-  key_points?: string[];
-  confidence?: number;
-};
+function buildAgentReturnedViews(input: {
+  task: AgentTaskPayload;
+  signal: ContextSignal;
+  object?: StoredContextRecord | StoredContextView;
+  output: AgentTaskOutput;
+  provenance: AgentTaskProvenance;
+  store: { getRecord(id: string): StoredContextRecord | undefined; getView(id: string): StoredContextView | undefined };
+  compilerId: string;
+  requestedByProgram?: string;
+  runtime: string;
+}): ContextView[] {
+  return (input.output.views ?? []).map((view, index) => buildAgentReturnedView({ ...input, view, index }));
+}
 
-function buildClaudeCodePrompt(task: AgentTaskPayload, signal: ContextSignal, provenance: AgentTaskProvenance): string {
-  return [
-    "You are a local agent runtime adapter for Info, a local-first ambient context runtime.",
-    "Use the provided task and Context Pack as primary inputs.",
-    "You own your runtime tools and skills; Info only provides the task boundary, context, constraints, and output contract.",
-    "Follow the task constraints exactly.",
-    "This adapter produces analysis-only Views. Do not return next_actions, tasks, tool plans, file diffs, or diffs.",
-    "Return only JSON matching this shape:",
-    JSON.stringify({
-      summary: "string",
-      analysis: "string",
-      key_points: ["string"],
-      confidence: 0.5,
-    }, null, 2),
-    "",
-    "AGENT TASK:",
-    JSON.stringify({
-      runtime: task.runtime ?? "claude_code",
-      goal: task.goal,
-      constraints: task.constraints,
-      output_contract: task.output_contract,
-      signal,
-    }, null, 2),
-    "",
-    "CONTEXT SOURCES:",
-    JSON.stringify(contextSourcesForPrompt(task, provenance), null, 2),
-    "",
-    "CONTEXT PACK:",
-    task.context_pack?.markdown ?? "",
-  ].join("\n");
+function buildAgentReturnedView(input: {
+  task: AgentTaskPayload;
+  signal: ContextSignal;
+  object?: StoredContextRecord | StoredContextView;
+  view: AgentTaskOutputView;
+  index: number;
+  provenance: AgentTaskProvenance;
+  store: { getRecord(id: string): StoredContextRecord | undefined; getView(id: string): StoredContextView | undefined };
+  compilerId: string;
+  requestedByProgram?: string;
+  runtime: string;
+}): ContextView {
+  const { task, signal, object, view, index, provenance, store, compilerId, requestedByProgram, runtime } = input;
+  const scope = {
+    domain: signal.domain,
+    project: signal.project,
+    project_path: signal.project_path,
+    repo: signal.repo,
+    app: signal.app,
+    plugin_id: requestedByProgram ?? compilerId,
+  };
+  const summary = view.summary || stringValue(view.content?.summary) || stringValue(view.content?.text)?.slice(0, 360) || `Agent returned ${view.view_type} evidence.`;
+  return {
+    id: `${view.view_type}:${stableKey(`${runtime}:${task.goal}:${signal.object_id}:${index}:${summary}`)}`,
+    view_type: view.view_type,
+    title: (view.title ?? `Agent evidence: ${signal.title ?? signal.object_id}`).slice(0, 180),
+    summary,
+    status: "candidate",
+    source_records: provenance.source_records,
+    source_views: provenance.source_views,
+    compiler: { id: compilerId, version: "0.1.0", mode: "hybrid" },
+    purpose: view.purpose ?? "Evidence View returned by an external agent runtime and validated by Info.",
+    scope,
+    content: {
+      ...(view.content ?? {}),
+      agent_task: {
+        runtime,
+        goal: task.goal,
+        output_contract: task.output_contract,
+        returned_view_index: index,
+      },
+    },
+    confidence: view.confidence ?? 0.6,
+    stability: "session",
+    lossiness: "medium",
+    privacy: mergedPrivacy(provenance, store) ?? (object && "privacy" in object ? object.privacy : undefined),
+    metadata: {
+      ...(view.metadata ?? {}),
+      agent_runtime: runtime,
+      requested_by_program: requestedByProgram,
+      source_object_type: signal.object_type,
+      source_object_kind: signal.object_kind,
+      agent_returned_view: true,
+    },
+  };
 }
 
 function contextSourcesForPrompt(task: AgentTaskPayload, provenance: AgentTaskProvenance): unknown[] {
@@ -381,67 +305,25 @@ function contextSourcesForPrompt(task: AgentTaskPayload, provenance: AgentTaskPr
   return sources.slice(0, 40);
 }
 
-function runClaudeCode(prompt: string, task?: AgentTaskPayload): AgentTaskOutput {
-  const bin = process.env.CLAUDE_CODE_BIN || "claude";
-  // Do not impose a default wall-clock timeout: local agent runtimes may be
-  // actively using their own tools/skills for slow read-only enrichment.
-  // Operators can still set AGENT_TASK_CLAUDE_CODE_TIMEOUT_MS as an explicit
-  // safety cutoff for deployments that need one.
-  const timeoutMs = Number(process.env.AGENT_TASK_CLAUDE_CODE_TIMEOUT_MS ?? 0);
-  const stdout = execFileSync(bin, claudeCodeArgs(prompt, task), {
-    encoding: "utf8",
-    timeout: timeoutMs,
-    maxBuffer: 2 * 1024 * 1024,
-    cwd: process.cwd(),
-    env: { ...process.env, CLAUDE_CODE_SIMPLE: "1" },
-  });
-  return parseAgentTaskOutput(stdout);
-}
-
-function claudeCodeArgs(prompt: string, task?: AgentTaskPayload): string[] {
-  const toolPolicy = claudeCodeToolPolicy(task);
-  const args = [
-    "-p",
-    "--no-session-persistence",
-    "--dangerously-skip-permissions",
-    `--tools=${toolPolicy.tools}`,
-    "--output-format=json",
-  ];
-  args.push(prompt);
-  return args;
-}
-
-function claudeCodeToolPolicy(task?: AgentTaskPayload) {
-  void task;
+function toRuntimeTask(task: AgentTaskPayload, runtime: string, signal: ContextSignal, provenance: AgentTaskProvenance, dryRun: boolean) {
   return {
-    tools: "default",
-    permission_mode: "dangerously-skip-permissions",
-    allowed_tools: [],
-    disallowed_tools: [],
-    reason: "local experiment trusts Claude Code as the external agent runtime with full tool permissions; task prompt still carries behavioral constraints",
+    id: `agent-task:${stableKey(`${runtime}:${task.goal}:${signal.object_id}`)}`,
+    runtime,
+    goal: task.goal!,
+    cwd: signal.project_path,
+    dryRun,
+    contextPack: {
+      markdown: task.context_pack?.markdown,
+      sources: contextSourcesForPrompt(task, provenance),
+      diagnostics: task.context_pack?.diagnostics,
+    },
+    outputContract: {
+      viewType: task.output_contract!.view_type!,
+      title: task.output_contract?.title,
+      purpose: task.output_contract?.purpose,
+    },
+    constraints: task.constraints,
   };
-}
-
-function parseAgentTaskOutput(stdout: string): AgentTaskOutput {
-  const parsed = JSON.parse(stdout) as any;
-  if (parsed?.is_error || /API Error:/i.test(String(parsed?.result ?? ""))) throw new Error(String(parsed?.result ?? "Claude Code returned an error"));
-  const candidate = typeof parsed?.result === "string" ? JSON.parse(stripJsonCodeFence(parsed.result)) : parsed;
-  if (!candidate || typeof candidate !== "object") throw new Error("Claude Code returned non-object agent output");
-  const unsupportedField = ["next_actions", "tasks", "tool_plans", "file_diffs", "diffs"].find(field => Object.hasOwn(candidate, field));
-  if (unsupportedField) throw new Error(`unsupported agent output field: ${unsupportedField}`);
-  if (typeof candidate.summary !== "string" || !candidate.summary.trim()) throw new Error("Claude Code agent output missing non-empty summary");
-  return {
-    summary: candidate.summary.trim(),
-    analysis: candidate.analysis === undefined ? undefined : String(candidate.analysis),
-    key_points: Array.isArray(candidate.key_points) ? candidate.key_points.map(String).slice(0, 12) : undefined,
-    confidence: typeof candidate.confidence === "number" ? Math.max(0, Math.min(1, candidate.confidence)) : 0.5,
-  };
-}
-
-function stripJsonCodeFence(value: string): string {
-  const trimmed = value.trim();
-  const match = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return match ? match[1].trim() : trimmed;
 }
 
 type AgentTaskProvenance = {

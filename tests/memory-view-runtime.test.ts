@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "../src/core/store.js";
-import { compileEvidenceViews } from "../src/runtime/evidence-view.js";
+import { compileEvidenceViews } from "../packages/views/evidence/index.js";
 import {
   compileActivityViews,
   compileIntentViews,
@@ -13,7 +13,7 @@ import {
   compileResourceViews,
   compileWorkflowViews,
   buildMemoryView,
-} from "../src/runtime/memory-views.js";
+} from "../packages/views/_shared/memory-views.js";
 import { runtimeTick } from "../src/runtime/runtime.js";
 
 function withStore(fn: (store: ContextStore) => Promise<void> | void) {

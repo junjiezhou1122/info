@@ -1,5 +1,5 @@
 import { ContextStore } from "../src/core/store.js";
-import { buildLocalProjectSnapshotRecord } from "../src/connectors/local-project.js";
+import { buildLocalProjectSnapshotRecord } from "../packages/connectors/local-project/index.js";
 
 const cwd = process.argv[2] ?? process.cwd();
 const store = new ContextStore();

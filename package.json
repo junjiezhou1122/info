@@ -22,6 +22,8 @@
     "http": "node --experimental-sqlite --import tsx src/server/http-server.ts",
     "runtime:tick": "node --experimental-sqlite --import tsx scripts/runtime-tick.ts",
     "daemon": "node --experimental-sqlite --import tsx scripts/daemon.ts",
+    "background-tasks": "node --experimental-sqlite --import tsx scripts/runtime-tick.ts --no-screenpipe --no-ai-sessions --no-git --no-compile-views --background-tasks",
+    "toolsmith-artifacts": "node --experimental-sqlite --import tsx scripts/runtime-tick.ts --no-screenpipe --no-ai-sessions --no-git --no-compile-views --toolsmith-artifacts",
     "runtime:status": "node --experimental-sqlite --import tsx scripts/runtime-status.ts",
     "thread:interpret": "node --experimental-sqlite --import tsx scripts/thread-interpret.ts",
     "context:query": "node --experimental-sqlite --import tsx scripts/context-query.ts",
@@ -31,6 +33,9 @@
     "timeline": "node --experimental-sqlite --import tsx scripts/timeline.ts",
     "pipeline:tick": "node --experimental-sqlite --import tsx scripts/pipeline-tick.ts",
     "context-runtime:tick": "node --experimental-sqlite --import tsx scripts/context-runtime-tick.ts",
+    "ui:dev": "pnpm --dir packages/ui run dev",
+    "ui:build": "pnpm --dir packages/ui run build",
+    "ui:preview": "pnpm --dir packages/ui run preview",
     "test": "node --experimental-sqlite --import tsx --test tests/**/*.test.ts"
   },
   "dependencies": {

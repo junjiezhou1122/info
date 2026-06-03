@@ -5,13 +5,15 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "../src/core/store.js";
 import {
-  AI_ACTIVITY_BLOCK_VIEW_STRATEGY_ID,
   AI_VISUAL_FRAME_VIEW_STRATEGY_ID,
-  compileActivityBlockViews,
   compileVisualFrameViews,
-  type ActivityBlockAnalyzer,
   type VisualFrameAnalyzer,
-} from "../src/runtime/visual-views.js";
+} from "../packages/views/visual-frame/index.js";
+import {
+  AI_ACTIVITY_BLOCK_VIEW_STRATEGY_ID,
+  compileActivityBlockViews,
+  type ActivityBlockAnalyzer,
+} from "../packages/views/activity-block/index.js";
 
 function withStore(fn: (store: ContextStore) => Promise<void> | void) {
   const dir = mkdtempSync(join(tmpdir(), "info-visual-views-test-"));

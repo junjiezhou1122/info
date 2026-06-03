@@ -11,6 +11,7 @@ import { routingLearningProgram } from "../src/programs/builtins/routing-learnin
 import { feedbackLearningProgram } from "../src/programs/builtins/feedback-learning.js";
 import { dailySummaryProgram } from "../src/programs/builtins/daily-summary.js";
 import { researchShadowProgram } from "../src/programs/builtins/research-shadow.js";
+import { proactiveResearchProgram, toolsmithAmbientProgram, writingAmbientProgram } from "../src/programs/builtins/proactive-ambient.js";
 import { agentTaskSubmitCapability } from "../src/programs/capabilities/agent-task-submit.js";
 import { createDefaultProgramRuntime, listDefaultCapabilities } from "../src/programs/registry.js";
 import { agentOutputFromDiagnostics } from "../src/programs/view-kinds.js";
@@ -99,6 +100,9 @@ test("Default Program registry exposes reusable Capabilities", () => {
   assert.ok(runtime.listPrograms().some(program => program.id === "program.feedback_learning"));
   assert.ok(runtime.listPrograms().some(program => program.id === "program.daily_summary"));
   assert.ok(runtime.listPrograms().some(program => program.id === "program.research_shadow"));
+  assert.ok(runtime.listPrograms().some(program => program.id === "program.proactive_research"));
+  assert.ok(runtime.listPrograms().some(program => program.id === "program.writing_ambient"));
+  assert.ok(runtime.listPrograms().some(program => program.id === "program.toolsmith_ambient"));
   assert.ok(runtime.listCapabilities().some(capability => capability.id === "capability.browser_ambient.explore"));
   assert.ok(runtime.listCapabilities().some(capability => capability.id === "capability.agent_task.submit"));
   assert.ok(capabilities.some(capability => capability.id === "capability.browser_ambient.explore"));
@@ -110,6 +114,32 @@ test("Default Program registry exposes reusable Capabilities", () => {
   assert.equal(capabilities.some(capability => capability.id === "capability.github.inspect_issue"), false);
   assert.equal(capabilities.some(capability => capability.id === "capability.code.inspect_project"), false);
 });
+
+test("Default Program runtime considers proactive ambient Programs without explicit routing", async () => withStore(async (store) => {
+  const record = store.insertRecord({
+    id: "default-runtime-writing-record",
+    schema: { name: "observation.editor.text_changed", version: 1 },
+    source: { type: "editor", connector: "vscode" },
+    scope: { project: "info", project_path: "/Users/junjie/info", app: "vscode" },
+    content: {
+      title: "docs/proactive-ambient.md",
+      path: "/Users/junjie/info/docs/proactive-ambient.md",
+      text: "Info should proactively help while I am writing about project focus, background research, and workflow tools.",
+    },
+    signal: { confidence: 0.88, importance: 0.7, status: "inbox" },
+    privacy: { level: "private", retention: "normal" },
+  });
+  const runtime = createDefaultProgramRuntime(store);
+
+  const result = await runtime.processObject(record);
+  const writtenViews = result.runs.flatMap(run => run.written_views).map(id => store.getView(id)).filter(Boolean);
+  const selectedProgramIds = result.diagnostics.selected_program_ids as string[];
+
+  assert.ok(selectedProgramIds.includes("program.writing_ambient"));
+  assert.ok(selectedProgramIds.includes("program.toolsmith_ambient"));
+  assert.ok(result.runs.some(run => run.program_id === "program.writing_ambient" && run.ok));
+  assert.equal(writtenViews.filter(view => view?.compiler?.id === "program.writing_ambient").length, 0);
+}));
 
 test("ProgramRuntime filters to a requested program id", async () => withStore(async (store) => {
   const record = store.insertRecord(githubRecord());
@@ -279,6 +309,129 @@ test("Research Shadow turns PDF text extraction Views into reusable research bri
   assert.match(String(brief.content?.analysis), /Context graphs and program attention/);
   assert.deepEqual(brief.source_views, [source.id]);
   assert.deepEqual(brief.source_records, ["record:pdf-research-shadow"]);
+}));
+
+test("Proactive Research queues background research when a project focus View appears", async () => withStore(async (store) => {
+  const oldRuntime = process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME;
+  process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME = "local_mock";
+  try {
+    const record = store.insertRecord({
+      ...localProjectRecord("proactive-research-project-record"),
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+    });
+    const focus = store.upsertView({
+      id: "thread:active-work:proactive-research",
+      view_type: "thread.active_work",
+      title: "Active work: agent runtime adapter package",
+      summary: "User is focused on agent runtime architecture, ACP docs, package boundaries, and ambient workflow improvement.",
+      source_records: [record.id],
+      scope: { project: "info", project_path: "/Users/junjie/info" },
+      content: {
+        focus: "agent runtime adapter package and proactive ambient workflow improvement",
+        key_points: ["ACP docs", "agent runtime adapter", "ambient background research"],
+      },
+      confidence: 0.86,
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+    });
+    const runtime = new ProgramRuntime(store)
+      .registerCapability(agentTaskSubmitCapability)
+      .registerProgram(proactiveResearchProgram);
+
+    const result = await runtime.processObject(focus, { program_id: "program.proactive_research" });
+    const task = store.getView(result.runs[0].written_views.find(id => id.startsWith("task:background-research:")) ?? "");
+    const advice = store.getView(result.runs[0].written_views.find(id => id.startsWith("advice:research:")) ?? "");
+    const brief = store.getView(result.runs[0].written_views.find(id => id.startsWith("brief.background_research:")) ?? "");
+
+    assert.equal(result.runs[0].ok, true);
+    assert.ok(task);
+    assert.equal(task.view_type, "task.background_research");
+    assert.equal(task.content?.speed, "background");
+    assert.deepEqual(task.content?.forbidden_actions, ["modify_files", "post_or_send", "mutate_remote_systems"]);
+    assert.ok(advice);
+    assert.equal(advice.view_type, "advice.research");
+    assert.equal(advice.content?.task_view_id, task.id);
+    assert.ok(brief);
+    assert.equal(brief.view_type, "brief.background_research");
+    assert.equal(brief.compiler?.id, "capability.agent_task.submit");
+  } finally {
+    if (oldRuntime === undefined) delete process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME;
+    else process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME = oldRuntime;
+  }
+}));
+
+test("Writing Ambient does not surface scaffold writing advice by default", async () => withStore(async (store) => {
+  const record = store.insertRecord({
+    id: "writing-ambient-record",
+    schema: { name: "observation.editor.text_changed", version: 1 },
+    source: { type: "editor", connector: "vscode" },
+    scope: { project: "info", project_path: "/Users/junjie/info", app: "vscode" },
+    content: {
+      title: "docs/ambient-runtime-contract.md",
+      path: "/Users/junjie/info/docs/ambient-runtime-contract.md",
+      text: "I want Info to become a proactive ambient system that can notice project focus, search in the background, and help while writing.",
+    },
+    signal: { confidence: 0.9, importance: 0.8, status: "inbox" },
+    privacy: { level: "private", retention: "normal" },
+  });
+  const runtime = new ProgramRuntime(store).registerProgram(writingAmbientProgram);
+
+  const result = await runtime.processObject(record, { program_id: "program.writing_ambient" });
+
+  assert.equal(result.runs[0].ok, true);
+  assert.deepEqual(result.runs[0].written_views, []);
+  assert.equal(result.runs[0].diagnostics?.generated, false);
+}));
+
+test("Toolsmith Ambient proposes small tools and requests no-file-edit prototype drafts", async () => withStore(async (store) => {
+  const oldRuntime = process.env.TOOLSMITH_AGENT_TASK_RUNTIME;
+  process.env.TOOLSMITH_AGENT_TASK_RUNTIME = "local_mock";
+  try {
+    const record = store.insertRecord({
+      ...localProjectRecord("toolsmith-project-record"),
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+    });
+    const workflow = store.upsertView({
+      id: "workflow:repeated-research-doc-generation",
+      view_type: "workflow",
+      title: "Repeated workflow: research docs and issue drafting",
+      summary: "User repeatedly searches docs, extracts evidence, creates issues, and drafts architecture notes.",
+      source_records: [record.id],
+      scope: { project: "info", project_path: "/Users/junjie/info" },
+      content: {
+        kind: "research_session",
+        workflow_count: 3,
+        key_points: ["search docs", "extract evidence", "draft issue/doc"],
+      },
+      confidence: 0.82,
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+    });
+    const runtime = new ProgramRuntime(store)
+      .registerCapability(agentTaskSubmitCapability)
+      .registerProgram(toolsmithAmbientProgram);
+
+    const result = await runtime.processObject(workflow, { program_id: "program.toolsmith_ambient" });
+    const opportunity = store.getView(result.runs[0].written_views.find(id => id.startsWith("opportunity:tool:")) ?? "");
+    const task = store.getView(result.runs[0].written_views.find(id => id.startsWith("task:toolsmith-prototype:")) ?? "");
+    const draft = store.getView(result.runs[0].written_views.find(id => id.startsWith("draft.tool_prototype:")) ?? "");
+
+    assert.equal(result.runs[0].ok, true);
+    assert.ok(opportunity);
+    assert.equal(opportunity.view_type, "opportunity.tool");
+    assert.match(String(opportunity.content?.autonomy_boundary), /file edits require sandbox_auto/);
+    assert.ok(task);
+    assert.equal(task.view_type, "task.toolsmith_prototype");
+    assert.deepEqual(task.content?.constraints, {
+      no_file_edits: true,
+      prototype_only: true,
+      require_user_approval_before_implementation: true,
+    });
+    assert.ok(draft);
+    assert.equal(draft.view_type, "draft.tool_prototype");
+    assert.equal(draft.compiler?.id, "capability.agent_task.submit");
+  } finally {
+    if (oldRuntime === undefined) delete process.env.TOOLSMITH_AGENT_TASK_RUNTIME;
+    else process.env.TOOLSMITH_AGENT_TASK_RUNTIME = oldRuntime;
+  }
 }));
 
 test("Daily Summary compresses timeline Views and reuses project Views", async () => withStore(async (store) => {
@@ -2110,6 +2263,86 @@ process.stdout.write(${JSON.stringify(fencedOutput)});
     assert.ok(view);
     assert.equal(view.summary, "Fenced Claude summary");
     assert.deepEqual(view.content?.key_points, ["Fence stripped"]);
+  } finally {
+    if (oldBin === undefined) delete process.env.CLAUDE_CODE_BIN;
+    else process.env.CLAUDE_CODE_BIN = oldBin;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+test("AgentTask can ingest evidence Views returned by an agent-owned skill", async () => withStore(async (store) => {
+  const oldBin = process.env.CLAUDE_CODE_BIN;
+  const dir = mkdtempSync(join(tmpdir(), "info-agent-task-evidence-views-"));
+  const fakeClaude = join(dir, "claude");
+  const agentOutput = JSON.stringify({
+    result: JSON.stringify({
+      summary: "Claude analyzed the page after using its own reader tool.",
+      analysis: "The agent-owned reader evidence is returned as a View for Info to persist.",
+      key_points: ["Agent owns tools", "Info owns Views"],
+      confidence: 0.83,
+      views: [{
+        view_type: "extraction.reader_snapshot",
+        title: "Agent reader snapshot",
+        summary: "Readable article evidence returned by the agent.",
+        content: {
+          url: "https://example.com/agent-reader",
+          text: "Readable article evidence returned by the agent-owned reader skill.",
+          provider: "agent_skill",
+        },
+        confidence: 0.78,
+      }],
+    }),
+  });
+  writeFileSync(fakeClaude, `#!/usr/bin/env node
+process.stdout.write(${JSON.stringify(agentOutput)});
+`);
+  chmodSync(fakeClaude, 0o755);
+  process.env.CLAUDE_CODE_BIN = fakeClaude;
+  try {
+    const recordInput = githubIssueRecord("agent-task-evidence-views");
+    recordInput.privacy = { level: "private", retention: "normal", allow_external_llm: true };
+    const record = store.insertRecord(recordInput);
+    const runtime = new ProgramRuntime(store).registerCapability(agentTaskSubmitCapability);
+
+    const result = await runtime.runCapability("capability.agent_task.submit", {
+      autonomy: "suggest",
+      signal: {
+        object_id: record.id,
+        object_kind: "observation",
+        object_type: record.schema.name,
+        source: record.source.type,
+        title: record.content?.title,
+        text_preview: record.content?.text,
+        url: record.content?.url,
+      },
+      payload: {
+        task: {
+          runtime: "claude_code",
+          goal: "Analyze with local Claude Code and return evidence Views from agent-owned tools.",
+          context_pack: { markdown: "# Context Broker Pack\nObservation text" },
+          output_contract: { view_type: "analysis.agent_owned_reader", title: "Agent-owned reader analysis" },
+        },
+      },
+    });
+    const evidence = store.getView(result.written_views?.[0] ?? "");
+    const analysis = store.getView(result.written_views?.[1] ?? "");
+
+    assert.equal(result.ok, true);
+    assert.equal(result.written_views?.length, 2);
+    assert.ok(evidence);
+    assert.ok(analysis);
+    assert.equal(evidence.view_type, "extraction.reader_snapshot");
+    assert.equal(evidence.content?.provider, "agent_skill");
+    assert.deepEqual(evidence.source_records, [record.id]);
+    assert.equal(evidence.metadata?.agent_returned_view, true);
+    assert.equal(analysis.view_type, "analysis.agent_owned_reader");
+    assert.ok(analysis.source_views?.includes(evidence.id));
+    assert.equal(result.diagnostics?.evidence_view_count, 1);
+
+    const completedTask = store.listRuntimeEvents({ event_type: "agent_task.completed", plugin_id: "capability.agent_task.submit", limit: 1 })[0];
+    assert.deepEqual(completedTask.payload?.output_view_ids, [evidence.id, analysis.id]);
+    assert.equal(completedTask.payload?.evidence_view_count, 1);
+    assert.deepEqual(completedTask.related_views, [evidence.id, analysis.id]);
   } finally {
     if (oldBin === undefined) delete process.env.CLAUDE_CODE_BIN;
     else process.env.CLAUDE_CODE_BIN = oldBin;

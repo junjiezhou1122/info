@@ -12,7 +12,7 @@ import {
   compileMemoryViewsWithLlm,
   compileWorkflowViewsWithLlm,
   type LlmViewCompressor,
-} from "../src/runtime/view-compression.js";
+} from "../packages/views/_shared/view-compression.js";
 
 function withStore(fn: (store: ContextStore) => Promise<void> | void) {
   const dir = mkdtempSync(join(tmpdir(), "info-view-compression-test-"));

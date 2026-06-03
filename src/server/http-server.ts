@@ -3,9 +3,9 @@ import { pathToFileURL } from "node:url";
 import { loadLocalEnv } from "./env.js";
 import { ContextStore } from "../core/store.js";
 import { ContextArtifactSchema, ContextConnectorSchema, ContextPackRequestSchema, ContextQuerySchema, ContextRecordSchema, ContextSchemaSchema, ContextViewSchema, FeedbackInputSchema, RuntimeEventSchema } from "../core/schema.js";
-import { enrichWithJinaReader, shouldAutoEnrichBrowserRecord } from "../connectors/enrichment.js";
-import { fetchScreenpipeFrameImage, fetchScreenpipeRecords } from "../connectors/screenpipe.js";
-import { aiSessionRefToRecord, locateAiSessions } from "../connectors/ai-sessions.js";
+import { enrichWithJinaReader, shouldAutoEnrichBrowserRecord } from "../../packages/connectors/enrichment/index.js";
+import { fetchScreenpipeFrameImage, fetchScreenpipeRecords } from "../../packages/connectors/screenpipe/index.js";
+import { aiSessionRefToRecord, locateAiSessions } from "../../packages/connectors/ai-sessions/index.js";
 import { publicRuntimeSettings, runtimeSettings, runtimeStatus, runtimeTick, saveRuntimeSettings } from "../runtime/runtime.js";
 import { compileObservationTimeline } from "../runtime/timeline.js";
 import { compileActivityTimeline } from "../runtime/activity-timeline.js";
@@ -39,7 +39,54 @@ type AgentTaskHttpBody = {
   task?: Record<string, unknown>;
   context_limit?: unknown;
   contextLimit?: unknown;
+  cascade_depth?: unknown;
+  cascadeDepth?: unknown;
 };
+
+type ProgramRuntimeInstance = ReturnType<typeof createDefaultProgramRuntime>;
+
+const DEFAULT_CASCADE_DEPTH = 2;
+const MAX_CASCADE_DEPTH = 4;
+
+async function cascadeGeneratedViews(input: {
+  runtime: ProgramRuntimeInstance;
+  store: ContextStore;
+  viewIds: string[];
+  contextPluginId?: string;
+  maxDepth?: number;
+}) {
+  const maxDepth = Math.min(MAX_CASCADE_DEPTH, Math.max(1, input.maxDepth ?? DEFAULT_CASCADE_DEPTH));
+  const seen = new Set<string>();
+  let queue = uniqueStrings(input.viewIds);
+  const cascade = [];
+
+  for (let depth = 1; depth <= maxDepth && queue.length; depth += 1) {
+    const next: string[] = [];
+    for (const id of queue) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const view = input.store.getView(id);
+      if (!view) continue;
+      const result = await input.runtime.processObject(view, { context_plugin_id: input.contextPluginId });
+      cascade.push({ ...result, cascade_depth: depth });
+      next.push(...result.runs.flatMap(run => run.written_views));
+    }
+    queue = uniqueStrings(next).filter(id => !seen.has(id));
+  }
+
+  return cascade;
+}
+
+function cascadeDepth(url: URL, body?: AgentTaskHttpBody): number {
+  return Math.min(
+    MAX_CASCADE_DEPTH,
+    positiveInteger(url.searchParams.get("cascade_depth") ?? body?.cascade_depth ?? body?.cascadeDepth) ?? DEFAULT_CASCADE_DEPTH,
+  );
+}
+
+function uniqueStrings(values: unknown[]): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === "string" && Boolean(value)))];
+}
 
 
 function withDefaultAgentTaskContextPack(taskInput: unknown, signal: ReturnType<typeof signalFromObject>, store: ContextStore, body: AgentTaskHttpBody, pluginId?: string): Record<string, unknown> {
@@ -415,12 +462,13 @@ export function createContextHttpHandler(store: ContextStore) {
         ...processing.runs.flatMap(run => run.written_views),
         ...store.listViews({ source_record_id: record.id }).map(view => view.id),
       ])];
-      const cascade_processing = [];
-      for (const id of generatedViewIds) {
-        const view = store.getView(id);
-        if (!view) continue;
-        cascade_processing.push(await runtime.processObject(view, { context_plugin_id: pluginParam }));
-      }
+      const cascade_processing = await cascadeGeneratedViews({
+        runtime,
+        store,
+        viewIds: generatedViewIds,
+        contextPluginId: pluginParam,
+        maxDepth: cascadeDepth(url, undefined),
+      });
       return send(res, 201, { ...base, processing, cascade_processing });
     }
 
@@ -870,12 +918,13 @@ export function createContextHttpHandler(store: ContextStore) {
       if (!result.ok || url.searchParams.get("cascade_views") !== "true" || body.dry_run) {
         return send(res, result.ok ? 201 : 400, { ok: result.ok, result, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
       }
-      const cascade_processing = [];
-      for (const id of result.written_views ?? []) {
-        const outputView = store.getView(id);
-        if (!outputView) continue;
-        cascade_processing.push(await runtime.processObject(outputView, { context_plugin_id: pluginParam }));
-      }
+      const cascade_processing = await cascadeGeneratedViews({
+        runtime,
+        store,
+        viewIds: result.written_views ?? [],
+        contextPluginId: pluginParam,
+        maxDepth: cascadeDepth(url, body),
+      });
       return send(res, 201, { ok: true, result, cascade_processing, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
     }
 

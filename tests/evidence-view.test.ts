@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "../src/core/store.js";
-import { buildEvidenceView, compileEvidenceViews } from "../src/runtime/evidence-view.js";
+import { buildEvidenceView, compileEvidenceViews } from "../packages/views/evidence/index.js";
 import { runtimeTick } from "../src/runtime/runtime.js";
 
 function withStore(fn: (store: ContextStore) => Promise<void> | void) {
@@ -14,12 +14,13 @@ function withStore(fn: (store: ContextStore) => Promise<void> | void) {
 }
 
 test("Evidence View compiler normalizes raw browser and Screenpipe observations", () => withStore((store) => {
+  const now = Date.now();
   store.insertRecord({
     id: "record:evidence-browser",
     schema: { name: "observation.browser_page_heartbeat", version: 1 },
     source: { type: "browser", connector: "chrome-extension" },
     scope: { app: "Chrome", domain: "docs.screenpi.pe" },
-    time: { observed_at: "2026-05-25T10:00:00.000Z" },
+    time: { observed_at: new Date(now - 60_000).toISOString() },
     content: {
       title: "Screenpipe Docs",
       url: "https://docs.screenpi.pe/recording",
@@ -33,7 +34,7 @@ test("Evidence View compiler normalizes raw browser and Screenpipe observations"
     schema: { name: "observation.screenpipe_activity", version: 1 },
     source: { type: "screenpipe", connector: "screenpipe-local-api" },
     scope: { app: "Warp" },
-    time: { observed_at: "2026-05-25T10:01:00.000Z" },
+    time: { observed_at: new Date(now).toISOString() },
     content: { title: "Warp - OCR", text: "sqlite3 ~/.screenpipe/db.sqlite select browser_url" },
     payload: { app_name: "Warp", content_type: "OCR", frame_id: 9466 },
     privacy: { level: "private", retention: "normal", allow_external_llm: false },
@@ -69,8 +70,8 @@ test("Evidence View can be used as a graph node with stable provenance", () => w
     schema: { name: "observation.local_project", version: 1 },
     source: { type: "local_project", connector: "runtime-snapshot" },
     scope: { project: "info", project_path: "/Users/junjie/info" },
-    content: { title: "Local project snapshot: info", path: "/Users/junjie/info", text: "src/runtime/evidence-view.ts changed" },
-    payload: { root: "/Users/junjie/info", files_touched: ["src/runtime/evidence-view.ts"] },
+    content: { title: "Local project snapshot: info", path: "/Users/junjie/info", text: "packages/views/evidence/evidence-view.ts changed" },
+    payload: { root: "/Users/junjie/info", files_touched: ["packages/views/evidence/evidence-view.ts"] },
     privacy: { level: "private", retention: "normal", allow_external_llm: false },
   });
 

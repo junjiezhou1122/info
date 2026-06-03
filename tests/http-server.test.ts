@@ -4644,7 +4644,7 @@ test("POST /context/ingest does not dedupe explicit browser ambient requests", a
   assert.ok(store.getRecord("record:http-manual-ambient-2"));
 }));
 
-test("POST /context/ingest can cascade generated Views once", async () => withStore(async (store) => {
+test("POST /context/ingest can cascade generated Views into proactive ambient work", async () => withStore(async (store) => {
   const response = await request(store, "/context/ingest?process=true&cascade_views=true", {
     method: "POST",
     body: {
@@ -4663,10 +4663,11 @@ test("POST /context/ingest can cascade generated Views once", async () => withSt
   const body = response.body as {
     ok: boolean;
     processing: { runs: Array<{ written_views: string[] }> };
-    cascade_processing: Array<{ runs: Array<{ written_views: string[] }> }>;
+    cascade_processing: Array<{ cascade_depth?: number; runs: Array<{ program_id?: string; written_views: string[] }> }>;
   };
   const firstViews = body.processing.runs.flatMap(run => run.written_views);
   const cascadedViews = body.cascade_processing.flatMap(result => result.runs.flatMap(run => run.written_views));
+  const cascadedViewTypes = cascadedViews.map(id => store.getView(id)?.view_type).filter(Boolean);
 
   assert.equal(response.status, 201);
   assert.equal(body.ok, true);
@@ -4674,6 +4675,9 @@ test("POST /context/ingest can cascade generated Views once", async () => withSt
   assert.ok(cascadedViews.some(id => store.getView(id)?.view_type === "project.current_context"));
   assert.ok(cascadedViews.some(id => store.getView(id)?.view_type === "thread.active_work"));
   assert.ok(cascadedViews.some(id => store.getView(id)?.view_type === "brief.project_next_state"));
+  assert.ok(cascadedViewTypes.includes("task.background_research"));
+  assert.ok(cascadedViewTypes.includes("advice.research"));
+  assert.ok(body.cascade_processing.some(result => result.cascade_depth === 2 && result.runs.some(run => run.program_id === "program.proactive_research")));
 }));
 
 test("POST /context/ingest cascade with plugin_id keeps cascaded Program Context Packs policy-scoped", async () => {

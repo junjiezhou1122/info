@@ -57,8 +57,8 @@ export class ProgramRuntime {
     const runs: ProgramRuntimeResult["runs"] = [];
     const policyDenials: Array<Record<string, unknown>> = [];
     const capabilityFailures: Array<Record<string, unknown>> = [];
-    const maxPrograms = options.max_programs ?? 8;
     const allPrograms = this.listPrograms();
+    const maxPrograms = options.max_programs ?? allPrograms.length;
     const routing = options.program_id ? { missing: [] } : routingShortcutForSignal(this.store, signal, new Set(allPrograms.map(program => program.id)));
     for (const missing of routing.missing) {
       this.store.appendRuntimeEvent({

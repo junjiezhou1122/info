@@ -50,6 +50,13 @@ pnpm run dev
 
 `pnpm run http` 是同一个 standalone HTTP runtime 的显式别名。
 
+Runtime UI lives in `packages/ui` and uses its own Vite build boundary:
+
+```bash
+pnpm run ui:dev
+pnpm run ui:build
+```
+
 ## 运行 iii worker
 
 iii worker 目前是实验映射入口，不是默认开发入口：
@@ -82,18 +89,18 @@ pnpm run episode:summary -- <thread_id>
 
 ## Browser Extension
 
-`browser-extension/` 是 Chrome MV3 草稿：点击扩展按钮后采集当前页面 title/url/正文/选中文本/scroll depth/dwell time。普通采集写入 `/context/ingest`；Ambient Explore 写入 `/context/ingest?process=true&cascade_views=true`，由 Program runtime 触发 AgentTask 并产出 Views，扩展本身只读取 Views 和写 feedback。
+`packages/browser-extension/` 是 Chrome MV3 草稿：点击扩展按钮后采集当前页面 title/url/正文/选中文本/scroll depth/dwell time。普通采集写入 `/context/ingest`；Save & Analyze 写入 `/context/ingest?process=true&cascade_views=true`，由 Program runtime 触发 AgentTask 并产出 Views。Ask Claude Code 会把当前页写成 Observation 后调用 `/agent-tasks?cascade_views=true`，默认 runtime 是 `claude_code`。popup 可以实时检索所有 active Views、按当前页面搜索 Views，并对选中的 View 写 feedback。
 
 Chrome 加载方式：
 
 1. 打开 `chrome://extensions`
 2. 开启 Developer mode
 3. Load unpacked
-4. 选择 `browser-extension/`
+4. 选择 `packages/browser-extension/`
 
 ## 已有 connector 草稿
 
-- `browser-extension/`: 当前页面 context，是 web semantic sensor
+- `packages/browser-extension/`: 当前页面 context，是 web semantic sensor
 - Screenpipe connector：计划接入，属于 ambient sensor，负责 screen/OCR/accessibility/audio/UI events
 - `scripts/local-project-once.ts`: 当前 git repo / branch / status / diff / README / AGENTS
 - `scripts/screenshot-once.ts`: macOS screenshot artifact + active app/window metadata

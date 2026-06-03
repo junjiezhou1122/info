@@ -333,25 +333,6 @@ function chooseBucketMinutes(minutes: number): number {
   return 60;
 }
 
-
-function rebuildBucketsForProject(sourceBuckets: ActivityTimelineBucket[] | undefined, items: ActivityTimelineItem[], recordIds: Set<string>): ActivityTimelineBucket[] {
-  if (!sourceBuckets?.length) return [];
-  const itemIds = new Set(items.map(item => item.id));
-  return sourceBuckets.map(bucket => {
-    const filtered = bucket.items.filter(item => itemIds.has(item.id) || item.record_ids?.some(id => recordIds.has(id)));
-    return {
-      ...bucket,
-      count: filtered.length,
-      top_sources: top(filtered.map(item => item.source), 5),
-      top_apps: top(filtered.map(item => item.app).filter(Boolean) as string[], 5),
-      top_domains: top(filtered.map(item => item.domain).filter(Boolean) as string[], 5),
-      top_projects: top(filtered.map(item => item.project).filter(Boolean) as string[], 5),
-      summary: summarizeBucket(filtered),
-      items: filtered,
-    };
-  }).filter(bucket => bucket.count > 0);
-}
-
 function summarizeProjectTimeline(items: ActivityTimelineItem[], workThreads: ProjectTimelineWorkThread[]) {
   return {
     top_sources: top(items.map(item => item.source), 8),

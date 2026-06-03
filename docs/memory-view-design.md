@@ -1133,10 +1133,10 @@ Observation
 Implementation files:
 
 ```text
-src/runtime/evidence-view.ts
+packages/views/evidence/evidence-view.ts
   deterministic Observation -> EvidenceView compiler
 
-src/runtime/memory-views.ts
+packages/views/_shared/memory-views.ts
   EvidenceView -> ActivityView compiler
   ActivityView -> ProposalView compiler
   ProposalView -> ResourceView compiler
@@ -1149,7 +1149,7 @@ src/runtime/runtime.ts
   runtime tick compiles evidence, activity, proposal, resource, intent,
   workflow, then memory
 
-ui/src/main.tsx
+packages/ui/src/main.tsx
   displays current View family counts in the Timeline page
 ```
 

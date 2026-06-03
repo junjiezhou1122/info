@@ -14,6 +14,12 @@ function withStore(fn: (store: ContextStore) => Promise<void> | void) {
   return Promise.resolve(fn(store)).finally(() => rmSync(dir, { recursive: true, force: true }));
 }
 
+const FIXTURE_BASE_MS = Math.floor((Date.now() - 12 * 60 * 60_000) / (5 * 60_000)) * 5 * 60_000;
+
+function fixtureTime(offsetSeconds = 0): string {
+  return new Date(FIXTURE_BASE_MS + offsetSeconds * 1000).toISOString();
+}
+
 function seedLegacyRecords(store: ContextStore) {
   store.insertRecord({
     id: "record:timeline-raw-source",
@@ -117,7 +123,7 @@ test("compileActivityTimeline keeps ordinary Screenpipe OCR/search results in th
     schema: { name: "observation.screenpipe_activity_summary", version: 1 },
     source: { type: "screenpipe", connector: "screenpipe-activity-summary" },
     scope: { app: "Warp" },
-    time: { observed_at: "2026-05-25T11:35:00.000Z" },
+    time: { observed_at: fixtureTime() },
     content: { title: "Warp - info", text: "app: Warp\nwindow: info\nminutes: 3" },
     payload: { app_name: "Warp", window_name: "info", minutes: 3 },
     privacy: { level: "private", retention: "normal" },
@@ -127,7 +133,7 @@ test("compileActivityTimeline keeps ordinary Screenpipe OCR/search results in th
     schema: { name: "observation.screenpipe_activity", version: 1 },
     source: { type: "screenpipe", connector: "screenpipe-local-api" },
     scope: { app: "Warp" },
-    time: { observed_at: "2026-05-25T11:35:10.000Z" },
+    time: { observed_at: fixtureTime(10) },
     content: { title: "Warp - OCR", text: "RAW OCR SHOULD NOT BE MAIN ACTIVITY" },
     payload: { app_name: "Warp", content_type: "OCR" },
     privacy: { level: "private", retention: "normal" },
@@ -149,7 +155,7 @@ test("compileActivityTimeline hides Screenpipe recorder and Info Timeline self-o
     schema: { name: "observation.screenpipe_activity_summary", version: 1 },
     source: { type: "screenpipe", connector: "screenpipe-activity-summary" },
     scope: { app: "Warp" },
-    time: { observed_at: "2026-05-25T11:35:00.000Z" },
+    time: { observed_at: fixtureTime() },
     content: { title: "Warp - info", text: "app: Warp\nwindow: info\nminutes: 3" },
     payload: { app_name: "Warp", window_name: "info", minutes: 3 },
     privacy: { level: "private", retention: "normal" },
@@ -159,7 +165,7 @@ test("compileActivityTimeline hides Screenpipe recorder and Info Timeline self-o
     schema: { name: "observation.screenpipe_activity_summary", version: 1 },
     source: { type: "screenpipe", connector: "screenpipe-activity-summary" },
     scope: { app: "Terminal" },
-    time: { observed_at: "2026-05-25T11:35:10.000Z" },
+    time: { observed_at: fixtureTime(10) },
     content: { title: "Terminal - screenpipe record", text: "npm exec screenpipe@latest record" },
     payload: { app_name: "Terminal", window_name: "junjie - screenpipe ◂ npm exec screenpipe@latest record", minutes: 0.1 },
     privacy: { level: "private", retention: "normal" },
@@ -169,7 +175,7 @@ test("compileActivityTimeline hides Screenpipe recorder and Info Timeline self-o
     schema: { name: "observation.browser_page_heartbeat", version: 1 },
     source: { type: "browser", connector: "chrome-extension" },
     scope: { app: "chrome", domain: "localhost" },
-    time: { observed_at: "2026-05-25T11:35:20.000Z" },
+    time: { observed_at: fixtureTime(20) },
     content: { title: "Info Runtime · Timeline", text: "Timeline Live sync", url: "http://localhost:5177/" },
     payload: { browser_url: "http://localhost:5177/" },
     privacy: { level: "private", retention: "normal" },
@@ -192,7 +198,7 @@ test("compileActivityTimeline keeps recorder and self-observation available in l
     schema: { name: "observation.screenpipe_activity_summary", version: 1 },
     source: { type: "screenpipe", connector: "screenpipe-activity-summary" },
     scope: { app: "Terminal" },
-    time: { observed_at: "2026-05-25T11:35:10.000Z" },
+    time: { observed_at: fixtureTime(10) },
     content: { title: "Terminal - screenpipe record", text: "npm exec screenpipe@latest record" },
     payload: { app_name: "Terminal", window_name: "junjie - screenpipe ◂ npm exec screenpipe@latest record", minutes: 0.1 },
     privacy: { level: "private", retention: "normal" },
@@ -202,7 +208,7 @@ test("compileActivityTimeline keeps recorder and self-observation available in l
     schema: { name: "observation.browser_page_heartbeat", version: 1 },
     source: { type: "browser", connector: "chrome-extension" },
     scope: { app: "chrome", domain: "localhost" },
-    time: { observed_at: "2026-05-25T11:35:20.000Z" },
+    time: { observed_at: fixtureTime(20) },
     content: { title: "Info Runtime · Timeline", text: "Timeline Live sync", url: "http://localhost:5177/" },
     payload: { browser_url: "http://localhost:5177/" },
     privacy: { level: "private", retention: "normal" },
@@ -248,9 +254,9 @@ test("compileActivityTimeline applies source filter before limiting candidates",
 
 test("compileActivityTimeline can merge continuous browser page samples", () => withStore((store) => {
   for (const [index, observed] of [
-    [0, "2026-05-25T11:35:00.000Z"],
-    [1, "2026-05-25T11:36:00.000Z"],
-    [2, "2026-05-25T11:37:30.000Z"],
+    [0, fixtureTime()],
+    [1, fixtureTime(60)],
+    [2, fixtureTime(150)],
   ] as const) {
     store.insertRecord({
       id: `record:browser-youtube-${index}`,
@@ -284,9 +290,9 @@ test("compileActivityTimeline can merge continuous browser page samples", () => 
 
 test("compileActivityTimeline does not split continuous browser duration on selected text evidence", () => withStore((store) => {
   for (const [index, observed] of [
-    [0, "2026-05-25T14:11:00.000Z"],
-    [1, "2026-05-25T14:12:00.000Z"],
-    [2, "2026-05-25T14:13:00.000Z"],
+    [0, fixtureTime()],
+    [1, fixtureTime(60)],
+    [2, fixtureTime(120)],
   ] as const) {
     store.insertRecord({
       id: `record:browser-video-heartbeat-${index}`,
@@ -303,7 +309,7 @@ test("compileActivityTimeline does not split continuous browser duration on sele
     schema: { name: "observation.browser_text_selected", version: 1 },
     source: { type: "browser", connector: "chrome-extension" },
     scope: { app: "chrome", domain: "www.youtube.com" },
-    time: { observed_at: "2026-05-25T14:12:30.000Z" },
+    time: { observed_at: fixtureTime(90) },
     content: { title: "(119) Lecture 1 - YouTube", text: "115K", url: "https://www.youtube.com/watch?v=lecture" },
     privacy: { level: "private", retention: "normal" },
   });
@@ -334,8 +340,8 @@ test("compileActivityTimeline does not split continuous browser duration on sele
 
 test("compileActivityTimeline dedupes repeated Screenpipe activity summaries to the latest expanded row", () => withStore((store) => {
   for (const [id, observed, minutes] of [
-    ["one", "2026-05-25T11:35:00.000Z", 14],
-    ["two", "2026-05-25T11:36:00.000Z", 3],
+    ["one", fixtureTime(), 14],
+    ["two", fixtureTime(60), 3],
   ] as const) {
     store.insertRecord({
       id: `record:screenpipe-window-${id}`,
@@ -361,8 +367,8 @@ test("compileActivityTimeline dedupes repeated Screenpipe activity summaries to 
 
 test("compileActivityTimeline can disable dedupe for evidence inspection", () => withStore((store) => {
   for (const [id, observed, minutes] of [
-    ["one", "2026-05-25T11:35:00.000Z", 14],
-    ["two", "2026-05-25T11:36:00.000Z", 3],
+    ["one", fixtureTime(), 14],
+    ["two", fixtureTime(60), 3],
   ] as const) {
     store.insertRecord({
       id: `record:screenpipe-window-${id}`,
@@ -389,7 +395,7 @@ test("compileActivityTimeline can include complete low-level Screenpipe details 
     id: "record:screenpipe-frame-context-complete",
     schema: { name: "observation.screenpipe_workspace_signal", version: 1 },
     source: { type: "screenpipe", connector: "screenpipe-frame-context" },
-    content: { title: "Screenpipe frame context 9480", text: "~/info.main ui/src/main.tsx /Users/junjie/info" },
+    content: { title: "Screenpipe frame context 9480", text: "~/info.main packages/ui/src/main.tsx /Users/junjie/info" },
     payload: { content_type: "frame_context", frame_id: 9480, text_source: "ocr", node_count: 42 },
     privacy: { level: "private", retention: "normal" },
   });
@@ -409,7 +415,7 @@ test("compileActivityTimeline drops Screenpipe Timeline self-observation echoes"
     id: "record:screenpipe-frame-context-real",
     schema: { name: "observation.screenpipe_workspace_signal", version: 1 },
     source: { type: "screenpipe", connector: "screenpipe-frame-context" },
-    content: { title: "Screenpipe frame context 9480", text: "~/info.main ui/src/main.tsx /Users/junjie/info" },
+    content: { title: "Screenpipe frame context 9480", text: "~/info.main packages/ui/src/main.tsx /Users/junjie/info" },
     payload: { content_type: "frame_context", frame_id: 9480, text_source: "ocr", node_count: 42 },
     privacy: { level: "private", retention: "normal" },
   });
@@ -468,7 +474,7 @@ test("compileActivityTimeline dedupes Screenpipe terminal spinner window titles"
       schema: { name: "observation.screenpipe_activity_summary", version: 1 },
       source: { type: "screenpipe", connector: "screenpipe-activity-summary" },
       scope: { app: "Warp" },
-      time: { observed_at: "2026-05-25T08:40:00.000Z" },
+      time: { observed_at: fixtureTime() },
       content: { title: `Warp - ${spinner} info` },
       payload: { app_name: "Warp", window_name: `${spinner} info`, minutes: 1 },
       privacy: { level: "private", retention: "normal" },

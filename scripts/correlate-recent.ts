@@ -1,7 +1,7 @@
 import { ContextStore } from "../src/core/store.js";
 import { buildCandidateThreads } from "../src/runtime/correlation.js";
 import { compileWorkThreadView } from "../src/runtime/work-thread-view.js";
-import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "../src/connectors/ai-sessions.js";
+import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "../packages/connectors/ai-sessions/index.js";
 import type { StoredContextRecord } from "../src/core/types.js";
 
 const args = new Set(process.argv.slice(2));

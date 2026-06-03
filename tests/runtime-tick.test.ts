@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "../src/core/store.js";
@@ -135,7 +135,172 @@ test("runtimeTick persists Screenpipe observations so activity timeline can disp
   }
 }));
 
-test("WorkThread and timeline suppress passive Warp focus and low-value Terminal OCR", () => withStore((store) => {
+test("runtimeTick can process proactive background research task Views asynchronously", async () => withStore(async (store) => {
+  const oldRuntime = process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME;
+  process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME = "local_mock";
+  try {
+    const record = store.insertRecord({
+      id: "record:runtime-background-task-source",
+      schema: { name: "observation.local_project", version: 1 },
+      source: { type: "local_project", connector: "runtime-snapshot" },
+      scope: { project: "info", project_path: "/Users/junjie/info" },
+      content: {
+        title: "Local project snapshot: info",
+        path: "/Users/junjie/info",
+        text: "Info should proactively run background research tasks.",
+      },
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+    });
+    const task = store.upsertView({
+      id: "task:background-research:runtime-test",
+      view_type: "task.background_research",
+      title: "Background research task: runtime background tasks",
+      summary: "Find supporting material for ambient background task processing.",
+      source_records: [record.id],
+      source_views: [],
+      compiler: { id: "program.proactive_research", version: "0.1.0", mode: "hybrid" },
+      scope: { project: "info", project_path: "/Users/junjie/info" },
+      content: {
+        focus: "ambient background task processing",
+        goal: "Prepare background research for ambient task processing.",
+      },
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+      confidence: 0.8,
+    });
+
+    const result = await runtimeTick({
+      include_screenpipe: false,
+      include_ai_sessions: false,
+      include_git: false,
+      compile_views: false,
+      process_background_tasks: true,
+      background_task_limit: 2,
+      force: true,
+    }, store);
+    const completedTask = store.getView(task.id);
+    const brief = store.listViews({ view_types: ["brief.background_research"], source_view_id: task.id, limit: 1 })[0];
+    const diagnostics = result.diagnostics.background_tasks as { processed?: number; tasks?: Array<{ task_view_id?: string; status?: string; written_views?: string[] }> } | undefined;
+
+    assert.equal(result.ok, true);
+    assert.equal(diagnostics?.processed, 1);
+    assert.equal(diagnostics?.tasks?.[0]?.task_view_id, task.id);
+    assert.equal(diagnostics?.tasks?.[0]?.status, "completed");
+    assert.ok(brief);
+    assert.equal(brief.compiler?.id, "capability.agent_task.submit");
+    assert.equal((completedTask?.content?.background_task as Record<string, unknown> | undefined)?.status, "completed");
+    assert.deepEqual((completedTask?.content?.background_task as Record<string, unknown> | undefined)?.written_views, [brief.id]);
+    assert.ok(store.listRuntimeEvents({ event_type: "background_task.processed", plugin_id: "runtime.background_tasks", limit: 1 })[0]);
+  } finally {
+    if (oldRuntime === undefined) delete process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME;
+    else process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME = oldRuntime;
+  }
+}));
+
+test("runtimeTick skips proactive background tasks when no task runtime is configured", async () => withStore(async (store) => {
+  const oldRuntime = process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME;
+  delete process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME;
+  try {
+    const record = store.insertRecord({
+      id: "record:runtime-background-task-skip-source",
+      schema: { name: "observation.local_project", version: 1 },
+      source: { type: "local_project", connector: "runtime-snapshot" },
+      content: { title: "Local project snapshot", text: "Background task skip source." },
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+    });
+    const task = store.upsertView({
+      id: "task:background-research:runtime-skip",
+      view_type: "task.background_research",
+      title: "Background research task: skip",
+      source_records: [record.id],
+      content: { goal: "This should not run without a configured runtime." },
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+    });
+
+    const result = await runtimeTick({
+      include_screenpipe: false,
+      include_ai_sessions: false,
+      include_git: false,
+      compile_views: false,
+      process_background_tasks: true,
+      force: true,
+    }, store);
+    const diagnostics = result.diagnostics.background_tasks as { processed?: number; skipped?: number; tasks?: Array<{ task_view_id?: string; status?: string }> } | undefined;
+
+    assert.equal(diagnostics?.processed, 0);
+    assert.equal(diagnostics?.skipped, 1);
+    assert.equal(diagnostics?.tasks?.[0]?.status, "skipped");
+    assert.equal(store.listViews({ view_types: ["brief.background_research"], source_view_id: task.id, limit: 1 }).length, 0);
+    assert.equal(store.getView(task.id)?.content?.background_task, undefined);
+  } finally {
+    if (oldRuntime === undefined) delete process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME;
+    else process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME = oldRuntime;
+  }
+}));
+
+test("runtimeTick can compile toolsmith prototype Views into sandbox artifacts without project edits", async () => withStore(async (store) => {
+  const outputDir = mkdtempSync(join(tmpdir(), "info-toolsmith-artifacts-"));
+  try {
+    const record = store.insertRecord({
+      id: "record:runtime-toolsmith-artifact-source",
+      schema: { name: "observation.local_project", version: 1 },
+      source: { type: "local_project", connector: "runtime-snapshot" },
+      scope: { project: "info", project_path: "/Users/junjie/info" },
+      content: { title: "Workflow source", text: "Repeated manual issue summary workflow." },
+      privacy: { level: "private", retention: "normal", allow_external_llm: false },
+    });
+    const draft = store.upsertView({
+      id: "draft.tool_prototype:runtime-artifact-test",
+      view_type: "draft.tool_prototype",
+      title: "Tool prototype draft: issue summary helper",
+      summary: "Create a small CLI that turns selected issue context into a markdown summary.",
+      source_records: [record.id],
+      source_views: [],
+      compiler: { id: "capability.agent_task.submit", version: "0.1.0", mode: "hybrid" },
+      scope: { project: "info", project_path: "/Users/junjie/info" },
+      content: {
+        focus: "issue summary helper",
+        draft_text: "CLI: info-issue-summary --view <id>. Output markdown only.",
+        suggestions: ["input: View id", "output: markdown summary"],
+      },
+      privacy: { level: "private", retention: "normal", allow_external_llm: false },
+      confidence: 0.82,
+    });
+
+    const result = await runtimeTick({
+      include_screenpipe: false,
+      include_ai_sessions: false,
+      include_git: false,
+      compile_views: false,
+      process_toolsmith_artifacts: true,
+      toolsmith_artifact_limit: 2,
+      toolsmith_artifact_output_dir: outputDir,
+      force: true,
+    }, store);
+    const diagnostics = result.diagnostics.toolsmith_artifacts as { processed?: number; artifacts?: Array<{ artifact_id?: string; artifact_view_id?: string; uri?: string }> } | undefined;
+    const artifactInfo = diagnostics?.artifacts?.[0];
+    const artifact = artifactInfo?.artifact_id ? store.getArtifact(artifactInfo.artifact_id) : undefined;
+    const artifactView = artifactInfo?.artifact_view_id ? store.getView(artifactInfo.artifact_view_id) : undefined;
+    const source = store.getView(draft.id);
+    const path = artifact?.uri.startsWith("file://") ? new URL(artifact.uri).pathname : "";
+
+    assert.equal(diagnostics?.processed, 1);
+    assert.ok(artifact);
+    assert.equal(artifact.kind, "file");
+    assert.equal(artifact.mime_type, "text/markdown");
+    assert.ok(path.startsWith(outputDir));
+    assert.ok(existsSync(path));
+    assert.match(readFileSync(path, "utf8"), /No project files were modified/);
+    assert.ok(artifactView);
+    assert.equal(artifactView.view_type, "tool.prototype_artifact");
+    assert.equal(artifactView.content?.sandbox_only, true);
+    assert.equal((source?.content?.toolsmith_artifact as Record<string, unknown> | undefined)?.status, "completed");
+    assert.ok(store.listRuntimeEvents({ event_type: "toolsmith_artifact.created", plugin_id: "runtime.toolsmith_artifacts", limit: 1 })[0]);
+  } finally {
+    rmSync(outputDir, { recursive: true, force: true });
+  }
+}));
+
+test("WorkThread suppresses passive Warp focus while timeline keeps inspectable Screenpipe evidence", () => withStore((store) => {
   store.insertRecord({
     id: "record:noise-local-project",
     schema: { name: "observation.local_project", version: 1 },
@@ -174,8 +339,8 @@ test("WorkThread and timeline suppress passive Warp focus and low-value Terminal
 
   assert.deepEqual(workThread.view.source_records, ["record:noise-local-project"]);
   assert.doesNotMatch(JSON.stringify(workThread.view.content), /record:noise-warp-focus|record:noise-terminal-ocr/);
-  assert.equal(timeline.buckets.flatMap(bucket => bucket.items).some(item => item.record_ids?.includes("record:noise-warp-focus")), false);
-  assert.equal(timeline.buckets.flatMap(bucket => bucket.items).some(item => item.record_ids?.includes("record:noise-terminal-ocr")), false);
+  assert.equal(timeline.buckets.flatMap(bucket => bucket.items).some(item => item.record_ids?.includes("record:noise-warp-focus")), true);
+  assert.equal(timeline.buckets.flatMap(bucket => bucket.items).some(item => item.record_ids?.includes("record:noise-terminal-ocr")), true);
   assert.ok(debugTimeline.buckets.flatMap(bucket => bucket.items).some(item => item.record_ids?.includes("record:noise-terminal-ocr")));
 }));
 

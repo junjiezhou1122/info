@@ -7,6 +7,7 @@ import { routingLearningProgram } from "./builtins/routing-learning.js";
 import { feedbackLearningProgram } from "./builtins/feedback-learning.js";
 import { dailySummaryProgram } from "./builtins/daily-summary.js";
 import { researchShadowProgram } from "./builtins/research-shadow.js";
+import { proactiveResearchProgram, toolsmithAmbientProgram, writingAmbientProgram } from "./builtins/proactive-ambient.js";
 import { agentTaskSubmitCapability } from "./capabilities/agent-task-submit.js";
 
 export function createDefaultProgramRuntime(store?: ContextStore): ProgramRuntime {
@@ -19,7 +20,10 @@ export function createDefaultProgramRuntime(store?: ContextStore): ProgramRuntim
     .registerProgram(projectAmbientProgram)
     .registerProgram(routingLearningProgram)
     .registerProgram(feedbackLearningProgram)
-    .registerProgram(dailySummaryProgram);
+    .registerProgram(dailySummaryProgram)
+    .registerProgram(proactiveResearchProgram)
+    .registerProgram(writingAmbientProgram)
+    .registerProgram(toolsmithAmbientProgram);
 }
 
 export function listDefaultPrograms() {

@@ -1,12 +1,22 @@
 
 .DS_Store
 .env
+.mcp.json
 .omc/
 .omx/
 .pnpm-store/
 .runtime/
+.tmp-info-acp-runtime-test-*/
+.firecrawl/
 craft-reference/
 data/
 node_modules/
 ref/
+archive/craft-reference/
+packages/ui/dist/
+packages/ui/node_modules/
 ui/dist/
+
+# Local analysis reports
+orphan-report.json
+unused-runtime-symbols.json
