@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { DEFAULT_RELATED_VIEW_TYPES, DEFAULT_VIEW_FILTERS, agentTasksEndpointFromSettings, buildBrowserAgentTaskRequest, buildViewFeedbackRequest, buildViewQueryFromTab, contextIngestEndpointFromSettings, contextViewUrlFromSettings, contextViewsEndpointFromSettings, feedbackEndpointFromSettings, feedbackTargetFromInput, formatAmbientViewResult, formatViewSubscriptionResult, selectedViewFromInput, selectedViewIdFromInput, viewIdsFromAgentTaskResponse, viewIdsFromProcessedIngestResponse, viewKeyPoints, viewSummaryText } from "../packages/browser-extension/agent-task.js";
+import { DEFAULT_RELATED_VIEW_TYPES, DEFAULT_VIEW_FILTERS, agentTasksEndpointFromSettings, buildBrowserAgentTaskRequest, buildViewFeedbackRequest, buildViewQueryFromTab, contextChatEndpointFromSettings, contextIngestEndpointFromSettings, contextViewUrlFromSettings, contextViewsEndpointFromSettings, feedbackEndpointFromSettings, feedbackTargetFromInput, formatAmbientViewResult, formatViewSubscriptionResult, selectedViewFromInput, selectedViewIdFromInput, viewIdsFromAgentTaskResponse, viewIdsFromProcessedIngestResponse, viewKeyPoints, viewSummaryText } from "../packages/browser-extension/agent-task.js";
 
 test("Browser ambient save button posts an Observation into Program processing", () => {
   assert.equal(
@@ -227,6 +227,24 @@ test("Browser popup can derive AgentTask endpoint and request Claude Code analys
       },
     },
   });
+});
+
+test("Browser sidepanel Ask uses normal context chat instead of AgentTask", () => {
+  assert.equal(
+    contextChatEndpointFromSettings({ endpoint: "http://127.0.0.1:3111/context/ingest" }),
+    "http://127.0.0.1:3111/context/chat",
+  );
+  const background = readFileSync("packages/browser-extension/background.js", "utf8");
+  const sidepanel = readFileSync("packages/browser-extension/src/sidepanel/main.tsx", "utf8");
+
+  assert.match(background, /ask-current-page/);
+  assert.match(background, /get-chat-page-context/);
+  assert.match(background, /contextChatEndpointFromSettings/);
+  assert.match(sidepanel, /type:\s*"get-chat-page-context"/);
+  assert.match(sidepanel, /fetch\(String\(context\.endpoint\)/);
+  assert.doesNotMatch(sidepanel, /type:\s*"ask-current-page"/);
+  assert.doesNotMatch(sidepanel, /type:\s*"submit-agent-task-current-page"/);
+  assert.doesNotMatch(sidepanel, /Claude Code AgentTask/);
 });
 
 test("Browser ambient extracts Program-produced and cascaded View IDs from processed ingest", () => {

@@ -121,6 +121,59 @@ test("POST /feedback rejects missing related View or Observation targets", async
   assert.equal(store.recent(10).length, 0);
 }));
 
+test("POST /context/chat answers through Claude ACP chat without creating AgentTask", async () => withStore(async (store) => {
+  const dir = mkdtempSync(join(process.cwd(), ".tmp-info-http-chat-acp-test-"));
+  const script = join(dir, "fake-chat-acp-agent.mjs");
+  writeFileSync(script, fakeChatAcpAgentSource());
+  const oldCommand = process.env.CONTEXT_CHAT_ACP_COMMAND;
+  const oldArgs = process.env.CONTEXT_CHAT_ACP_ARGS;
+  const oldTimeout = process.env.CONTEXT_CHAT_ACP_TIMEOUT_MS;
+  process.env.CONTEXT_CHAT_ACP_COMMAND = process.execPath;
+  process.env.CONTEXT_CHAT_ACP_ARGS = script;
+  process.env.CONTEXT_CHAT_ACP_TIMEOUT_MS = "5000";
+  try {
+    store.insertRecord({
+      id: "record:http-context-chat-source",
+      schema: { name: "observation.browser_page_saved", version: 1 },
+      source: { type: "browser", connector: "chrome-extension" },
+      scope: { domain: "example.com", app: "chrome" },
+      content: { title: "Normal chat page", url: "https://example.com/chat", text: "Normal browser chat should not use AgentTask." },
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+    });
+
+    const response = await request(store, "/context/chat", {
+      method: "POST",
+      body: {
+        question: "What is this page about?",
+        page_context: {
+          title: "Normal chat page",
+          url: "https://example.com/chat",
+          text: "Normal browser chat should not use AgentTask.",
+        },
+        scope: { domain: "example.com", app: "chrome" },
+      },
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.ok, true);
+    assert.equal(response.body.answer, "ACP chat saw page context without AgentTask JSON.");
+    assert.equal(response.body.runtime, "claude_acp");
+    assert.equal(response.body.stop_reason, "end_turn");
+    assert.equal(response.body.agent_info.name, "fake-chat-acp-agent");
+    assert.equal(store.listViews({ view_types: ["analysis.browser_agent_task"] }).length, 0);
+    assert.equal(store.listRuntimeEvents({ event_type: "agent_task.submitted", limit: 1 }).length, 0);
+    assert.doesNotMatch(JSON.stringify(response.body), /output_contract|next_actions|write_policy/);
+  } finally {
+    if (oldCommand === undefined) delete process.env.CONTEXT_CHAT_ACP_COMMAND;
+    else process.env.CONTEXT_CHAT_ACP_COMMAND = oldCommand;
+    if (oldArgs === undefined) delete process.env.CONTEXT_CHAT_ACP_ARGS;
+    else process.env.CONTEXT_CHAT_ACP_ARGS = oldArgs;
+    if (oldTimeout === undefined) delete process.env.CONTEXT_CHAT_ACP_TIMEOUT_MS;
+    else process.env.CONTEXT_CHAT_ACP_TIMEOUT_MS = oldTimeout;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
 test("POST /feedback rejects legacy non-observation Record targets", async () => withStore(async (store) => {
   store.insertRecord({
     id: "record:http-feedback-legacy-target",
@@ -3458,6 +3511,43 @@ test("POST /context/views rejects record-like and malformed View types", async (
   assert.equal(malformed.status, 400);
   assert.equal(malformed.body.ok, false);
   assert.equal(store.getView("analysis:http-direct-malformed-view-write"), undefined);
+}));
+
+test("GET /context/views/catalog exposes unified View families and manual-create options", async () => withStore(async (store) => {
+  const response = await request(store, "/context/views/catalog");
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ok, true);
+  assert.ok(response.body.order.includes("evidence"));
+  assert.ok(response.body.order.includes("project.current_context"));
+  assert.ok(response.body.order.includes("task.toolsmith_prototype"));
+  const project = response.body.families.find((family: any) => family.view_type === "project.current_context");
+  assert.equal(project.label, "Project Context");
+  assert.equal(project.category, "project");
+  const manualTypes = new Set(response.body.manual_create.map((family: any) => family.view_type));
+  assert.ok(manualTypes.has("project.current_context"));
+  assert.ok(manualTypes.has("task.background_research"));
+}));
+
+test("POST /context/views can mark manually created Views through the shared catalog", async () => withStore(async (store) => {
+  const response = await request(store, "/context/views?source=manual", {
+    method: "POST",
+    body: {
+      id: "project:http-manual-create-view",
+      view_type: "project.current_context",
+      title: "Manual project context",
+      summary: "Created through the generic Create View path.",
+      content: { note: "manual view content" },
+      privacy: { level: "private", retention: "normal" },
+    },
+  });
+
+  assert.equal(response.status, 201);
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.view.compiler.id, "manual.create_view");
+  assert.equal(response.body.view.metadata.created_via, "manual_create_view");
+  assert.equal(response.body.view.metadata.view_family.label, "Project Context");
+  assert.equal(response.body.view.metadata.view_family.category, "project");
 }));
 
 test("POST /context/views rejects legacy non-observation source Records", async () => withStore(async (store) => {
@@ -6806,3 +6896,50 @@ test("GET /context/views/:id/provenance with plugin_id applies plugin permission
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function fakeChatAcpAgentSource(): string {
+  return `
+import { AgentSideConnection, PROTOCOL_VERSION, ndJsonStream } from "@agentclientprotocol/sdk";
+import { Readable, Writable } from "node:stream";
+
+let connection;
+const agent = {
+  async initialize(params) {
+    return {
+      protocolVersion: params.protocolVersion ?? PROTOCOL_VERSION,
+      agentCapabilities: {
+        promptCapabilities: {},
+        sessionCapabilities: { close: {} }
+      },
+      agentInfo: { name: "fake-chat-acp-agent", version: "0.0.1" },
+      authMethods: []
+    };
+  },
+  async newSession() {
+    return { sessionId: "sess_chat_fake" };
+  },
+  async prompt(params) {
+    const promptText = params.prompt.map(block => block.type === "text" ? block.text : "").join("\\n");
+    if (/"output_contract"\s*:|AGENT TASK:|Return only JSON matching/.test(promptText)) {
+      throw new Error("chat prompt leaked AgentTask contract");
+    }
+    await connection.sessionUpdate({
+      sessionId: params.sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "ACP chat saw page context without AgentTask JSON." }
+      }
+    });
+    return { stopReason: "end_turn" };
+  },
+  async cancel() {},
+  async closeSession() { return {}; },
+  async authenticate() {}
+};
+
+const input = Writable.toWeb(process.stdout);
+const output = Readable.toWeb(process.stdin);
+connection = new AgentSideConnection(() => agent, ndJsonStream(input, output));
+await connection.closed;
+`;
+}

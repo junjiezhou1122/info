@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { fetchActivityTimeline, fetchContextView, fetchRuntimeSettings, fetchViewFamilies, fetchViewsByType, fetchViewsByTypes, runRuntimeTick, saveRuntimeSettings, screenpipeFrameUrl, submitViewFeedback, syncScreenpipe } from "./api";
-import type { ActivityTimelineResponse, ContextViewSummary, RuntimeSettings, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewFamiliesResponse, ViewFamilySummary } from "./types";
+import type { ActivityTimelineResponse, ContextViewSummary, RuntimeSettings, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewCatalogResponse, ViewFamiliesResponse, ViewFamilyDefinition, ViewFamilySummary } from "./types";
 import "./styles.css";
 
 const POLL_MS = 60_000;
 const DEFAULT_MINUTES = 60;
-const VIEW_TYPE_ORDER = [
+const FALLBACK_VIEW_TYPE_ORDER = [
   "evidence", "visual_frame", "audio", "activity", "activity_block", "proposal", "resource", "intent", "workflow", "memory",
   "thread.active_work", "project.current_context", "brief.research", "brief.background_research",
   "advice.research", "advice.writing_assist",
@@ -24,6 +24,8 @@ const AMBIENT_VIEW_TYPES = [
   "draft.tool_prototype",
   "tool.prototype_artifact",
 ];
+const VIEW_CATALOG_CACHE = new Map<string, ViewFamilyDefinition>();
+let VIEW_CATALOG_ORDER_CACHE: string[] = FALLBACK_VIEW_TYPE_ORDER;
 type SourceFilter = "screenpipe" | "browser" | "runtime" | "all";
 type DetailMode = "activity" | "debug";
 type ActiveTab = "timeline" | "ambient" | "views" | "settings";
@@ -90,6 +92,7 @@ function App() {
     try {
       const next = await fetchViewFamilies();
       if (seq !== viewRefreshSeq.current) return;
+      rememberViewCatalog(next.catalog);
       setViewFamilies(next);
       const aiViews = next.views.filter(view => compilerId(view).startsWith("ai.")).length;
       setViewStatus(`${next.views.length} active views · ${aiViews} AI-compressed`);
@@ -199,7 +202,10 @@ function App() {
                 <button onClick={syncNow} disabled={loading}>{loading ? "Syncing…" : "Sync Screenpipe"}</button>
               </>
             ) : activeTab === "views" ? (
-              <button onClick={() => refreshViews(false)} disabled={viewsLoading}>{viewsLoading ? "Loading…" : "Reload Views"}</button>
+              <>
+                <button className="secondary" onClick={() => setViewStatus("Create View will use the shared View catalog")}>Create View</button>
+                <button onClick={() => refreshViews(false)} disabled={viewsLoading}>{viewsLoading ? "Loading…" : "Reload Views"}</button>
+              </>
             ) : activeTab === "ambient" ? (
               <button onClick={() => setViewStatus("Ambient panel has local controls")}>Ambient Controls</button>
             ) : (
@@ -682,7 +688,7 @@ function isRedactedSecret(secret?: string) {
 }
 
 function ViewGraph({ families }: { families: ViewFamilySummary[] }) {
-  const canonical = VIEW_TYPE_ORDER;
+  const canonical = viewTypeOrder({ families });
   const shown = families.filter(family => family.count > 0 || canonical.includes(family.family));
   return (
     <section className="view-graph" aria-label="Memory view graph">
@@ -697,7 +703,27 @@ function ViewGraph({ families }: { families: ViewFamilySummary[] }) {
   );
 }
 
+function rememberViewCatalog(catalog?: ViewCatalogResponse) {
+  if (!catalog) return;
+  VIEW_CATALOG_CACHE.clear();
+  for (const family of catalog.families ?? []) VIEW_CATALOG_CACHE.set(family.view_type, family);
+  VIEW_CATALOG_ORDER_CACHE = catalog.order?.length ? catalog.order : FALLBACK_VIEW_TYPE_ORDER;
+}
+
+function currentViewCatalogDefinition(type: string): ViewFamilyDefinition | undefined {
+  return VIEW_CATALOG_CACHE.get(type);
+}
+
+function viewTypeOrder(input: { response?: ViewFamiliesResponse | null; families?: ViewFamilySummary[] } = {}) {
+  const fromResponse = input.response?.catalog?.order;
+  if (fromResponse?.length) return fromResponse;
+  const fromFamilies = input.families?.map(family => family.family).filter(Boolean);
+  if (fromFamilies?.length) return fromFamilies;
+  return VIEW_CATALOG_ORDER_CACHE;
+}
+
 function ViewFamily({ family }: { family: ViewFamilySummary }) {
+  if (family.definition) VIEW_CATALOG_CACHE.set(family.family, family.definition);
   const title = family.latest?.title ?? family.family;
   return (
     <article className={`view-family ${family.count ? "has-views" : ""}`}>
@@ -723,16 +749,17 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
   const [typeStatus, setTypeStatus] = useState("");
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const families = response?.families ?? [];
+  const familyOrder = viewTypeOrder({ response, families });
   const familyByType = useMemo(() => new Map(families.map(family => [family.family, family])), [families]);
   const views = typeViews[selectedType] ?? [];
   const loadedViews = Object.values(typeViews).flat();
   const aiViews = loadedViews.filter(view => compilerId(view).startsWith("ai."));
-  const tabs = useMemo(() => VIEW_TYPE_ORDER.map(type => {
+  const tabs = useMemo(() => familyOrder.map(type => {
     const family = familyByType.get(type);
     const loaded = typeViews[type]?.length ?? 0;
     const aiCount = typeViews[type]?.filter(view => compilerId(view).startsWith("ai.")).length ?? 0;
     return { type, count: family?.count ?? 0, loaded, aiCount };
-  }), [familyByType, typeViews]);
+  }), [familyByType, familyOrder, typeViews]);
   const selectedViews = useMemo(() => views
     .filter(view => view.view_type === selectedType)
     .sort((a, b) => Date.parse(b.updated_at ?? "") - Date.parse(a.updated_at ?? "")), [views, selectedType]);
@@ -1230,6 +1257,8 @@ function sourceFilterLabel(filter: SourceFilter) {
 }
 
 function viewFamilyLabel(family: string) {
+  const definition = currentViewCatalogDefinition(family);
+  if (definition?.label) return definition.label;
   const labels: Record<string, string> = {
     evidence: "EvidenceView",
     visual_frame: "VisualFrameView",
@@ -1264,13 +1293,12 @@ function compactNumber(value: number) {
 }
 
 function viewPageSize(type: string) {
-  if (type === "evidence" || type === "activity") return 120;
-  if (type === "visual_frame" || type === "proposal") return 80;
-  if (type.startsWith("advice.") || type.startsWith("task.") || type.startsWith("draft.") || type.startsWith("opportunity.")) return 80;
-  return 60;
+  return currentViewCatalogDefinition(type)?.default_page_size ?? (type === "evidence" || type === "activity" ? 120 : type === "visual_frame" || type === "proposal" ? 80 : type.startsWith("advice.") || type.startsWith("task.") || type.startsWith("draft.") || type.startsWith("opportunity.") ? 80 : 60);
 }
 
 function viewTypePurpose(type: string) {
+  const definition = currentViewCatalogDefinition(type);
+  if (definition?.purpose) return definition.purpose;
   const labels: Record<string, string> = {
     evidence: "raw evidence",
     visual_frame: "screen semantics",
@@ -1312,7 +1340,7 @@ function sourceViewCount(view: ContextViewSummary) {
 }
 
 function groupViews(views: ViewFamiliesResponse["views"]) {
-  const order = VIEW_TYPE_ORDER;
+  const order = FALLBACK_VIEW_TYPE_ORDER;
   const byType = new Map<string, ViewFamiliesResponse["views"]>();
   for (const view of views) {
     const group = byType.get(view.view_type) ?? [];

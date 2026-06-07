@@ -1,4 +1,4 @@
-import { agentTasksEndpointFromSettings, buildBrowserAgentTaskRequest, buildViewFeedbackRequest, contextIngestEndpointFromSettings, contextViewUrlFromSettings, contextViewsEndpointFromSettings, feedbackEndpointFromSettings, viewIdsFromAgentTaskResponse, viewIdsFromProcessedIngestResponse } from "./agent-task.js";
+import { agentTasksEndpointFromSettings, buildBrowserAgentTaskRequest, buildViewFeedbackRequest, contextChatEndpointFromSettings, contextIngestEndpointFromSettings, contextViewUrlFromSettings, contextViewsEndpointFromSettings, feedbackEndpointFromSettings, viewIdsFromAgentTaskResponse, viewIdsFromProcessedIngestResponse } from "./agent-task.js";
 
 const DEFAULT_SETTINGS = {
   endpoint: "http://localhost:3111/context/ingest",
@@ -25,6 +25,12 @@ const tabState = new Map();
 chrome.runtime.onInstalled.addListener(async () => {
   const existing = await chrome.storage.local.get(Object.keys(DEFAULT_SETTINGS));
   await chrome.storage.local.set({ ...DEFAULT_SETTINGS, ...existing });
+  await enableSidePanelOnActionClick();
+});
+
+chrome.action.onClicked.addListener(async (tab) => {
+  if (!tab?.id || !chrome.sidePanel?.open) return;
+  await chrome.sidePanel.open({ tabId: tab.id }).catch(() => undefined);
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
@@ -84,6 +90,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse(result);
       return;
     }
+    if (message?.type === "ask-current-page") {
+      const tab = await getActiveTab();
+      const result = await askCurrentPage(tab, message);
+      sendResponse(result);
+      return;
+    }
+    if (message?.type === "get-chat-page-context") {
+      const tab = await getActiveTab();
+      const result = await buildAskCurrentPageContext(tab, message);
+      sendResponse(result);
+      return;
+    }
     if (message?.type === "feedback-view") {
       const result = await postViewFeedback(message);
       sendResponse(result);
@@ -116,6 +134,11 @@ setInterval(async () => {
     await captureHeartbeat(tab).catch(() => undefined);
   }
 }, DEFAULT_SETTINGS.heartbeatSeconds * 1000);
+
+async function enableSidePanelOnActionClick() {
+  if (!chrome.sidePanel?.setPanelBehavior) return;
+  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
+}
 
 async function ensureVisit(tab, reason) {
   const settings = await getSettings();
@@ -594,6 +617,61 @@ async function submitAgentTaskForCurrentPage(tab, message) {
   } catch (error) {
     return { ok: false, stage: "post_agent_task", status: 0, endpoint, started_at: startedAt, record_id: recordId, error: error?.message ?? String(error), request: body, capture };
   }
+}
+
+async function askCurrentPage(tab, message) {
+  const context = await buildAskCurrentPageContext(tab, message);
+  if (!context.ok) return context;
+  try {
+    const response = await fetch(context.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(context.body),
+    });
+    const responseBody = await response.json().catch(() => ({}));
+    return {
+      ok: response.ok && Boolean(responseBody.ok),
+      stage: "done",
+      status: response.status,
+      endpoint: context.endpoint,
+      started_at: context.started_at,
+      answer: responseBody.answer,
+      sources: responseBody.sources,
+      error: responseBody.error,
+      runtime: responseBody.runtime,
+      session_id: responseBody.session_id,
+      stop_reason: responseBody.stop_reason,
+      agent_info: responseBody.agent_info,
+    };
+  } catch (error) {
+    return { ok: false, stage: "context_chat", status: 0, endpoint: context.endpoint, started_at: context.started_at, error: error?.message ?? String(error) };
+  }
+}
+
+async function buildAskCurrentPageContext(tab, message) {
+  const startedAt = new Date().toISOString();
+  if (!tab?.id || !tab.url) return { ok: false, stage: "active_tab", error: "no active tab", started_at: startedAt };
+  const settings = await getSettings();
+  await ensureVisit(tab, "ask_current_page");
+  const page = await collectFromTab(tab.id).catch(() => basicPageFromTab(tab));
+  const endpoint = contextChatEndpointFromSettings(settings);
+  const body = {
+    question: String(message?.question ?? "").trim(),
+    page_context: {
+      title: page.title || tab.title,
+      url: page.url || tab.url,
+      domain: page.domain,
+      text: page.text,
+      selected_text: page.selected_text,
+    },
+    scope: {
+      domain: page.domain,
+      app: "chrome",
+    },
+    limit: 8,
+  };
+  if (!body.question) return { ok: false, stage: "validate", error: "question is required", started_at: startedAt };
+  return { ok: true, stage: "prepared", started_at: startedAt, endpoint, body };
 }
 
 function pageTitleForAgentTask(tab, question) {

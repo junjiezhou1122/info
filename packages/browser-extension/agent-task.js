@@ -80,6 +80,14 @@ export function agentTasksEndpointFromSettings(settings, options = {}) {
   return url.toString();
 }
 
+export function contextChatEndpointFromSettings(settings) {
+  const base = settings?.endpoint || DEFAULT_CONTEXT_INGEST_ENDPOINT;
+  const url = new URL(base);
+  url.pathname = "/context/chat";
+  url.search = "";
+  return url.toString();
+}
+
 export function buildBrowserAgentTaskRequest({ recordId, viewId, question, runtime = "claude_code", title, dryRun = false }) {
   const trimmed = String(question || "").trim();
   const source = recordId ? { record_id: recordId } : viewId ? { view_id: viewId } : {};

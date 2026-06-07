@@ -224,6 +224,7 @@ test("runtime UI lives under packages/ui with its own build boundary", () => {
 test("runtime UI surfaces proactive ambient View families", () => {
   const main = readFileSync("packages/ui/src/main.tsx", "utf8");
   const api = readFileSync("packages/ui/src/api.ts", "utf8");
+  const catalog = readFileSync("packages/views/catalog.ts", "utf8");
 
   assert.match(main, /activeTab === "ambient"/);
   assert.match(main, /function AmbientPanel/);
@@ -236,6 +237,7 @@ test("runtime UI surfaces proactive ambient View families", () => {
   assert.match(main, /feedback\.analysis\.dismissed|analysis\.dismissed/);
   assert.match(main, /navigator\.clipboard\.writeText/);
   assert.match(api, /fetchViewsByTypes/);
+  assert.match(api, /fetchViewCatalog/);
   assert.match(api, /submitViewFeedback/);
   assert.match(api, /\/feedback\?process=true/);
 
@@ -250,7 +252,7 @@ test("runtime UI surfaces proactive ambient View families", () => {
     "tool.prototype_artifact",
   ]) {
     assert.match(main, new RegExp(viewType.replace(".", "\\.")));
-    assert.match(api, new RegExp(viewType.replace(".", "\\.")));
+    assert.match(catalog, new RegExp(viewType.replace(".", "\\.")));
   }
 });
 

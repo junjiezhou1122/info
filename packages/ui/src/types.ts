@@ -173,12 +173,31 @@ export type ViewFamilySummary = {
   count: number;
   kinds: string[];
   latest?: ContextViewSummary;
+  definition?: ViewFamilyDefinition;
 };
 
 export type ViewFamiliesResponse = {
   ok: true;
   views: ContextViewSummary[];
   families: ViewFamilySummary[];
+  catalog?: ViewCatalogResponse;
+};
+
+export type ViewFamilyDefinition = {
+  view_type: string;
+  label: string;
+  purpose: string;
+  category: string;
+  producers: string[];
+  default_page_size?: number;
+  manual_create?: boolean;
+};
+
+export type ViewCatalogResponse = {
+  ok: true;
+  order: string[];
+  families: ViewFamilyDefinition[];
+  manual_create: ViewFamilyDefinition[];
 };
 
 export type ViewListResponse = {

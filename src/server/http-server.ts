@@ -1,5 +1,8 @@
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import * as acp from "@agentclientprotocol/sdk";
 import { loadLocalEnv } from "./env.js";
 import { ContextStore } from "../core/store.js";
 import { ContextArtifactSchema, ContextConnectorSchema, ContextPackRequestSchema, ContextQuerySchema, ContextRecordSchema, ContextSchemaSchema, ContextViewSchema, FeedbackInputSchema, RuntimeEventSchema } from "../core/schema.js";
@@ -22,6 +25,7 @@ import { ingestFeedback } from "../runtime/feedback.js";
 import { collectViewProvenance } from "../runtime/view-provenance.js";
 import { filterViewsByQuery } from "../core/view-query.js";
 import { rankViewsForSurfacing, surfacingPreferencesFromMemoryViews } from "../core/view-surfacing.js";
+import { VIEW_FAMILY_DEFINITIONS, VIEW_FAMILY_ORDER, manualViewFamilies, viewFamilyDefinition } from "../../packages/views/catalog.js";
 import type { ContextArtifact, ContextPackRequest, ContextQuery, ContextRecord, ContextView, StoredContextRecord } from "../core/types.js";
 
 loadLocalEnv();
@@ -41,6 +45,19 @@ type AgentTaskHttpBody = {
   contextLimit?: unknown;
   cascade_depth?: unknown;
   cascadeDepth?: unknown;
+};
+
+type ContextChatHttpBody = {
+  question?: unknown;
+  page_context?: {
+    title?: unknown;
+    url?: unknown;
+    text?: unknown;
+    selected_text?: unknown;
+    domain?: unknown;
+  };
+  scope?: ContextRecord["scope"];
+  limit?: unknown;
 };
 
 type ProgramRuntimeInstance = ReturnType<typeof createDefaultProgramRuntime>;
@@ -157,6 +174,126 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function summarizePackForChat(pack: ReturnType<typeof buildContextPack>) {
+  return {
+    source_count: pack.sources.length,
+    record_count: pack.records.length,
+    view_count: pack.views.length,
+    diagnostics: pack.diagnostics,
+  };
+}
+
+async function runClaudeAcpChat(input: { prompt: string; cwd?: string; timeoutMs?: number }) {
+  const command = process.env.CONTEXT_CHAT_ACP_COMMAND || process.env.AGENT_TASK_ACP_COMMAND || "./node_modules/.bin/claude-agent-acp";
+  const args = parseShellArgs(process.env.CONTEXT_CHAT_ACP_ARGS || process.env.AGENT_TASK_ACP_ARGS);
+  const cwd = input.cwd || process.env.CONTEXT_CHAT_CWD || process.cwd();
+  const timeoutMs = input.timeoutMs ?? Number(process.env.CONTEXT_CHAT_ACP_TIMEOUT_MS || 120000);
+  const child = spawn(command, args, {
+    cwd,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: process.env,
+  });
+  const stderr: string[] = [];
+  const updates: acp.SessionNotification[] = [];
+  let sessionId = "";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    child.stderr?.on("data", chunk => stderr.push(String(chunk)));
+    const inputStream = Writable.toWeb(child.stdin!) as unknown as WritableStream<Uint8Array>;
+    const outputStream = Readable.toWeb(child.stdout!) as unknown as ReadableStream<Uint8Array>;
+    const connection = new acp.ClientSideConnection(
+      () => ({
+        async requestPermission() {
+          return { outcome: { outcome: "cancelled" } };
+        },
+        async sessionUpdate(params) {
+          updates.push(params);
+        },
+        async readTextFile() {
+          return { content: "" };
+        },
+        async writeTextFile() {
+          return {};
+        },
+      }),
+      acp.ndJsonStream(inputStream, outputStream),
+    );
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Claude ACP chat timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
+    const childError = new Promise<never>((_, reject) => {
+      child.once("error", error => reject(error));
+    });
+    const result = await Promise.race([(async () => {
+      const init = await connection.initialize({
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientInfo: { name: "metaflow", title: "metaflow", version: "0.1.0" },
+        clientCapabilities: {},
+      });
+      const session = await connection.newSession({ cwd, mcpServers: [] });
+      sessionId = session.sessionId;
+      const promptResult = await connection.prompt({
+        sessionId,
+        prompt: [{ type: "text", text: input.prompt }],
+      });
+      if (init.agentCapabilities?.sessionCapabilities?.close) {
+        await connection.closeSession({ sessionId }).catch(() => undefined);
+      }
+      return {
+        answer: answerFromAcpUpdates(updates),
+        stopReason: promptResult.stopReason,
+        updateCount: updates.length,
+        agentInfo: init.agentInfo,
+      };
+    })(), timeout, childError]);
+    if (!result.answer.trim()) throw new Error("Claude ACP chat returned no assistant text");
+    return {
+      ok: true,
+      answer: result.answer.trim(),
+      runtime: "claude_acp",
+      command,
+      session_id: sessionId,
+      stop_reason: result.stopReason,
+      update_count: result.updateCount,
+      agent_info: result.agentInfo,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: errorMessage(error),
+      runtime: "claude_acp",
+      command,
+      session_id: sessionId || undefined,
+      stderr: stderr.join("").slice(-4000) || undefined,
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (!child.killed) child.kill();
+  }
+}
+
+function answerFromAcpUpdates(updates: acp.SessionNotification[]) {
+  return updates.flatMap(update => {
+    const item = update.update;
+    if (item.sessionUpdate !== "agent_message_chunk") return [];
+    if (item.content.type !== "text") return [];
+    return [item.content.text];
+  }).join("").trim();
+}
+
+function parseShellArgs(value: string | undefined): string[] {
+  return value ? value.split(" ").filter(Boolean) : [];
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function agentTaskOutputViewType(task: unknown): string | undefined {
   if (!isPlainObject(task)) return undefined;
   const outputContract = task.output_contract;
@@ -212,6 +349,30 @@ function pluginCanWriteView(plugin: ReturnType<typeof readPluginManifest>, view:
     if (sourceView && !filterViewsForPlugin([sourceView], store, plugin).length) return { ok: false, error: "plugin cannot reference this view provenance" };
   }
   return { ok: true };
+}
+
+function normalizeCreatedView(view: ContextView, options: { plugin_id?: string | null; source?: string }): ContextView {
+  const definition = viewFamilyDefinition(view.view_type);
+  const manual = options.source === "manual";
+  return {
+    ...view,
+    scope: options.plugin_id ? { ...(view.scope ?? {}), plugin_id: options.plugin_id } : view.scope,
+    compiler: manual && !view.compiler
+      ? { id: "manual.create_view", version: "1", mode: "deterministic" }
+      : view.compiler,
+    metadata: {
+      ...(view.metadata ?? {}),
+      ...(definition ? {
+        view_family: {
+          label: definition.label,
+          category: definition.category,
+          producers: definition.producers,
+          manual_create: Boolean(definition.manual_create),
+        },
+      } : {}),
+      ...(manual ? { created_via: "manual_create_view" } : {}),
+    },
+  };
 }
 
 function viewReferencesAllowedRecords(view: { source_records?: string[] }, store: ContextStore): boolean {
@@ -564,6 +725,7 @@ export function createContextHttpHandler(store: ContextStore) {
       if (!parsed.success) return send(res, 400, { ok: false, error: parsed.error.flatten() });
       const pluginParam = url.searchParams.get("plugin_id") ?? parsed.data.scope?.plugin_id;
       const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
+      const sourceParam = url.searchParams.get("source") ?? undefined;
       if (pluginParam) {
         if (!plugin) return send(res, 404, pluginNotFoundBody(pluginParam));
         const allowed = pluginCanWriteView(plugin, parsed.data, store);
@@ -572,22 +734,44 @@ export function createContextHttpHandler(store: ContextStore) {
       if (!viewReferencesAllowedRecords(parsed.data, store)) return send(res, 403, { ok: false, error: "view cannot reference this record", plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
       if (!viewReferencesExistingViews(parsed.data, store)) return send(res, 403, { ok: false, error: "view cannot reference this source view", plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
       if (!viewScopeMatchesProvenance(parsed.data, store)) return send(res, 403, { ok: false, error: "view scope conflicts with provenance", plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
-      const viewInput = pluginParam
-        ? { ...parsed.data, scope: { ...(parsed.data.scope ?? {}), plugin_id: pluginParam } }
-        : parsed.data;
+      const viewInput = normalizeCreatedView(parsed.data, { plugin_id: pluginParam, source: sourceParam });
       const view = store.upsertView(viewInput);
       return send(res, 201, { ok: true, id: view.id, view, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
+    }
+
+    if (req.method === "GET" && url.pathname === "/context/views/catalog") {
+      return send(res, 200, {
+        ok: true,
+        order: VIEW_FAMILY_ORDER,
+        families: VIEW_FAMILY_DEFINITIONS,
+        manual_create: manualViewFamilies(),
+      });
     }
 
     if (req.method === "GET" && url.pathname === "/context/views/families") {
       const viewTypes = url.searchParams.get("view_types")?.split(",").map(x => x.trim()).filter(Boolean);
       const activeOnly = url.searchParams.get("active_only") !== "false";
-      const families = store.listViewFamilySummaries({ view_types: viewTypes, active_only: activeOnly })
+      const requestedTypes = viewTypes?.length ? viewTypes : VIEW_FAMILY_ORDER;
+      const listed = new Map(store.listViewFamilySummaries({ view_types: requestedTypes, active_only: activeOnly }).map(family => [family.family, family]));
+      const families = requestedTypes
+        .map(familyType => {
+          const family = listed.get(familyType);
+          const definition = viewFamilyDefinition(familyType);
+          return {
+            family: familyType,
+            count: family?.count ?? 0,
+            kinds: family?.kinds ?? [],
+            latest: family?.latest ? summarizeViewForList(family.latest) : undefined,
+            definition,
+          };
+        })
+        .filter(family => family.count > 0 || viewFamilyDefinition(family.family))
         .map(family => ({
           family: family.family,
           count: family.count,
           kinds: family.kinds,
-          latest: family.latest ? summarizeViewForList(family.latest) : undefined,
+          latest: family.latest,
+          definition: family.definition,
         }));
       return send(res, 200, { ok: true, families });
     }
@@ -709,6 +893,69 @@ export function createContextHttpHandler(store: ContextStore) {
       const query = pluginParam ? { ...parsed.data, plugin_id: pluginParam } : parsed.data;
       const pack = buildContextPack(query, store);
       return send(res, 200, { ok: true, pack });
+    }
+
+    if (req.method === "POST" && url.pathname === "/context/chat") {
+      const body = await readJson(req) as ContextChatHttpBody;
+      const question = String(body.question ?? "").trim();
+      if (!question) return send(res, 400, { ok: false, error: "question is required" });
+      const page = isPlainObject(body.page_context) ? body.page_context : {};
+      const pageTitle = stringValue(page.title);
+      const pageUrl = stringValue(page.url);
+      const pageText = stringValue(page.selected_text) || stringValue(page.text);
+      const query = [question, pageTitle, pageUrl].filter(Boolean).join(" ");
+      const pack = buildContextPack({
+        goal: question,
+        query,
+        scope: body.scope,
+        include_records: true,
+        include_views: true,
+        include_events: false,
+        limit: positiveInteger(body.limit) ?? 8,
+        token_budget: 6000,
+      }, store);
+      const contextMarkdown = [
+        pageTitle || pageUrl || pageText ? "# Current page" : undefined,
+        pageTitle ? `Title: ${pageTitle}` : undefined,
+        pageUrl ? `URL: ${pageUrl}` : undefined,
+        pageText ? `Text:\n${pageText.slice(0, 12000)}` : undefined,
+        pack.markdown,
+      ].filter(Boolean).join("\n\n");
+      const chat = await runClaudeAcpChat({
+        prompt: [
+          "You are metaflow in a Chrome side panel, backed by Claude Code through ACP.",
+          "Answer the user's question directly and conversationally.",
+          "Use the current page and retrieved context below as primary context.",
+          "Do not return AgentTask JSON, output_contract, next_actions, tool plans, file diffs, or task metadata.",
+          "If you use tools internally, only show the final user-facing answer.",
+          "",
+          `User question: ${question}`,
+          "",
+          contextMarkdown,
+        ].join("\n"),
+      });
+      if (!chat.ok) {
+        return send(res, 502, {
+          ok: false,
+          error: chat.error ?? "Claude ACP chat failed",
+          runtime: chat.runtime,
+          command: chat.command,
+          session_id: chat.session_id,
+          stderr: chat.stderr,
+          pack: summarizePackForChat(pack),
+        });
+      }
+      return send(res, 200, {
+        ok: true,
+        answer: chat.answer,
+        runtime: chat.runtime,
+        command: chat.command,
+        session_id: chat.session_id,
+        stop_reason: chat.stop_reason,
+        update_count: chat.update_count,
+        agent_info: chat.agent_info,
+        sources: pack.sources,
+      });
     }
 
     if (req.method === "POST" && url.pathname === "/feedback") {
