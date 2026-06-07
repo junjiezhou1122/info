@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "@info/core";
-import { registerContextWorkerFunctions } from "../src/server/worker.js";
+import { registerContextWorkerFunctions } from "@info/server/worker.js";
 
 type RegisteredFunction = (input: unknown) => Promise<{ status_code: number; body: any }>;
 

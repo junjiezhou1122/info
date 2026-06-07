@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { ContextStore } from "@info/core";
-import { createContextHttpHandler } from "../src/server/http-server.js";
+import { createContextHttpHandler } from "@info/server/http-server.js";
 
 async function withStore(fn: (store: ContextStore) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), "info-http-test-"));

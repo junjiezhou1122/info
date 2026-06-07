@@ -25,7 +25,7 @@ import { ingestFeedback } from "@info/runtime/feedback.js";
 import { collectViewProvenance } from "@info/runtime/view-provenance.js";
 import { filterViewsByQuery } from "@info/core";
 import { rankViewsForSurfacing, surfacingPreferencesFromMemoryViews } from "@info/core";
-import { VIEW_FAMILY_DEFINITIONS, VIEW_FAMILY_ORDER, manualViewFamilies, viewFamilyDefinition } from "../../packages/views/catalog.js";
+import { VIEW_FAMILY_DEFINITIONS, VIEW_FAMILY_ORDER, manualViewFamilies, viewFamilyDefinition } from "@info/views/catalog.js";
 import type { ContextArtifact, ContextPackRequest, ContextQuery, ContextRecord, ContextView, StoredContextRecord } from "@info/core";
 
 loadLocalEnv();

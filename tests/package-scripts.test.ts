@@ -7,8 +7,8 @@ test("default dev entrypoint uses the policy-aware HTTP server", () => {
   const pkg = JSON.parse(readFileSync("package.json", "utf8")) as { scripts?: Record<string, string> };
   const readme = readFileSync("README.md", "utf8");
 
-  assert.match(pkg.scripts?.dev ?? "", /src\/server\/http-server\.ts/);
-  assert.match(pkg.scripts?.["iii:worker"] ?? "", /src\/server\/worker\.ts/);
+  assert.match(pkg.scripts?.dev ?? "", /packages\/server\/http-server\.ts/);
+  assert.match(pkg.scripts?.["iii:worker"] ?? "", /packages\/server\/worker\.ts/);
   assert.match(pkg.scripts?.["background-tasks"] ?? "", /--background-tasks/);
   assert.match(pkg.scripts?.["toolsmith-artifacts"] ?? "", /--toolsmith-artifacts/);
   assert.match(readme, /pnpm run dev[\s\S]*默认地址：`http:\/\/localhost:3111`/);

@@ -29,6 +29,9 @@ importers:
       '@info/sensors':
         specifier: workspace:*
         version: link:packages/sensors
+      '@info/server':
+        specifier: workspace:*
+        version: link:packages/server
       '@info/views':
         specifier: workspace:*
         version: link:packages/views
@@ -118,6 +121,30 @@ importers:
       '@info/core':
         specifier: workspace:*
         version: link:../core
+
+  packages/server:
+    dependencies:
+      '@agentclientprotocol/sdk':
+        specifier: ^0.22.1
+        version: 0.22.1(zod@4.4.3)
+      '@info/core':
+        specifier: workspace:*
+        version: link:../core
+      '@info/programs':
+        specifier: workspace:*
+        version: link:../programs
+      '@info/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@info/sensors':
+        specifier: workspace:*
+        version: link:../sensors
+      '@info/views':
+        specifier: workspace:*
+        version: link:../views
+      iii-sdk:
+        specifier: latest
+        version: 0.12.0
 
   packages/ui:
     dependencies:
