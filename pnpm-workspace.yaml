@@ -1,10 +1,7 @@
 # Info workspace.
-# 后端 @info/* 包（core/sensors/views/capabilities/programs/runtime/server）随重构逐阶段加入。
-# 见 docs/workspace-restructure-plan.md。
+# Backend @info/* packages + the two Application surfaces.
+# See docs/workspace-restructure-plan.md.
 packages:
-  - "packages/ui"
-  - "packages/browser-extension"
-  # backend @info/* packages (added per migration phase):
   - "packages/core"
   - "packages/sensors"
   - "packages/views"
@@ -12,3 +9,5 @@ packages:
   - "packages/programs"
   - "packages/runtime"
   - "packages/server"
+  - "apps/ui"
+  - "apps/browser-extension"

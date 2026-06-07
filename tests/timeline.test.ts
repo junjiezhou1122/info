@@ -395,7 +395,7 @@ test("compileActivityTimeline can include complete low-level Screenpipe details 
     id: "record:screenpipe-frame-context-complete",
     schema: { name: "observation.screenpipe_workspace_signal", version: 1 },
     source: { type: "screenpipe", connector: "screenpipe-frame-context" },
-    content: { title: "Screenpipe frame context 9480", text: "~/info.main packages/ui/src/main.tsx /Users/junjie/info" },
+    content: { title: "Screenpipe frame context 9480", text: "~/info.main apps/ui/src/main.tsx /Users/junjie/info" },
     payload: { content_type: "frame_context", frame_id: 9480, text_source: "ocr", node_count: 42 },
     privacy: { level: "private", retention: "normal" },
   });
@@ -415,7 +415,7 @@ test("compileActivityTimeline drops Screenpipe Timeline self-observation echoes"
     id: "record:screenpipe-frame-context-real",
     schema: { name: "observation.screenpipe_workspace_signal", version: 1 },
     source: { type: "screenpipe", connector: "screenpipe-frame-context" },
-    content: { title: "Screenpipe frame context 9480", text: "~/info.main packages/ui/src/main.tsx /Users/junjie/info" },
+    content: { title: "Screenpipe frame context 9480", text: "~/info.main apps/ui/src/main.tsx /Users/junjie/info" },
     payload: { content_type: "frame_context", frame_id: 9480, text_source: "ocr", node_count: 42 },
     privacy: { level: "private", retention: "normal" },
   });

@@ -211,19 +211,19 @@ test("package-backed src compatibility shims are archived outside the active tre
   assert.equal(existsSync("archive/dead-code/2026-05-src-package-shims/runtime/evidence-view.ts"), true);
 });
 
-test("runtime UI lives under packages/ui with its own build boundary", () => {
+test("runtime UI lives under apps/ui with its own build boundary", () => {
   const pkg = JSON.parse(readFileSync("package.json", "utf8")) as { scripts?: Record<string, string> };
   const tsconfig = JSON.parse(readFileSync("tsconfig.json", "utf8")) as { exclude?: string[] };
 
   assert.equal(existsSync("ui/package.json"), false);
-  assert.equal(existsSync("packages/ui/package.json"), true);
-  assert.equal(pkg.scripts?.["ui:build"], "pnpm --dir packages/ui run build");
-  assert.ok(tsconfig.exclude?.includes("packages/ui/**"));
+  assert.equal(existsSync("apps/ui/package.json"), true);
+  assert.equal(pkg.scripts?.["ui:build"], "pnpm --dir apps/ui run build");
+  assert.ok(tsconfig.exclude?.some(entry => entry === "apps/ui/**" || entry === "apps/**"));
 });
 
 test("runtime UI surfaces proactive ambient View families", () => {
-  const main = readFileSync("packages/ui/src/main.tsx", "utf8");
-  const api = readFileSync("packages/ui/src/api.ts", "utf8");
+  const main = readFileSync("apps/ui/src/main.tsx", "utf8");
+  const api = readFileSync("apps/ui/src/api.ts", "utf8");
   const catalog = readFileSync("packages/views/catalog.ts", "utf8");
 
   assert.match(main, /activeTab === "ambient"/);

@@ -33,9 +33,9 @@
     "timeline": "node --experimental-sqlite --import tsx scripts/timeline.ts",
     "pipeline:tick": "node --experimental-sqlite --import tsx scripts/pipeline-tick.ts",
     "context-runtime:tick": "node --experimental-sqlite --import tsx scripts/context-runtime-tick.ts",
-    "ui:dev": "pnpm --dir packages/ui run dev",
-    "ui:build": "pnpm --dir packages/ui run build",
-    "ui:preview": "pnpm --dir packages/ui run preview",
+    "ui:dev": "pnpm --dir apps/ui run dev",
+    "ui:build": "pnpm --dir apps/ui run build",
+    "ui:preview": "pnpm --dir apps/ui run preview",
     "test": "node --experimental-sqlite --import tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
