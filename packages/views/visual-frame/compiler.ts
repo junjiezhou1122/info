@@ -7,6 +7,7 @@ import {
   arrayOfStrings,
   clamp,
   commonString,
+  isLowValueVisualEvidence,
   isRecord,
   isString,
   mergedTimeRange,
@@ -16,6 +17,7 @@ import {
   stringArray,
   stringValue,
   unique,
+  visualEvidenceScore,
   type VisualFrameAnalyzerResponse,
 } from "./shared.js";
 
@@ -295,65 +297,7 @@ export function frameIdsOf(view: ContextView | StoredContextView): string[] {
   return unique(ids);
 }
 
-export function isLowValueVisualEvidence(view: ContextView | StoredContextView): boolean {
-  const subject = isRecord(view.content?.subject) ? view.content.subject : {};
-  const app = (stringValue(subject.app) ?? stringValue(view.scope?.app) ?? "").toLowerCase();
-  const title = `${view.title ?? ""} ${stringValue(subject.title) ?? ""}`.toLowerCase();
-  if (/screenpipe.*record|node .*screenpipe record/.test(title)) return true;
-  if (/terminal\s*-\s*ocr/i.test(title)) return true;
-  if (/^\s*terminal\s*$/i.test(app) && !looksLikeUsefulTerminalText(view)) return true;
-  if (["finder"].includes(app) && !stringValue(view.content?.text)) return true;
-  return false;
-}
+// isLowValueVisualEvidence and visualEvidenceScore live in shared.js (single source);
+// re-exported here to preserve the visual-frame barrel's public surface.
+export { isLowValueVisualEvidence, visualEvidenceScore };
 
-export function visualEvidenceScore(view: ContextView | StoredContextView): number {
-  const subject = isRecord(view.content?.subject) ? view.content.subject : {};
-  const app = (stringValue(subject.app) ?? stringValue(view.scope?.app) ?? "").toLowerCase();
-  let score = view.confidence ?? 0.5;
-  if (/code|cursor|warp|terminal|chrome|chatgpt|atlas/.test(app)) score += 0.3;
-  if (stringValue(view.content?.text)) score += 0.15;
-  if (stringValue(subject.title)) score += 0.1;
-  return score;
-}
-
-function visualSurfaceKey(views: Array<ContextView | StoredContextView>): string {
-  const view = views[0];
-  const subject = isRecord(view?.content?.subject) ? view.content.subject : {};
-  const app = normalizeSurfacePart(stringValue(subject.app) ?? stringValue(view?.scope?.app));
-  const title = normalizeSurfacePart(stringValue(subject.title) ?? view?.title);
-  const url = normalizeSurfacePart(stringValue(subject.url));
-  return [app, title, url].filter(Boolean).join("|") || "unknown";
-}
-
-function candidateTime(views: Array<ContextView | StoredContextView>): number {
-  const rangeTimes = views
-    .flatMap(view => [view.scope?.time_range?.end, view.scope?.time_range?.start])
-    .filter(isString)
-    .map(Date.parse)
-    .filter(Number.isFinite);
-  if (rangeTimes.length) return Math.max(...rangeTimes);
-  const times = views
-    .flatMap(view => ["updated_at" in view ? view.updated_at : undefined])
-    .filter(isString)
-    .map(Date.parse)
-    .filter(Number.isFinite);
-  return times.length ? Math.max(...times) : 0;
-}
-
-function normalizeSurfacePart(value?: string): string {
-  return String(value ?? "")
-    .toLowerCase()
-    .replace(/[⠁-⣿]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 160);
-}
-
-function looksLikeUsefulTerminalText(view: ContextView | StoredContextView): boolean {
-  const text = [
-    stringValue(view.content?.text),
-    stringValue(isRecord(view.content?.signals) ? view.content.signals.text : undefined),
-    view.title,
-  ].filter(Boolean).join("\n").toLowerCase();
-  return /error|failed|exception|pnpm|npm|node|pytest|tsx|git|commit|diff|src\/|tests?\/|\.ts|\.tsx|\.py|sqlite|visual|memory|screenpipe/.test(text);
-}

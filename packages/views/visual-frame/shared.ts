@@ -66,7 +66,7 @@ function frameIdsOf(view: ContextView | StoredContextView): string[] {
   return unique(ids);
 }
 
-function isLowValueVisualEvidence(view: ContextView | StoredContextView): boolean {
+export function isLowValueVisualEvidence(view: ContextView | StoredContextView): boolean {
   const subject = isRecord(view.content?.subject) ? view.content.subject : {};
   const app = (stringValue(subject.app) ?? stringValue(view.scope?.app) ?? "").toLowerCase();
   const title = `${view.title ?? ""} ${stringValue(subject.title) ?? ""}`.toLowerCase();
@@ -77,7 +77,7 @@ function isLowValueVisualEvidence(view: ContextView | StoredContextView): boolea
   return false;
 }
 
-function visualEvidenceScore(view: ContextView | StoredContextView): number {
+export function visualEvidenceScore(view: ContextView | StoredContextView): number {
   const subject = isRecord(view.content?.subject) ? view.content.subject : {};
   const app = (stringValue(subject.app) ?? stringValue(view.scope?.app) ?? "").toLowerCase();
   let score = view.confidence ?? 0.5;
