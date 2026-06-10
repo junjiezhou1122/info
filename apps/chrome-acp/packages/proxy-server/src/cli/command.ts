@@ -51,6 +51,12 @@ export const command = buildCommand({
         brief: "Public WebSocket URL for QR code (e.g., wss://example.com/ws)",
         optional: true,
       },
+      cwd: {
+        kind: "parsed",
+        parse: String,
+        brief: "Working directory for the spawned agent process. Defaults to the current shell cwd. The chrome-acp side panel may override this per session via session/new params.cwd.",
+        optional: true,
+      },
     },
     positional: {
       kind: "array",
@@ -64,7 +70,7 @@ export const command = buildCommand({
   },
   func: async function (
     this: LocalContext,
-    flags: { port: number; host: string; debug: boolean; "no-auth": boolean; termux: boolean; https: boolean; "public-url"?: string },
+    flags: { port: number; host: string; debug: boolean; "no-auth": boolean; termux: boolean; https: boolean; "public-url"?: string; cwd?: string },
     ...args: readonly string[]
   ) {
     const port = flags.port;
@@ -74,8 +80,9 @@ export const command = buildCommand({
     const termux = flags.termux;
     const https = flags.https;
     const publicUrl = flags["public-url"];
+    const cliCwd = flags.cwd;
     const [command, ...agentArgs] = args;
-    const cwd = process.cwd();
+    const cwd = cliCwd ?? process.cwd();
 
     // Determine auth token
     // Priority: ACP_AUTH_TOKEN env var > auto-generate (unless --no-auth)

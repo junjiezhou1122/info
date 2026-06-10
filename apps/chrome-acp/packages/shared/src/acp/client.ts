@@ -115,6 +115,11 @@ export class ACPClient {
     this.settings = settings;
   }
 
+  getSettings(): ACPSettings {
+    // Return a shallow copy so callers can't mutate internal state directly.
+    return { ...this.settings };
+  }
+
   setConnectionStateHandler(handler: ConnectionStateHandler): void {
     this.onConnectionStateChange = handler;
   }
