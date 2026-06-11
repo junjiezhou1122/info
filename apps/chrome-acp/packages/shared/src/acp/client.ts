@@ -428,6 +428,9 @@ export class ACPClient {
 
       case "permission_request":
         console.log("[ACPClient] Permission request:", response.payload);
+        if (this.settings.dangerouslyAutoApprovePermissions && this.autoApprovePermission(response.payload)) {
+          break;
+        }
         this.onPermissionRequest?.(response.payload);
         break;
 
@@ -611,6 +614,22 @@ export class ACPClient {
       type: "permission_response",
       payload: { requestId, outcome },
     });
+  }
+
+  private autoApprovePermission(request: PermissionRequestPayload): boolean {
+    const option =
+      request.options.find((candidate) => candidate.kind === "allow_always") ??
+      request.options.find((candidate) => candidate.kind === "allow_once");
+
+    if (!option) return false;
+
+    console.warn("[ACPClient] Dangerously auto-approving permission request:", {
+      requestId: request.requestId,
+      optionKind: option.kind,
+      toolTitle: request.toolCall.title,
+    });
+    this.respondToPermission(request.requestId, option.optionId);
+    return true;
   }
 
   // ============================================================================

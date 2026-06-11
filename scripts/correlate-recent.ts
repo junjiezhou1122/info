@@ -1,8 +1,8 @@
 import { ContextStore } from "@info/core";
 import { buildCandidateThreads } from "@info/views/timeline/correlation.js";
-import { compileWorkThreadView } from "@info/views/timeline/work-thread-view.js";
 import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "@info/sensors";
 import type { StoredContextRecord } from "@info/core";
+import { InProcessIiiRuntimeClient, VIEW_WORKER_FUNCTIONS, registerInfoIiiRuntime } from "@info/iii-runtime";
 
 const args = new Set(process.argv.slice(2));
 const write = args.has("--write");
@@ -17,6 +17,8 @@ const aiSessionMinutes = Number(process.env.AI_SESSION_MINUTES ?? 240);
 const aiSessionTools = (process.env.AI_SESSION_TOOLS ?? "codex,claude-code").split(",").map(x => x.trim()).filter(Boolean) as AiSessionTool[];
 
 const store = new ContextStore();
+const iii = new InProcessIiiRuntimeClient();
+await registerInfoIiiRuntime(iii, { store, workerName: "info-correlate-cli" });
 const baseRecords = store
   .recent(limit, project ? { project } : undefined)
   .filter(record => includeSocial || (record.source.type !== "social" && record.schema.name !== "observation.social_post_saved"));
@@ -60,8 +62,11 @@ if (write) {
     written.push(stored.id);
   }
   if (candidate_threads.length) {
-    const compiled = compileWorkThreadView({ write: true, min_score: minScore, max_threads: maxThreads, limit }, store);
-    written_views.push(compiled.view.id!);
+    const compiled = await iii.trigger({
+      function_id: VIEW_WORKER_FUNCTIONS.workThread,
+      payload: { write: true, min_score: minScore, max_threads: maxThreads, limit },
+    }) as { views_written?: string[] };
+    written_views.push(...(compiled.views_written ?? []));
   }
 }
 

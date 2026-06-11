@@ -4,7 +4,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "@info/core";
-import { runtimeTick } from "@info/runtime/runtime.js";
+import type { RuntimeTickRequest, RuntimeTickResult } from "@info/runtime/runtime.js";
+import { III_RUNTIME_FUNCTIONS, InProcessIiiRuntimeClient, registerInfoIiiRuntime } from "@info/iii-runtime";
 import { compileWorkThreadView } from "@info/views/timeline/work-thread-view.js";
 import { compileActivityTimeline } from "@info/views/timeline/activity-timeline.js";
 
@@ -12,6 +13,13 @@ function withStore(fn: (store: ContextStore) => Promise<void> | void) {
   const dir = mkdtempSync(join(tmpdir(), "info-runtime-tick-test-"));
   const store = new ContextStore(join(dir, "context.sqlite"));
   return Promise.resolve(fn(store)).finally(() => rmSync(dir, { recursive: true, force: true }));
+}
+
+async function runtimeTickViaIii(req: RuntimeTickRequest, store: ContextStore): Promise<RuntimeTickResult> {
+  const iii = new InProcessIiiRuntimeClient();
+  await registerInfoIiiRuntime(iii, { store, workerName: "info-runtime-tick-test" });
+  const response = await iii.trigger({ function_id: III_RUNTIME_FUNCTIONS.tick, payload: req }) as { result?: RuntimeTickResult };
+  return (response.result ?? response) as RuntimeTickResult;
 }
 
 test("runtimeTick writes WorkThread state and Views without episode candidate Records", async () => withStore(async (store) => {
@@ -41,7 +49,7 @@ test("runtimeTick writes WorkThread state and Views without episode candidate Re
     privacy: { level: "private", retention: "normal", allow_external_llm: false },
   });
 
-  const result = await runtimeTick({
+  const result = await runtimeTickViaIii({
     include_screenpipe: false,
     include_ai_sessions: false,
     include_git: false,
@@ -110,7 +118,7 @@ test("runtimeTick persists Screenpipe observations so activity timeline can disp
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
   try {
-    const result = await runtimeTick({
+    const result = await runtimeTickViaIii({
       include_screenpipe: true,
       include_ai_sessions: false,
       include_git: false,
@@ -168,7 +176,7 @@ test("runtimeTick can process proactive background research task Views asynchron
       confidence: 0.8,
     });
 
-    const result = await runtimeTick({
+    const result = await runtimeTickViaIii({
       include_screenpipe: false,
       include_ai_sessions: false,
       include_git: false,
@@ -216,7 +224,7 @@ test("runtimeTick skips proactive background tasks when no task runtime is confi
       privacy: { level: "private", retention: "normal", allow_external_llm: true },
     });
 
-    const result = await runtimeTick({
+    const result = await runtimeTickViaIii({
       include_screenpipe: false,
       include_ai_sessions: false,
       include_git: false,
@@ -266,7 +274,7 @@ test("runtimeTick can compile toolsmith prototype Views into sandbox artifacts w
       confidence: 0.82,
     });
 
-    const result = await runtimeTick({
+    const result = await runtimeTickViaIii({
       include_screenpipe: false,
       include_ai_sessions: false,
       include_git: false,
@@ -378,7 +386,7 @@ test("WorkThread View compiler ignores legacy derived and episode Records as evi
     privacy: { level: "private", retention: "normal", allow_external_llm: false },
   });
 
-  const result = await runtimeTick({
+  const result = await runtimeTickViaIii({
     include_screenpipe: false,
     include_ai_sessions: false,
     include_git: false,
@@ -483,7 +491,7 @@ test("runtimeTick ignores legacy derived and episode Records when building candi
     privacy: { level: "private", retention: "normal", allow_external_llm: false },
   });
 
-  const result = await runtimeTick({
+  const result = await runtimeTickViaIii({
     include_screenpipe: false,
     include_ai_sessions: false,
     include_git: false,

@@ -1,7 +1,8 @@
 import { ContextStore } from "@info/core";
 import type { RuntimeEvent, StoredContextRecord } from "@info/core";
-import { compileWorkThreadView, workThreadViewToMarkdown } from "@info/views/timeline/work-thread-view.js";
+import { workThreadViewToMarkdown } from "@info/views/timeline/work-thread-view.js";
 import { BUILTIN_CONTEXT_TRIGGERS, decisionsToRuntimeEvents, evaluateTriggers } from "@info/runtime/triggers.js";
+import { InProcessIiiRuntimeClient, VIEW_WORKER_FUNCTIONS, registerInfoIiiRuntime } from "@info/iii-runtime";
 
 const argv = process.argv.slice(2);
 const options: any = { write: true };
@@ -29,8 +30,10 @@ if (options.write) {
 }
 
 const shouldCompile = evaluation.decisions.some(decision => decision.action.kind === "compile_view" && decision.action.id === "builtin.work-thread-view");
+const iii = new InProcessIiiRuntimeClient();
+await registerInfoIiiRuntime(iii, { store, workerName: "info-context-runtime-cli" });
 const result = shouldCompile
-  ? compileWorkThreadView(options, store)
+  ? await compileWorkThreadViaIii(options)
   : undefined;
 
 const output = {
@@ -48,6 +51,18 @@ const output = {
 };
 
 console.log(JSON.stringify(output, null, 2));
+
+async function compileWorkThreadViaIii(payload: Record<string, unknown>) {
+  const workerResult = await iii.trigger({ function_id: VIEW_WORKER_FUNCTIONS.workThread, payload }) as { ok?: boolean; views?: any[]; diagnostics?: Record<string, unknown> };
+  const view = workerResult.views?.[0];
+  return {
+    ok: workerResult.ok === true,
+    view,
+    records_used: workerResult.diagnostics?.records_used,
+    candidate_threads: view?.content?.threads ?? [],
+    iii_processing: workerResult,
+  };
+}
 
 function buildTickEvent(eventType: string, latest: StoredContextRecord | undefined, minutes: number): RuntimeEvent {
   if (eventType === "record_ingested" && latest) {

@@ -1,4 +1,6 @@
-import { runtimeTick, type RuntimeTickRequest } from "@info/runtime/runtime.js";
+import type { RuntimeTickRequest, RuntimeTickResult } from "@info/runtime/runtime.js";
+import { III_RUNTIME_FUNCTIONS, InProcessIiiRuntimeClient, registerInfoIiiRuntime } from "@info/iii-runtime";
+import { ContextStore } from "@info/core";
 
 function parseArgs(argv: string[]): RuntimeTickRequest {
   const req: RuntimeTickRequest = {};
@@ -57,5 +59,13 @@ function parseArgs(argv: string[]): RuntimeTickRequest {
   return req;
 }
 
-const result = await runtimeTick(parseArgs(process.argv.slice(2)));
+async function runRuntimeTickViaIii(req: RuntimeTickRequest): Promise<RuntimeTickResult> {
+  const store = new ContextStore();
+  const iii = new InProcessIiiRuntimeClient();
+  await registerInfoIiiRuntime(iii, { store, workerName: "info-runtime-tick-cli" });
+  const response = await iii.trigger({ function_id: III_RUNTIME_FUNCTIONS.tick, payload: req }) as { result?: RuntimeTickResult };
+  return (response.result ?? response) as RuntimeTickResult;
+}
+
+const result = await runRuntimeTickViaIii(parseArgs(process.argv.slice(2)));
 console.log(JSON.stringify(result, null, 2));

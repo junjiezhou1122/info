@@ -4969,6 +4969,49 @@ test("POST /programs/process writes Program output to the HTTP store", async () 
   assert.equal(store.getView(viewId)?.view_type, "analysis.browser_agent_task");
 }));
 
+test("POST /writing/assist runs only the writing Program fast path", async () => withStore(async (store) => {
+  const oldScaffold = process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD;
+  const oldBase = process.env.LLM_BASE_URL;
+  const oldModel = process.env.LLM_MODEL;
+  process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD = "1";
+  delete process.env.LLM_BASE_URL;
+  delete process.env.LLM_MODEL;
+  try {
+    const response = await request(store, "/writing/assist", {
+      method: "POST",
+      body: {
+        schema: { name: "observation.editor.text_changed", version: 1 },
+        source: { type: "browser", connector: "chrome-extension" },
+        scope: { app: "chrome", domain: "example.com" },
+        content: {
+          title: "Browser writing input",
+          url: "https://example.com/editor",
+          text: "I am writing about ambient suggestion design and need concise help near the cursor.",
+        },
+        privacy: { level: "private", retention: "normal", allow_external_llm: false },
+        signal: { importance: 0.78, confidence: 0.86, status: "inbox" },
+        payload: { writing_surface: "browser_inline" },
+      },
+    });
+    const body = response.body as { ok: boolean; fast_path: boolean; written_views: string[]; views: Array<{ view_type: string }>; processing: { runs: Array<{ program_id: string }> } };
+
+    assert.equal(response.status, 201);
+    assert.equal(body.ok, true);
+    assert.equal(body.fast_path, true);
+    assert.ok(body.written_views.length >= 1);
+    assert.deepEqual([...new Set(body.processing.runs.map(run => run.program_id))], ["program.writing_ambient"]);
+    assert.ok(body.views.some(view => view.view_type === "advice.writing_assist"));
+    assert.equal(store.listViews({ view_types: ["work_thread"], limit: 10 }).length, 0);
+  } finally {
+    if (oldScaffold === undefined) delete process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD;
+    else process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD = oldScaffold;
+    if (oldBase === undefined) delete process.env.LLM_BASE_URL;
+    else process.env.LLM_BASE_URL = oldBase;
+    if (oldModel === undefined) delete process.env.LLM_MODEL;
+    else process.env.LLM_MODEL = oldModel;
+  }
+}));
+
 test("POST /programs/process rejects legacy non-observation Record sources", async () => withStore(async (store) => {
   store.insertRecord({
     id: "record:http-process-legacy-source",

@@ -32,6 +32,14 @@ export function contextViewUrlFromSettings(settings, viewId) {
   return url.toString();
 }
 
+export function writingAssistEndpointFromSettings(settings) {
+  const base = settings?.endpoint || DEFAULT_CONTEXT_INGEST_ENDPOINT;
+  const url = new URL(base);
+  url.pathname = "/writing/assist";
+  url.search = "";
+  return url.toString();
+}
+
 
 export function buildViewQueryFromTab(tab) {
   const parts = [tab?.title];
@@ -59,6 +67,7 @@ export function contextViewsEndpointFromSettings(settings, options = {}) {
   if (options.activeOnly) url.searchParams.set("active_only", "true");
   if (options.cursor) url.searchParams.set("cursor", options.cursor);
   if (options.query) url.searchParams.set("query", options.query);
+  if (options.sourceRecordId) url.searchParams.set("source_record_id", options.sourceRecordId);
   return url.toString();
 }
 
@@ -133,6 +142,7 @@ export function buildViewFeedbackRequest({ viewId, viewType, type, value, reason
 }
 
 export function viewIdsFromProcessedIngestResponse(body) {
+  const direct = Array.isArray(body?.written_views) ? body.written_views : [];
   const firstPass = Array.isArray(body?.processing?.runs)
     ? body.processing.runs.flatMap(run => Array.isArray(run?.written_views) ? run.written_views : [])
     : [];
@@ -143,7 +153,7 @@ export function viewIdsFromProcessedIngestResponse(body) {
           : []
       )
     : [];
-  return [...new Set([...firstPass, ...cascaded].filter(id => typeof id === "string" && id))];
+  return [...new Set([...direct, ...firstPass, ...cascaded].filter(id => typeof id === "string" && id))];
 }
 
 export function viewIdsFromAgentTaskResponse(body) {

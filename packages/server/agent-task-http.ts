@@ -4,8 +4,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { buildContextPack } from "@info/core";
 import type { ContextPackRequest, ContextQuery, ContextRecord, ContextStore } from "@info/core";
 import type { signalFromObject } from "@info/programs/signals.js";
-import type { createDefaultProgramRuntime } from "@info/programs/registry.js";
-import { compactScope, errorMessage, isPlainObject, positiveInteger, uniqueStrings } from "./http-util.js";
+import { compactScope, errorMessage, isPlainObject, positiveInteger } from "./http-util.js";
 
 export type AgentTaskHttpBody = {
   task?: Record<string, unknown>;
@@ -28,39 +27,8 @@ export type ContextChatHttpBody = {
   limit?: unknown;
 };
 
-type ProgramRuntimeLike = ReturnType<typeof createDefaultProgramRuntime>;
-
 export const DEFAULT_CASCADE_DEPTH = 2;
 export const MAX_CASCADE_DEPTH = 4;
-
-export async function cascadeGeneratedViews(input: {
-  runtime: ProgramRuntimeLike;
-  store: ContextStore;
-  viewIds: string[];
-  contextPluginId?: string;
-  maxDepth?: number;
-}) {
-  const maxDepth = Math.min(MAX_CASCADE_DEPTH, Math.max(1, input.maxDepth ?? DEFAULT_CASCADE_DEPTH));
-  const seen = new Set<string>();
-  let queue = uniqueStrings(input.viewIds);
-  const cascade = [];
-
-  for (let depth = 1; depth <= maxDepth && queue.length; depth += 1) {
-    const next: string[] = [];
-    for (const id of queue) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const view = input.store.getView(id);
-      if (!view) continue;
-      const result = await input.runtime.processObject(view, { context_plugin_id: input.contextPluginId });
-      cascade.push({ ...result, cascade_depth: depth });
-      next.push(...result.runs.flatMap(run => run.written_views));
-    }
-    queue = uniqueStrings(next).filter(id => !seen.has(id));
-  }
-
-  return cascade;
-}
 
 export function cascadeDepth(url: URL, body?: AgentTaskHttpBody): number {
   return Math.min(

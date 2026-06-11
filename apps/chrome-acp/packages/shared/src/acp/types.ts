@@ -587,6 +587,8 @@ export interface ACPSettings {
   token?: string;
   /** Working directory for the agent session */
   cwd?: string;
+  /** Dangerously auto-select allow_always/allow_once for incoming permission requests. */
+  dangerouslyAutoApprovePermissions?: boolean;
 }
 
 export const DEFAULT_SETTINGS: ACPSettings = {

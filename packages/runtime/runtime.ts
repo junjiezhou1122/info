@@ -10,21 +10,29 @@ import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "@inf
 import { buildCandidateThreads, type CandidateThread } from "@info/views/timeline/correlation.js";
 import { buildLocalProjectSnapshotRecord } from "@info/sensors";
 import { buildThreadEvidenceMap } from "@info/views/threads/thread-evidence.js";
-import { compileWorkThreadView } from "@info/views/timeline/work-thread-view.js";
-import { compileActivityTimeline } from "@info/views/timeline/activity-timeline.js";
-import { compileProjectTimeline } from "@info/views/timeline/project-timeline.js";
-import { compileEvidenceViews } from "@info/views/evidence/index.js";
-import { compileActivityViews } from "@info/views/activity/index.js";
-import { compileProposalViews } from "@info/views/proposal/index.js";
-import { compileResourceViews } from "@info/views/resource/index.js";
-import { compileIntentViews, compileIntentViewsWithLlm } from "@info/views/intent/index.js";
-import { compileWorkflowViews, compileWorkflowViewsWithLlm } from "@info/views/workflow/index.js";
-import { compileMemoryViews, compileMemoryViewsWithLlm } from "@info/views/memory/index.js";
-import { compileActivityBlockViews } from "@info/views/activity-block/index.js";
-import { compileVisualFrameViews } from "@info/views/visual-frame/index.js";
-import { compileAudioViews } from "@info/views/audio/index.js";
 import { processAmbientBackgroundTasks } from "./background-tasks.js";
 import { processToolsmithSandboxArtifacts } from "./toolsmith-artifacts.js";
+
+const VIEW_WORKER_FUNCTIONS = {
+  evidence: "view::evidence_compile",
+  activity: "view::activity_compile",
+  audio: "view::audio_compile",
+  visualFrame: "view::visual_frame_compile",
+  activityBlock: "view::activity_block_compile",
+  proposal: "view::proposal_compile",
+  resource: "view::resource_compile",
+  intent: "view::intent_compile",
+  workflow: "view::workflow_compile",
+  memory: "view::memory_compile",
+  workThread: "view::work_thread_compile",
+  observationTimeline: "view::timeline_observations_compile",
+  activityTimeline: "view::timeline_activity_compile",
+  projectTimeline: "view::project_timeline_compile",
+} as const;
+
+export type RuntimeIiiClient = {
+  trigger(input: { function_id: string; payload?: unknown; action?: unknown }): Promise<unknown> | unknown;
+};
 
 export type RuntimeTickRequest = {
   window_minutes?: number;
@@ -116,6 +124,10 @@ export type RuntimeStatus = {
   runtime_state: Array<{ key: string; updated_at: string; value: Record<string, unknown> }>;
 };
 
+export type RuntimeTickOptions = {
+  iii?: RuntimeIiiClient;
+};
+
 export function defaultRuntimeSettings(): RuntimeSettings {
   return {
     compile_views: true,
@@ -185,7 +197,7 @@ export function runtimeStatus(store = new ContextStore()): RuntimeStatus {
   };
 }
 
-export async function runtimeTick(req: RuntimeTickRequest = {}, store = new ContextStore()): Promise<RuntimeTickResult> {
+export async function runtimeTick(req: RuntimeTickRequest = {}, store = new ContextStore(), options: RuntimeTickOptions = {}): Promise<RuntimeTickResult> {
   const generatedAt = new Date().toISOString();
   const settings = runtimeSettings(store);
   const windowMinutes = req.window_minutes ?? 10;
@@ -197,6 +209,7 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
   const force = req.force ?? false;
   const diagnostics: Record<string, unknown> = {};
   const compiledViews: RuntimeTickResult["compiled_views"] = [];
+  const iii = options.iii;
   const previousTick = store.getRuntimeState("last_tick")?.value ?? {};
   const activeState = store.getRuntimeState("active_thread")?.value ?? {};
   const writtenRecords: string[] = [];
@@ -459,6 +472,7 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
   if (shouldRunViewCompilers) {
     compiledViews.push(...await compileRuntimeViews({
       store,
+      iii,
       write,
       records,
       activeWorkspace,
@@ -482,6 +496,7 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
     const backgroundTasks = await processAmbientBackgroundTasks({
       limit: req.background_task_limit,
       write,
+      iii,
     }, store);
     diagnostics.background_tasks = backgroundTasks;
     compiledViews.push({
@@ -556,6 +571,7 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
 
 async function compileRuntimeViews(input: {
   store: ContextStore;
+  iii?: RuntimeIiiClient;
   write: boolean;
   records?: StoredContextRecord[];
   activeWorkspace?: WorkspaceCandidate;
@@ -572,141 +588,140 @@ async function compileRuntimeViews(input: {
   projectMinutes?: number;
 }): Promise<RuntimeTickResult["compiled_views"]> {
   const out: RuntimeTickResult["compiled_views"] = [];
+  if (!input.iii) return [{ view_type: "iii_runtime", skipped: "iii runtime client required for view compilation" }];
+  const iii = input.iii;
   try {
-    const compiled = compileEvidenceViews({
+    const compiled = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.evidence, {
       minutes: Math.max(input.windowMinutes, 240),
       limit: 500,
       write: input.write,
-      records: input.records,
-    }, input.store);
-    out.push({ view_type: "evidence", records_used: compiled.records_used, view_count: compiled.views.length, title: "Evidence Views" });
+      source_record_ids: input.records?.map(record => record.id),
+    });
+    out.push({ view_type: "evidence", records_used: numberValue(compiled.diagnostics.records_used), view_count: compiled.views.length, title: "Evidence Views" });
 
-    const activities = compileActivityViews({
+    const activities = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.activity, {
       minutes: Math.max(input.windowMinutes, 240),
       limit: 500,
       write: input.write,
-      evidenceViews: compiled.views,
-    }, input.store);
-    out.push({ view_type: "activity", records_used: compiled.records_used, view_count: activities.views.length, title: "Activity Views" });
+      source_view_ids: compiled.views_written,
+    });
+    out.push({ view_type: "activity", records_used: numberValue(compiled.diagnostics.records_used), view_count: activities.views.length, title: "Activity Views" });
 
-    const audioViews = await compileAudioViews({
+    const audioViews = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.audio, {
       write: input.write,
-      evidenceViews: compiled.views,
+      source_view_ids: compiled.views_written,
       llm: input.llm,
-    }, input.store);
+    });
     out.push({ view_type: "audio", view_count: audioViews.views.length, title: "AI Audio Views" });
 
-    let activityBlocks: Awaited<ReturnType<typeof compileActivityBlockViews>> | undefined;
+    let activityBlocks: RuntimeViewWorkerResult | undefined;
     if (input.visualViewCompression) {
-      const visualFrames = await compileVisualFrameViews({
+      const visualFrames = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.visualFrame, {
         write: input.write,
-        evidenceViews: compiled.views,
+        source_view_ids: compiled.views_written,
         llm: input.visionLlm,
-        limit: input.visualFrameLimit,
-        concurrency: input.visualFrameConcurrency,
-        sampleIntervalSeconds: input.visualFrameSampleSeconds,
-      }, input.store);
+        visual_frame_limit: input.visualFrameLimit,
+        visual_frame_concurrency: input.visualFrameConcurrency,
+        visual_frame_sample_seconds: input.visualFrameSampleSeconds,
+      });
       out.push({ view_type: "visual_frame", view_count: visualFrames.views.length, title: "AI VisualFrame Views" });
 
-      activityBlocks = await compileActivityBlockViews({
+      activityBlocks = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.activityBlock, {
         write: input.write,
-        visualFrameViews: visualFrames.views,
-        audioViews: audioViews.views,
-        activityViews: activities.views,
+        source_view_ids: [...visualFrames.views_written, ...audioViews.views_written, ...activities.views_written],
         llm: input.llm,
         minutes: 10,
-      }, input.store);
+      });
       out.push({ view_type: "activity_block", view_count: activityBlocks.views.length, title: "AI ActivityBlock Views" });
     }
 
-    const proposals = compileProposalViews({
+    const proposals = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.proposal, {
       write: input.write,
-      activityViews: activities.views,
-    }, input.store);
+      source_view_ids: [...activities.views_written, ...(activityBlocks?.views_written ?? [])],
+    });
     out.push({ view_type: "proposal", view_count: proposals.views.length, title: "Proposal Views" });
 
-    const resources = compileResourceViews({
+    const resources = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.resource, {
       write: input.write,
-      proposalViews: proposals.views,
-    }, input.store);
+      source_view_ids: proposals.views_written,
+    });
     out.push({ view_type: "resource", view_count: resources.views.length, title: "Resource Views" });
 
-    const intents = input.aiViewCompression
-      ? await compileIntentViewsWithLlm({
-        write: input.write,
-        proposalViews: proposals.views,
-        activityBlockViews: activityBlocks?.views,
-        llm: input.llm,
-      }, input.store)
-      : compileIntentViews({
+    const intents = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.intent, {
       write: input.write,
-      proposalViews: proposals.views,
-    }, input.store);
+      source_view_ids: [...proposals.views_written, ...(activityBlocks?.views_written ?? [])],
+      llm: input.aiViewCompression ? input.llm : undefined,
+    });
     out.push({ view_type: "intent", view_count: intents.views.length, title: input.aiViewCompression ? "AI Intent Views" : "Intent Views" });
 
-    const workflows = input.aiViewCompression
-      ? await compileWorkflowViewsWithLlm({
-        write: input.write,
-        intentViews: intents.views,
-        resourceViews: resources.views,
-        activityBlockViews: activityBlocks?.views,
-        llm: input.llm,
-      }, input.store)
-      : compileWorkflowViews({
+    const workflows = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.workflow, {
       write: input.write,
-      intentViews: intents.views,
-      resourceViews: resources.views,
-    }, input.store);
+      source_view_ids: [...intents.views_written, ...resources.views_written, ...(activityBlocks?.views_written ?? [])],
+      llm: input.aiViewCompression ? input.llm : undefined,
+    });
     out.push({ view_type: "workflow", view_count: workflows.views.length, title: input.aiViewCompression ? "AI Workflow Views" : "Workflow Views" });
 
-    const memories = input.aiViewCompression
-      ? await compileMemoryViewsWithLlm({
-        write: input.write,
-        workflowViews: workflows.views,
-        llm: input.llm,
-      }, input.store)
-      : compileMemoryViews({
+    const memories = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.memory, {
       write: input.write,
-      workflowViews: workflows.views,
-    }, input.store);
+      source_view_ids: workflows.views_written,
+      llm: input.aiViewCompression ? input.llm : undefined,
+    });
     out.push({ view_type: "memory", view_count: memories.views.length, title: input.aiViewCompression ? "AI Memory Views" : "Memory Views" });
   } catch (error) {
     out.push({ view_type: "evidence", skipped: error instanceof Error ? error.message : String(error) });
   }
 
   try {
-    const compiled = compileWorkThreadView({
+    const compiled = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.workThread, {
       minutes: input.workThreadMinutes ?? Math.max(input.windowMinutes, 180),
       limit: 180,
       write: input.write,
-    }, input.store);
-    out.push({ view_type: "work_thread", view_id: compiled.view.id, title: compiled.view.title, records_used: compiled.records_used, work_thread_count: compiled.candidate_threads.length });
+    });
+    out.push({
+      view_type: "work_thread",
+      view_id: compiled.views[0]?.id,
+      title: compiled.views[0]?.title,
+      records_used: numberValue(compiled.diagnostics.records_used),
+      work_thread_count: numberValue(compiled.diagnostics.work_thread_count),
+    });
   } catch (error) {
     out.push({ view_type: "work_thread", skipped: error instanceof Error ? error.message : String(error) });
   }
 
   try {
-    const compiled = compileActivityTimeline({
+    const compiled = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.activityTimeline, {
       minutes: input.activityMinutes ?? Math.max(input.windowMinutes, 240),
       limit: 400,
-      eventLimit: 120,
       write: input.write,
-    }, input.store);
-    out.push({ view_type: "timeline.activity", view_id: compiled.view.id, title: compiled.view.title, records_used: compiled.records_used, bucket_count: compiled.buckets.length });
+    });
+    out.push({
+      view_type: "timeline.activity",
+      view_id: compiled.views[0]?.id,
+      title: compiled.views[0]?.title,
+      records_used: numberValue(compiled.diagnostics.records_used),
+      bucket_count: numberValue(compiled.diagnostics.bucket_count),
+    });
   } catch (error) {
     out.push({ view_type: "timeline.activity", skipped: error instanceof Error ? error.message : String(error) });
   }
 
   if (input.activeWorkspace?.project_path) {
     try {
-      const compiled = compileProjectTimeline({
-        projectPath: input.activeWorkspace.project_path,
+      const compiled = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.projectTimeline, {
+        project_path: input.activeWorkspace.project_path,
+        project: input.activeWorkspace.project,
         minutes: input.projectMinutes ?? 2 * 24 * 60,
         limit: 500,
-        eventLimit: 120,
         write: input.write,
-      }, input.store);
-      out.push({ view_type: "project_timeline", view_id: compiled.view.id, title: compiled.view.title, records_used: compiled.records_used, bucket_count: compiled.buckets.length, work_thread_count: compiled.work_threads.length });
+      });
+      out.push({
+        view_type: "project_timeline",
+        view_id: compiled.views[0]?.id,
+        title: compiled.views[0]?.title,
+        records_used: numberValue(compiled.diagnostics.records_used),
+        bucket_count: numberValue(compiled.diagnostics.bucket_count),
+        work_thread_count: numberValue(compiled.diagnostics.work_thread_count),
+      });
     } catch (error) {
       out.push({ view_type: "project_timeline", skipped: error instanceof Error ? error.message : String(error) });
     }
@@ -714,6 +729,44 @@ async function compileRuntimeViews(input: {
     out.push({ view_type: "project_timeline", skipped: "no active workspace" });
   }
   return out;
+}
+
+type RuntimeViewWorkerPayload = {
+  write?: boolean;
+  minutes?: number;
+  limit?: number;
+  llm?: LlmOptions;
+  vision_llm?: LlmOptions;
+  visual_frame_limit?: number;
+  visual_frame_concurrency?: number;
+  visual_frame_sample_seconds?: number;
+  project_path?: string;
+  project?: string;
+  plugin_id?: string;
+  source_record_ids?: string[];
+  source_view_ids?: string[];
+};
+
+type RuntimeViewWorkerResult = {
+  ok: true;
+  function_id: string;
+  view_type: string;
+  generated_at: string;
+  views_written: string[];
+  views: any[];
+  diagnostics: Record<string, unknown>;
+};
+
+async function triggerViewWorker(iii: RuntimeIiiClient, functionId: string, payload: RuntimeViewWorkerPayload): Promise<RuntimeViewWorkerResult> {
+  const result = await iii.trigger({ function_id: functionId, payload });
+  if (!isRecord(result) || result.ok !== true || !Array.isArray(result.views)) {
+    throw new Error(`iii view worker returned invalid result: ${functionId}`);
+  }
+  return result as RuntimeViewWorkerResult;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
 }
 
 export function resolveWorkspaceCandidates(input: { project_hints?: string[]; records: StoredContextRecord[]; fallback_paths?: string[] }): WorkspaceCandidate[] {

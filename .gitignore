@@ -18,6 +18,10 @@ packages/browser-extension/dist/
 packages/ui/node_modules/
 ui/dist/
 
+apps/mac-companion/.build/
+apps/mac-companion/build/
+*.vtt
+
 # Local analysis reports
 orphan-report.json
 unused-runtime-symbols.json

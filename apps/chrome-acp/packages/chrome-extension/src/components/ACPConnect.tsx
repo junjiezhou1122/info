@@ -11,10 +11,10 @@ import { ACPConnect as SharedACPConnect, type ACPConnectProps as SharedACPConnec
 import { executeBrowserTool } from "@/tools/browser";
 import type { ACPClient } from "@chrome-acp/shared/acp";
 
-// Default workspace for Chrome ACP sessions: the .metaflow scratch space
-// inside the info project. The user can change this from the connection
-// settings panel and the new value is persisted under WORKSPACE_CWD_KEY.
-const DEFAULT_WORKSPACE_CWD = "/Users/junjie/info/.metaflow";
+// Default workspace for Chrome ACP sessions. The user can change this from the
+// connection settings panel and the new value is persisted under WORKSPACE_CWD_KEY.
+const DEFAULT_WORKSPACE_CWD = "/Users/junjie/info";
+const LEGACY_DEFAULT_WORKSPACE_CWD = "/Users/junjie/info/.metaflow";
 const WORKSPACE_CWD_KEY = "workspaceCwd";
 
 function readStoredWorkspaceCwdSync(): string {
@@ -28,18 +28,26 @@ function readStoredWorkspaceCwdSync(): string {
 function applyWorkspaceCwd(client: ACPClient, cwd: string): void {
   const current = client.getSettings();
   // Don't clobber an explicit user choice on the connection panel.
-  if (current.cwd && current.cwd !== DEFAULT_WORKSPACE_CWD) return;
+  if (current.cwd && current.cwd !== DEFAULT_WORKSPACE_CWD && current.cwd !== LEGACY_DEFAULT_WORKSPACE_CWD) return;
   if (current.cwd === cwd) return;
   client.updateSettings({ ...current, cwd });
+}
+
+function normalizeStoredWorkspaceCwd(value: unknown): string {
+  if (typeof value !== "string" || value === LEGACY_DEFAULT_WORKSPACE_CWD) {
+    return DEFAULT_WORKSPACE_CWD;
+  }
+  return value;
 }
 
 interface ChromeACPConnectProps {
   onClientReady?: (client: ACPClient | null) => void;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
+  dangerouslyAutoApprovePermissions?: boolean;
 }
 
-export function ACPConnect({ onClientReady, expanded, onExpandedChange }: ChromeACPConnectProps) {
+export function ACPConnect({ onClientReady, expanded, onExpandedChange, dangerouslyAutoApprovePermissions = false }: ChromeACPConnectProps) {
   // Track the latest ACPClient so storage changes can re-apply the cwd.
   const clientRef = useRef<ACPClient | null>(null);
 
@@ -50,9 +58,7 @@ export function ACPConnect({ onClientReady, expanded, onExpandedChange }: Chrome
     // current client (if any). This covers the very first mount before
     // SharedACPConnect has created a client.
     chrome.storage.local.get([WORKSPACE_CWD_KEY], (items) => {
-      const stored = typeof items?.[WORKSPACE_CWD_KEY] === "string"
-        ? (items[WORKSPACE_CWD_KEY] as string)
-        : DEFAULT_WORKSPACE_CWD;
+      const stored = normalizeStoredWorkspaceCwd(items?.[WORKSPACE_CWD_KEY]);
       if (clientRef.current) applyWorkspaceCwd(clientRef.current, stored);
     });
 
@@ -62,7 +68,7 @@ export function ACPConnect({ onClientReady, expanded, onExpandedChange }: Chrome
       if (area !== "local") return;
       const change = changes[WORKSPACE_CWD_KEY];
       if (!change || !clientRef.current) return;
-      const next = typeof change.newValue === "string" ? change.newValue : DEFAULT_WORKSPACE_CWD;
+      const next = normalizeStoredWorkspaceCwd(change.newValue);
       applyWorkspaceCwd(clientRef.current, next);
     };
     chrome.storage.onChanged.addListener(onChanged);
@@ -80,6 +86,8 @@ export function ACPConnect({ onClientReady, expanded, onExpandedChange }: Chrome
       onExpandedChange={onExpandedChange}
       browserToolHandler={executeBrowserTool}
       showTokenInput
+      autoConnect
+      initialSettings={{ cwd: readStoredWorkspaceCwdSync(), dangerouslyAutoApprovePermissions }}
     />
   );
 }

@@ -3,13 +3,33 @@ let scrollEvents = 0;
 let selectionCount = 0;
 let lastSelectedText = "";
 let selectionTimer = null;
+let selectionToolbar = null;
+let activeSelectionPayload = null;
+let selectionRequestSeq = 0;
 let writingTimer = null;
 let lastWritingText = "";
 let activeWritingElement = null;
 let assistBubble = null;
+let assistElement = null;
 let pendingInsertedDraftEdit = null;
 let insertedDraftEditTimer = null;
+let writingRequestSeq = 0;
 const startedAt = Date.now();
+const WRITING_VIEW_TYPES = ["draft.writing_continuation", "advice.writing_assist"];
+const WRITING_ASSIST_POLL_ATTEMPTS = 45;
+const WRITING_ASSIST_POLL_INTERVAL_MS = 2000;
+const DEFAULT_SELECTION_ACTIONS = [
+  {
+    id: "explain",
+    label: "Explain",
+    prompt: "Explain this selected text in plain language. Keep it concise, and mention the page context if it matters.",
+  },
+  {
+    id: "translate_zh",
+    label: "Translate",
+    prompt: "Translate this selected text into natural Simplified Chinese. Preserve names, technical terms, and the original meaning.",
+  },
+];
 
 function visibleText() {
   const clone = document.body?.cloneNode(true);
@@ -138,6 +158,17 @@ function sendAttention(kind) {
   chrome.runtime.sendMessage({ type: "context.capture.browser_attention", kind, payload }).catch(() => undefined);
 }
 
+function handleStableSelection() {
+  const payload = selectionContext("selected");
+  if (!payload || payload.selected_text.length < 3) {
+    removeSelectionToolbar();
+    return;
+  }
+  activeSelectionPayload = payload;
+  showSelectionToolbar(payload);
+  chrome.runtime.sendMessage({ type: "context.capture.browser_attention", kind: "selected", payload }).catch(() => undefined);
+}
+
 window.addEventListener("scroll", () => {
   scrollEvents += 1;
   maxScrollDepth = Math.max(maxScrollDepth, scrollDepth());
@@ -150,23 +181,59 @@ document.addEventListener("selectionchange", () => {
     lastSelectedText = selected;
   }
   clearTimeout(selectionTimer);
-  selectionTimer = setTimeout(() => sendAttention("selected"), 650);
+  selectionTimer = setTimeout(() => handleStableSelection(), 650);
 });
 
 document.addEventListener("copy", () => {
   setTimeout(() => sendAttention("copied"), 0);
 });
 
+document.addEventListener("mousedown", (event) => {
+  if (selectionToolbar?.contains(event.target)) return;
+  const selected = String(getSelection?.() ?? "").trim();
+  if (!selected) removeSelectionToolbar();
+}, true);
+
+document.addEventListener("focusin", (event) => {
+  const target = editableElement(event.target);
+  if (!target) return;
+  attachWritingWidget(target);
+}, true);
+
+document.addEventListener("click", (event) => {
+  const target = editableElement(event.target);
+  if (!target) return;
+  attachWritingWidget(target);
+}, true);
+
+document.addEventListener("keyup", (event) => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const target = editableElement(event.target);
+  if (!target) return;
+  queueWritingInput(target);
+}, true);
+
+document.addEventListener("compositionend", (event) => {
+  const target = editableElement(event.target);
+  if (!target) return;
+  queueWritingInput(target);
+}, true);
+
 document.addEventListener("input", (event) => {
   const target = editableElement(event.target);
   if (!target) return;
-  const text = editableText(target);
+  queueWritingInput(target);
+}, true);
+
+function queueWritingInput(target) {
+  attachWritingWidget(target);
+  const fullText = editableText(target);
+  const text = focusedWritingText(target, fullText);
   observeInsertedDraftEdit(target, text);
   if (!shouldSendWritingText(text, target)) return;
-  activeWritingElement = target;
   clearTimeout(writingTimer);
-  writingTimer = setTimeout(() => sendWritingInput(target, text), 900);
-}, true);
+  writingTimer = setTimeout(() => sendWritingInput(target, text, fullText), 900);
+}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "collect-page-context") {
@@ -187,9 +254,46 @@ function editableElement(target) {
   return editable;
 }
 
+function attachWritingWidget(element) {
+  if (sensitiveEditable(element)) return;
+  activeWritingElement = element;
+  if (!assistBubble || assistElement !== element) {
+    showWritingIdle(element);
+    return;
+  }
+  positionAssistBubble(element);
+}
+
 function editableText(element) {
   if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) return element.value;
   return element.textContent || "";
+}
+
+function focusedWritingText(element, fullText) {
+  const selected = String(window.getSelection?.() ?? "").replace(/\s+/g, " ").trim();
+  if (selected.length >= 12) return selected.slice(0, 2000);
+  if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
+    const caret = element.selectionStart ?? fullText.length;
+    return textAroundOffset(fullText, caret, 1800);
+  }
+  const selection = window.getSelection?.();
+  const anchor = selection?.anchorNode;
+  const block = anchor ? editableBlockText(anchor, element) : "";
+  return (block || fullText).replace(/\s+/g, " ").trim().slice(0, 2000);
+}
+
+function editableBlockText(node, root) {
+  const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  const block = element?.closest("p,li,h1,h2,h3,h4,h5,h6,blockquote,pre,[data-block-id],[data-page-id],[role='textbox'],div");
+  if (block && root.contains(block)) return block.textContent || "";
+  return element && root.contains(element) ? element.textContent || "" : "";
+}
+
+function textAroundOffset(text, offset, max) {
+  const half = Math.floor(max / 2);
+  const start = Math.max(0, offset - half);
+  const end = Math.min(text.length, offset + half);
+  return text.slice(start, end).replace(/\s+/g, " ").trim();
 }
 
 function shouldSendWritingText(text, element) {
@@ -206,8 +310,10 @@ function sensitiveEditable(element) {
   return /password|token|secret|api[_-]?key|credit card|验证码|密码/i.test(`${element.id || ""} ${element.getAttribute("name") || ""} ${element.getAttribute("autocomplete") || ""}`);
 }
 
-function sendWritingInput(element, text) {
+function sendWritingInput(element, text, fullText = text) {
   const rect = element.getBoundingClientRect();
+  const requestSeq = ++writingRequestSeq;
+  showWritingPending(element, requestSeq);
   chrome.runtime.sendMessage({
     type: "context.capture.writing_input",
     payload: {
@@ -215,6 +321,7 @@ function sendWritingInput(element, text) {
       url: location.href,
       domain: location.hostname,
       text,
+      full_text: fullText,
       field_tag: element.tagName,
       field_id: element.id || undefined,
       field_name: element.getAttribute("name") || undefined,
@@ -225,21 +332,113 @@ function sendWritingInput(element, text) {
       metadata: metadata(),
       text_quality: textQuality(text),
     },
-  }).then(result => showWritingAssist(result, element)).catch(() => undefined);
+  }).then(async (result) => {
+    if (showWritingAssist(result, element)) return;
+    await pollWritingAssist(element, text, result, requestSeq);
+  }).catch(() => {
+    showWritingError(element, requestSeq, "Could not reach writing assist.");
+  });
+}
+
+function showWritingPending(element, requestSeq) {
+  removeAssistBubble();
+  assistElement = element;
+  assistBubble = document.createElement("div");
+  assistBubble.id = "info-writing-assist";
+  assistBubble.className = "is-collapsed is-pending";
+  assistBubble.dataset.requestSeq = String(requestSeq);
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "info-writing-trigger";
+  trigger.title = "Writing suggestion is generating";
+  trigger.textContent = "Info...";
+  assistBubble.append(trigger);
+  document.documentElement.append(assistBubble);
+  positionAssistBubble(element);
+}
+
+function showWritingIdle(element) {
+  removeAssistBubble();
+  assistElement = element;
+  assistBubble = document.createElement("div");
+  assistBubble.id = "info-writing-assist";
+  assistBubble.className = "is-collapsed is-idle";
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "info-writing-trigger";
+  trigger.title = "Writing assist is ready";
+  trigger.textContent = "Info";
+  assistBubble.append(trigger);
+  document.documentElement.append(assistBubble);
+  positionAssistBubble(element);
+}
+
+function showWritingError(element, requestSeq, message) {
+  if (assistBubble?.dataset.requestSeq && assistBubble.dataset.requestSeq !== String(requestSeq)) return;
+  removeAssistBubble();
+  assistElement = element;
+  assistBubble = document.createElement("div");
+  assistBubble.id = "info-writing-assist";
+  assistBubble.className = "is-collapsed is-error";
+  assistBubble.dataset.requestSeq = String(requestSeq);
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "info-writing-trigger";
+  trigger.title = "Writing suggestion failed";
+  trigger.textContent = "Info!";
+  const panel = document.createElement("div");
+  panel.className = "info-writing-panel";
+  const title = document.createElement("div");
+  title.className = "info-writing-title";
+  title.textContent = "Info writing";
+  const body = document.createElement("div");
+  body.className = "info-writing-body";
+  body.textContent = message;
+  const actions = document.createElement("div");
+  actions.className = "info-writing-actions";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "Dismiss";
+  close.addEventListener("click", () => removeAssistBubble());
+  actions.append(close);
+  panel.append(title, body, actions);
+  assistBubble.append(trigger, panel);
+  document.documentElement.append(assistBubble);
+  trigger.addEventListener("click", () => {
+    assistBubble?.classList.toggle("is-collapsed");
+    positionAssistBubble(element);
+  });
+  positionAssistBubble(element);
+}
+
+function removePendingAssist(requestSeq) {
+  if (assistBubble?.classList.contains("is-pending") && assistBubble.dataset.requestSeq === String(requestSeq)) {
+    if (activeWritingElement?.isConnected) showWritingIdle(activeWritingElement);
+    else removeAssistBubble();
+  }
 }
 
 function showWritingAssist(result, element) {
   const view = writingViewFromResult(result);
   const draft = draftTextFromView(view);
   const suggestions = suggestionsFromView(view);
-  if (!view || (!draft && !suggestions.length)) return;
+  if (!view || (!draft && !suggestions.length)) return false;
   removeAssistBubble();
+  assistElement = element;
   assistBubble = document.createElement("div");
   assistBubble.id = "info-writing-assist";
+  assistBubble.className = "is-collapsed";
   assistBubble.innerHTML = "";
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "info-writing-trigger";
+  trigger.title = "Show writing suggestion";
+  trigger.textContent = view.view_type === "draft.writing_continuation" ? "Info draft" : "Info";
   const title = document.createElement("div");
   title.className = "info-writing-title";
   title.textContent = view.view_type === "draft.writing_continuation" ? "Info draft" : "Info writing";
+  const panel = document.createElement("div");
+  panel.className = "info-writing-panel";
   const body = document.createElement("div");
   body.className = "info-writing-body";
   body.textContent = draft || suggestions[0];
@@ -288,15 +487,54 @@ function showWritingAssist(result, element) {
     });
     actions.append(insert);
   }
-  assistBubble.append(title, body, actions);
+  panel.append(title, body, actions);
+  assistBubble.append(trigger, panel);
   document.documentElement.append(assistBubble);
+  trigger.addEventListener("click", () => {
+    assistBubble?.classList.toggle("is-collapsed");
+    positionAssistBubble(element);
+  });
+  assistBubble.addEventListener("mouseenter", () => {
+    assistBubble?.classList.remove("is-collapsed");
+    positionAssistBubble(element);
+  });
   positionAssistBubble(element);
+  return true;
+}
+
+async function pollWritingAssist(element, text, result, requestSeq) {
+  const sourceRecordId = result?.record_id;
+  if (!sourceRecordId) {
+    showWritingError(element, requestSeq, result?.error || result?.posted?.body?.error || "Writing assist did not return a request id.");
+    return;
+  }
+  for (let attempt = 0; attempt < WRITING_ASSIST_POLL_ATTEMPTS; attempt += 1) {
+    await delay(attempt === 0 ? 900 : WRITING_ASSIST_POLL_INTERVAL_MS);
+    const currentText = focusedWritingText(element, editableText(element));
+    if (requestSeq !== writingRequestSeq || !element.isConnected || normalizeWriting(currentText) !== normalizeWriting(text)) {
+      removePendingAssist(requestSeq);
+      return;
+    }
+    const polled = await chrome.runtime.sendMessage({
+      type: "poll-context-views",
+      viewTypes: WRITING_VIEW_TYPES,
+      sourceRecordId,
+      limit: 4,
+      activeOnly: true,
+    }).catch(() => undefined);
+    if (showWritingAssist(polled, element)) return;
+  }
+  showWritingError(element, requestSeq, "Writing assist timed out.");
 }
 
 function writingViewFromResult(result) {
-  const views = Array.isArray(result?.views) ? result.views.map(item => item?.view).filter(Boolean) : [];
+  const views = Array.isArray(result?.views) ? result.views.map(item => item?.view ?? item).filter(Boolean) : [];
   return views.find(view => view.view_type === "draft.writing_continuation")
     || views.find(view => view.view_type === "advice.writing_assist");
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function draftTextFromView(view) {
@@ -406,9 +644,15 @@ function insertDraft(element, draft) {
 
 function positionAssistBubble(element) {
   if (!assistBubble) return;
-  const rect = element.getBoundingClientRect();
-  const top = Math.min(window.innerHeight - 120, Math.max(12, rect.bottom + 8));
-  const left = Math.min(window.innerWidth - 330, Math.max(12, rect.left));
+  const rect = editablePositionRect(element);
+  const bubbleRect = assistBubble.getBoundingClientRect();
+  const collapsed = assistBubble.classList.contains("is-collapsed");
+  const width = collapsed ? Math.max(92, bubbleRect.width || 92) : Math.max(318, bubbleRect.width || 318);
+  const height = collapsed ? Math.max(32, bubbleRect.height || 32) : Math.max(128, bubbleRect.height || 128);
+  const collapsedLeft = rect.right + 8;
+  const panelLeft = Math.min(rect.left, rect.right - width);
+  const top = Math.max(12, Math.min(window.innerHeight - height - 12, rect.bottom + 8));
+  const left = Math.max(12, Math.min(window.innerWidth - width - 12, collapsed ? collapsedLeft : panelLeft));
   assistBubble.style.top = `${top + window.scrollY}px`;
   assistBubble.style.left = `${left + window.scrollX}px`;
 }
@@ -416,29 +660,281 @@ function positionAssistBubble(element) {
 function removeAssistBubble() {
   assistBubble?.remove();
   assistBubble = null;
+  assistElement = null;
+}
+
+function editablePositionRect(element) {
+  if (!(element instanceof HTMLTextAreaElement) && !(element instanceof HTMLInputElement)) {
+    const selection = window.getSelection?.();
+    const anchor = selection?.anchorNode;
+    const anchorElement = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
+    if (selection?.rangeCount && anchorElement && element.contains(anchorElement)) {
+      const range = selection.getRangeAt(0).cloneRange();
+      const rects = Array.from(range.getClientRects());
+      const rect = rects[rects.length - 1] || range.getBoundingClientRect();
+      if (rect && (rect.width || rect.height)) return rect;
+    }
+  }
+  return element.getBoundingClientRect();
+}
+
+async function selectionActions() {
+  try {
+    const stored = await chrome.storage?.local?.get?.("selectionActions");
+    const custom = Array.isArray(stored?.selectionActions) ? stored.selectionActions : [];
+    const normalized = custom
+      .filter((action) => action && action.enabled !== false && action.id && action.label && action.prompt)
+      .map((action) => ({
+        id: String(action.id),
+        label: String(action.label).slice(0, 24),
+        prompt: String(action.prompt),
+      }));
+    return normalized.length ? normalized : DEFAULT_SELECTION_ACTIONS;
+  } catch {
+    return DEFAULT_SELECTION_ACTIONS;
+  }
+}
+
+function showSelectionToolbar(payload) {
+  removeSelectionToolbar();
+  const rect = selectionRect();
+  if (!rect) return;
+  selectionToolbar = document.createElement("div");
+  selectionToolbar.id = "info-selection-toolbar";
+  selectionToolbar.className = "is-ready";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.textContent = "Save";
+  save.addEventListener("click", () => saveSelection(payload));
+  document.documentElement.append(selectionToolbar);
+  selectionActions().then((actions) => {
+    if (!selectionToolbar || activeSelectionPayload !== payload) return;
+    selectionToolbar.textContent = "";
+    for (const action of actions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = action.label;
+      button.addEventListener("click", () => runSelectionAction(action, payload));
+      selectionToolbar.append(button);
+    }
+    selectionToolbar.append(save);
+    positionSelectionToolbar(rect);
+  });
+  positionSelectionToolbar(rect);
+}
+
+function saveSelection(payload = activeSelectionPayload) {
+  if (!payload?.selected_text) return;
+  chrome.runtime.sendMessage({
+    type: "context.capture.browser_attention",
+    kind: "selected",
+    payload: {
+      ...payload,
+      manual_save: true,
+      saved_at: new Date().toISOString(),
+    },
+  }).then((result) => {
+    showSelectionStatus(result?.ok === false ? "Save failed" : "Saved");
+  }).catch(() => showSelectionStatus("Save failed"));
+}
+
+function runSelectionAction(action, payload = activeSelectionPayload) {
+  if (!payload?.selected_text) return;
+  const requestSeq = ++selectionRequestSeq;
+  showSelectionStatus("Opening Chat...");
+  chrome.runtime.sendMessage({
+    type: "sidepanel.run.selection_action",
+    action,
+    payload,
+  }).then((result) => {
+    if (requestSeq !== selectionRequestSeq) return;
+    if (!result?.ok) {
+      showSelectionStatus(result?.error || "Explain failed");
+      return;
+    }
+    showSelectionStatus("Sent to Chat");
+    setTimeout(() => {
+      if (requestSeq === selectionRequestSeq) removeSelectionToolbar();
+    }, 1200);
+  }).catch(() => {
+    if (requestSeq === selectionRequestSeq) showSelectionStatus("Explain failed");
+  });
+}
+
+function showSelectionStatus(text) {
+  if (!selectionToolbar) return;
+  selectionToolbar.className = "is-status";
+  selectionToolbar.textContent = text;
+  const rect = selectionRect();
+  if (rect) positionSelectionToolbar(rect);
+}
+
+function showSelectionAnswer(answer) {
+  if (!selectionToolbar) return;
+  selectionToolbar.className = "is-answer";
+  selectionToolbar.textContent = "";
+  const title = document.createElement("div");
+  title.className = "info-selection-title";
+  title.textContent = "Info explain";
+  const body = document.createElement("div");
+  body.className = "info-selection-body";
+  body.textContent = answer;
+  const actions = document.createElement("div");
+  actions.className = "info-selection-actions";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "Dismiss";
+  close.addEventListener("click", () => removeSelectionToolbar());
+  actions.append(close);
+  selectionToolbar.append(title, body, actions);
+  const rect = selectionRect();
+  if (rect) positionSelectionToolbar(rect);
+}
+
+function selectionRect() {
+  const selection = window.getSelection?.();
+  if (!selection?.rangeCount || !String(selection).trim()) return undefined;
+  const range = selection.getRangeAt(0).cloneRange();
+  const rects = Array.from(range.getClientRects()).filter(rect => rect.width || rect.height);
+  return rects[rects.length - 1] || range.getBoundingClientRect();
+}
+
+function positionSelectionToolbar(rect) {
+  if (!selectionToolbar) return;
+  const toolbarRect = selectionToolbar.getBoundingClientRect();
+  const width = Math.max(144, toolbarRect.width || 144);
+  const height = Math.max(34, toolbarRect.height || 34);
+  const top = Math.max(12, Math.min(window.innerHeight - height - 12, rect.bottom + 8));
+  const left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left));
+  selectionToolbar.style.top = `${top + window.scrollY}px`;
+  selectionToolbar.style.left = `${left + window.scrollX}px`;
+}
+
+function removeSelectionToolbar() {
+  selectionToolbar?.remove();
+  selectionToolbar = null;
+  activeSelectionPayload = null;
 }
 
 const style = document.createElement("style");
 style.textContent = `
+  #info-selection-toolbar {
+    position: absolute;
+    z-index: 2147483647;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: min(360px, calc(100vw - 24px));
+    border: 1px solid rgba(47, 47, 47, 0.16);
+    border-radius: 8px;
+    background: #fffffc;
+    color: #2f2f2f;
+    box-shadow: 0 12px 32px rgba(20, 20, 20, 0.14);
+    padding: 6px;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #info-selection-toolbar.is-status {
+    padding: 7px 10px;
+    color: #6f6f6f;
+    font-size: 12px;
+  }
+  #info-selection-toolbar.is-answer {
+    display: block;
+    width: 318px;
+    padding: 10px;
+  }
+  #info-selection-toolbar button {
+    height: 28px;
+    border: 1px solid #d8d0c2;
+    border-radius: 6px;
+    background: #fffdfa;
+    color: #2f2f2f;
+    padding: 0 9px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #info-selection-toolbar button:first-child {
+    background: #2f2f2f;
+    color: #fff;
+    border-color: #2f2f2f;
+  }
+  #info-selection-toolbar .info-selection-title {
+    color: #6f6f6f;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0;
+    margin-bottom: 5px;
+  }
+  #info-selection-toolbar .info-selection-body {
+    max-height: 180px;
+    overflow: auto;
+    white-space: pre-wrap;
+  }
+  #info-selection-toolbar .info-selection-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 9px;
+  }
   #info-writing-assist {
     position: absolute;
     z-index: 2147483647;
     width: 318px;
     max-width: calc(100vw - 24px);
-    border: 1px solid rgba(47, 47, 47, 0.18);
-    border-radius: 8px;
-    background: #fffdf8;
     color: #2f2f2f;
-    box-shadow: 0 18px 48px rgba(20, 20, 20, 0.16);
-    padding: 10px;
     font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #info-writing-assist.is-collapsed {
+    width: auto;
+  }
+  #info-writing-assist .info-writing-trigger {
+    display: none;
+    height: 30px;
+    border: 1px solid rgba(47, 47, 47, 0.2);
+    border-radius: 999px;
+    background: #2f2f2f;
+    color: #fff;
+    box-shadow: 0 8px 24px rgba(20, 20, 20, 0.14);
+    padding: 0 10px;
+    font: 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    cursor: pointer;
+    user-select: none;
+  }
+  #info-writing-assist.is-idle .info-writing-trigger {
+    background: #ffffff;
+    color: #2f2f2f;
+  }
+  #info-writing-assist.is-pending .info-writing-trigger {
+    opacity: .74;
+  }
+  #info-writing-assist.is-error .info-writing-trigger {
+    background: #ffffff;
+    color: #8a1f17;
+    border-color: rgba(138, 31, 23, .34);
+  }
+  #info-writing-assist.is-collapsed .info-writing-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #info-writing-assist .info-writing-panel {
+    border: 1px solid rgba(47, 47, 47, 0.16);
+    border-radius: 8px;
+    background: #fffffc;
+    color: #2f2f2f;
+    box-shadow: 0 12px 32px rgba(20, 20, 20, 0.14);
+    padding: 10px;
+  }
+  #info-writing-assist.is-collapsed .info-writing-panel {
+    display: none;
   }
   #info-writing-assist .info-writing-title {
     color: #6f6f6f;
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: .04em;
+    letter-spacing: 0;
     margin-bottom: 5px;
   }
   #info-writing-assist .info-writing-body {

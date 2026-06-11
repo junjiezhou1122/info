@@ -41,8 +41,8 @@ function inferProxyUrlFromPage(): string | undefined {
 }
 
 // Get initial settings from defaults, with optional URL overrides
-function getInitialSettings(inferFromUrl: boolean): ACPSettings {
-  const settings = { ...DEFAULT_SETTINGS };
+function getInitialSettings(inferFromUrl: boolean, initialSettings?: Partial<ACPSettings>): ACPSettings {
+  const settings = { ...DEFAULT_SETTINGS, ...initialSettings };
 
   // Override from URL if enabled (for pre-filled links from server)
   if (inferFromUrl) {
@@ -74,6 +74,10 @@ export interface ACPConnectProps {
   placeholder?: string;
   /** Show QR code scan button (for mobile) */
   showScanButton?: boolean;
+  /** Automatically connect on mount with the current settings. */
+  autoConnect?: boolean;
+  /** Initial settings supplied by host shells such as the Chrome extension. */
+  initialSettings?: Partial<ACPSettings>;
 }
 
 export function ACPConnect({
@@ -85,8 +89,10 @@ export function ACPConnect({
   inferFromUrl = false,
   placeholder = "Proxy server URL",
   showScanButton = false,
+  autoConnect = false,
+  initialSettings,
 }: ACPConnectProps) {
-  const [settings, setSettings] = useState<ACPSettings>(() => getInitialSettings(inferFromUrl));
+  const [settings, setSettings] = useState<ACPSettings>(() => getInitialSettings(inferFromUrl, initialSettings));
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [error, setError] = useState<string | null>(null);
   const [isShaking, setIsShaking] = useState(false);
@@ -95,6 +101,7 @@ export function ACPConnect({
   const contentRef = useRef<HTMLDivElement>(null);
   const hasAutoCollapsedRef = useRef(false);
   const pendingAutoConnectRef = useRef(false);
+  const hasAttemptedInitialAutoConnectRef = useRef(false);
   // Store initial settings in a ref to avoid eslint warning about empty deps
   const initialSettingsRef = useRef<ACPSettings>(settings);
 
@@ -232,6 +239,14 @@ export function ACPConnect({
       onExpandedChange(true);
     }
   }, [client, connectionState, onExpandedChange]);
+
+  useEffect(() => {
+    if (!autoConnect || hasAttemptedInitialAutoConnectRef.current) return;
+    if (!client || connectionState !== "disconnected") return;
+
+    hasAttemptedInitialAutoConnectRef.current = true;
+    handleConnect();
+  }, [autoConnect, client, connectionState, handleConnect]);
 
   const handleDisconnect = useCallback(() => {
     client?.disconnect();

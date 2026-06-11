@@ -1,4 +1,4 @@
-import { agentTasksEndpointFromSettings, buildBrowserAgentTaskRequest, buildViewFeedbackRequest, contextChatEndpointFromSettings, contextIngestEndpointFromSettings, contextViewUrlFromSettings, contextViewsEndpointFromSettings, feedbackEndpointFromSettings, viewIdsFromAgentTaskResponse, viewIdsFromProcessedIngestResponse } from "./agent-task.js";
+import { agentTasksEndpointFromSettings, buildBrowserAgentTaskRequest, buildViewFeedbackRequest, contextChatEndpointFromSettings, contextIngestEndpointFromSettings, contextViewUrlFromSettings, contextViewsEndpointFromSettings, feedbackEndpointFromSettings, viewIdsFromAgentTaskResponse, viewIdsFromProcessedIngestResponse, writingAssistEndpointFromSettings } from "./agent-task.js";
 
 const DEFAULT_SETTINGS = {
   endpoint: "http://localhost:3111/context/ingest",
@@ -21,6 +21,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const tabState = new Map();
+let pendingSidepanelPrompt = null;
 
 chrome.runtime.onInstalled.addListener(async () => {
   const existing = await chrome.storage.local.get(Object.keys(DEFAULT_SETTINGS));
@@ -58,6 +59,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "context.capture.browser_attention") {
       const tab = sender.tab ?? await getActiveTab();
       const result = await sendBrowserAttention(message.payload, message.kind, tab);
+      sendResponse(result);
+      return;
+    }
+    if (message?.type === "sidepanel.explain.selection" || message?.type === "sidepanel.run.selection_action") {
+      const tab = sender.tab ?? await getActiveTab();
+      pendingSidepanelPrompt = {
+        type: "selection-action",
+        id: crypto.randomUUID(),
+        created_at: new Date().toISOString(),
+        action: message.action ?? {
+          id: "explain",
+          label: "Explain",
+          prompt: "Explain this selected text in plain language. Keep it concise, and mention the page context if it matters.",
+        },
+        payload: message.payload,
+      };
+      if (tab?.id) await chrome.sidePanel.open({ tabId: tab.id }).catch(() => undefined);
+      sendResponse({ ok: true, pending: pendingSidepanelPrompt });
+      return;
+    }
+    if (message?.type === "sidepanel.consume-pending-prompt") {
+      const pending = pendingSidepanelPrompt;
+      pendingSidepanelPrompt = null;
+      sendResponse({ ok: true, pending });
+      return;
+    }
+    if (message?.type === "context.explain.selection") {
+      const tab = sender.tab ?? await getActiveTab();
+      const result = await explainSelection(message.payload, tab);
       sendResponse(result);
       return;
     }
@@ -441,9 +471,11 @@ async function sendWritingInput(payload, tab) {
       writing_surface: "browser_inline",
     },
   };
-  const posted = await postRecord(record, { process: true, cascadeViews: true });
+  const posted = await postWritingAssistRecord(record);
   const writtenViews = viewIdsFromProcessedIngestResponse(posted.body);
-  const views = await fetchViews(writtenViews);
+  const views = Array.isArray(posted.body?.views)
+    ? posted.body.views.map(view => ({ ok: true, status: posted.status, body: { view }, view, endpoint: posted.endpoint }))
+    : await fetchViews(writtenViews);
   return {
     ok: Boolean(posted.ok && posted.body?.ok),
     schema: record.schema.name,
@@ -511,6 +543,25 @@ async function postRecord(record, options = {}) {
   }
 }
 
+async function postWritingAssistRecord(record) {
+  if (record.privacy?.retention === "do_not_store") {
+    return { ok: true, stored: false, reason: "privacy do_not_store", schema: record.schema.name };
+  }
+  const settings = await getSettings();
+  const endpoint = writingAssistEndpointFromSettings(settings);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(record),
+    });
+    const body = await response.json().catch(() => ({}));
+    return { ok: response.ok, status: response.status, body, schema: record.schema.name, endpoint };
+  } catch (error) {
+    return { ok: false, status: 0, error: error?.message ?? String(error), schema: record.schema.name, endpoint };
+  }
+}
+
 async function fetchViews(viewIds) {
   const settings = await getSettings();
   const views = [];
@@ -534,6 +585,7 @@ async function pollContextViews(message) {
     viewTypePrefix: message.viewTypePrefix,
     cursor: message.cursor,
     query: message.query,
+    sourceRecordId: message.sourceRecordId,
     limit: message.limit ?? 8,
     activeOnly: message.activeOnly ?? true,
   });
@@ -645,6 +697,56 @@ async function askCurrentPage(tab, message) {
     };
   } catch (error) {
     return { ok: false, stage: "context_chat", status: 0, endpoint: context.endpoint, started_at: context.started_at, error: error?.message ?? String(error) };
+  }
+}
+
+async function explainSelection(payload, tab) {
+  if (!payload?.selected_text) return { ok: false, error: "missing selected_text" };
+  const saved = await sendBrowserAttention({
+    ...payload,
+    explain_requested: true,
+    requested_at: new Date().toISOString(),
+  }, "selected", tab);
+  const settings = await getSettings();
+  const endpoint = contextChatEndpointFromSettings(settings);
+  const body = {
+    question: [
+      "Explain the selected text in plain language.",
+      "Keep it concise.",
+      "If the page context matters, mention the connection.",
+    ].join(" "),
+    page_context: {
+      title: payload.title || tab?.title,
+      url: payload.url || tab?.url,
+      domain: payload.domain,
+      selected_text: payload.selected_text,
+      text: payload.surrounding_text || payload.selected_text,
+    },
+    scope: {
+      domain: payload.domain,
+      app: "chrome",
+    },
+    limit: 6,
+  };
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const responseBody = await response.json().catch(() => ({}));
+    return {
+      ok: response.ok && Boolean(responseBody.ok),
+      status: response.status,
+      endpoint,
+      answer: responseBody.answer,
+      error: responseBody.error,
+      saved,
+      runtime: responseBody.runtime,
+      stop_reason: responseBody.stop_reason,
+    };
+  } catch (error) {
+    return { ok: false, status: 0, endpoint, error: error?.message ?? String(error), saved };
   }
 }
 

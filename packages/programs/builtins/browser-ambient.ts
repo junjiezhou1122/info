@@ -33,7 +33,7 @@ export const browserAmbientProgram: Program = {
   default_autonomy: "suggest",
   capabilities: BROWSER_AMBIENT_CAPABILITIES,
   applications: ["browser.popup", "browser.sidebar"],
-  produces: ["analysis.browser_agent_task", "analysis.browser_page"],
+  produces: ["analysis.browser_agent_task", "analysis.browser_page", "task.browser_ambient"],
   learns_from: ["feedback.analysis.opened", "feedback.analysis.dismissed", "behavior.browser.opened_source"],
 
   attention(signal: ContextSignal, store: ContextStore): AttentionDecision {
@@ -72,6 +72,30 @@ export const browserAmbientProgram: Program = {
   },
 
   async run({ signal, store, runCapability, buildContextPack }): Promise<ProgramRunResult> {
+    // Optional non-blocking path: if BROWSER_AMBIENT_FIRE_AND_FORGET=1, we
+    // kick off capability.agent_task.submit in the background and return a
+    // queued task view immediately. The side panel Tasks tab picks up the
+    // final analysis view on its 8s poll. The default path still awaits
+    // the agent task synchronously so downstream programs (project_ambient
+    // etc.) can consume the resulting analysis view in the same tick.
+    if (process.env.BROWSER_AMBIENT_FIRE_AND_FORGET === "1") {
+      const record = store.getRecord(signal.object_id);
+      const queued = record ? buildBrowserAmbientQueuedTaskView(record) : undefined;
+      void runCapability("capability.agent_task.submit", {
+        payload: { task: buildBrowserAgentTask(signal, buildContextPack) },
+      }).then((res) => {
+        if (!res.ok) console.warn("[browser-ambient] agent task did not complete:", res.reason);
+      }).catch((error) => console.error("[browser-ambient] agent task threw:", error));
+      if (queued) {
+        return {
+          ok: true,
+          reason: "queued browser ambient analysis; agent task running in background",
+          views: [queued],
+          diagnostics: { agent_task: { ok: true, reason: "fire_and_forget", written_views: [], diagnostics: { mode: "background" } }, fallback_used: false },
+        };
+      }
+    }
+
     const agentTaskResult = await runCapability("capability.agent_task.submit", {
       payload: {
         task: buildBrowserAgentTask(signal, buildContextPack),
@@ -329,6 +353,42 @@ function buildBrowserAmbientView(record: StoredContextRecord, classification: Br
     lossiness: "medium",
     privacy: { level: record.privacy?.level ?? "private", retention: "normal", allow_embedding: false, allow_llm_summary: true, allow_external_llm: false, allow_external_reader: false },
     metadata: { source_url: url, source_schema: record.schema.name, browser_ambient_version: "0.1.0", local_agent: agentOutput ? (agentMode ?? "claude-code") : "deterministic" },
+  };
+}
+
+// Stage 3 placeholder: written synchronously the moment the user (or the
+// silent dwell trigger) requests browser ambient. It tells the side panel
+// Tasks tab "I asked for this, work is happening" without waiting for the
+// agent task to finish. The full analysis view arrives later via the
+// capability.agent_task.submit fire-and-forget path.
+function buildBrowserAmbientQueuedTaskView(record: StoredContextRecord): ContextView {
+  const now = new Date().toISOString();
+  const url = record.content?.url ?? "";
+  const title = record.content?.title ?? (url || "Browser page");
+  const id = `task:browser-ambient:${stableKey(url || record.id)}`;
+  return {
+    id,
+    view_type: "task.browser_ambient",
+    title: `Ambient request: ${title}`.slice(0, 180),
+    summary: `Queued browser ambient analysis for ${url || "current page"}. Agent task running in background.`,
+    status: "candidate",
+    source_records: [record.id],
+    compiler: { id: "program.browser_ambient", version: "0.1.0", mode: "hybrid" },
+    purpose: "Marks a browser ambient analysis request that is in flight.",
+    scope: { domain: record.scope?.domain, app: record.scope?.app, project: record.scope?.project, project_path: record.scope?.project_path, time_range: { start: record.time?.observed_at, end: now }, plugin_id: "program.browser_ambient" },
+    content: {
+      page: { title, url, domain: record.scope?.domain },
+      source_url: url,
+      source_record_id: record.id,
+      status: "queued",
+      agent_task: "fire_and_forget",
+      requested_at: now,
+    },
+    confidence: 0.5,
+    stability: "session",
+    lossiness: "low",
+    privacy: { level: record.privacy?.level ?? "private", retention: "normal", allow_embedding: false, allow_llm_summary: true, allow_external_llm: false, allow_external_reader: false },
+    metadata: { source_url: url, source_schema: record.schema.name, browser_ambient_version: "0.1.0", task_kind: "browser_ambient_queued" },
   };
 }
 

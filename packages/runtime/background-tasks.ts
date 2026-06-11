@@ -1,11 +1,15 @@
 import { buildContextPack } from "@info/core";
 import { ContextStore } from "@info/core";
 import type { ContextView, StoredContextView } from "@info/core";
-import { createDefaultProgramRuntime } from "@info/programs/registry.js";
 import { signalFromObject } from "@info/programs/signals.js";
 import type { AutonomyProfile } from "@info/programs/types.js";
 
 const BACKGROUND_TASK_TYPES = ["task.background_research", "task.toolsmith_prototype"] as const;
+const AGENT_TASK_SUBMIT_FUNCTION = "capability::agent_task_submit";
+
+export type BackgroundTaskIiiClient = {
+  trigger(input: { function_id: string; payload?: unknown; action?: unknown }): Promise<unknown> | unknown;
+};
 
 export type AmbientBackgroundTaskResult = {
   ok: true;
@@ -24,11 +28,10 @@ export type AmbientBackgroundTaskResult = {
   }>;
 };
 
-export async function processAmbientBackgroundTasks(options: { limit?: number; write?: boolean } = {}, store = new ContextStore()): Promise<AmbientBackgroundTaskResult> {
+export async function processAmbientBackgroundTasks(options: { limit?: number; write?: boolean; iii?: BackgroundTaskIiiClient } = {}, store = new ContextStore()): Promise<AmbientBackgroundTaskResult> {
   const generatedAt = new Date().toISOString();
   const candidates = store.listViews({ view_types: [...BACKGROUND_TASK_TYPES], active_only: true, limit: options.limit ?? 8 })
     .filter(view => !taskAlreadyFinished(view));
-  const runtime = createDefaultProgramRuntime(store);
   const tasks: AmbientBackgroundTaskResult["tasks"] = [];
   const writtenViews: string[] = [];
 
@@ -41,13 +44,23 @@ export async function processAmbientBackgroundTasks(options: { limit?: number; w
     }
 
     const task = buildAgentTask(view, runtimeId, store);
-    const result = await runtime.runCapability("capability.agent_task.submit", {
-      signal: signalFromObject(view),
-      speed: "background",
-      autonomy: autonomyForTask(view),
-      dry_run: options.write === false,
-      payload: { task },
+    if (!options.iii) {
+      const reason = "iii runtime client missing for background task capability";
+      tasks.push({ task_view_id: view.id, task_view_type: view.view_type, status: "failed", reason, runtime: runtimeId, output_view_type: task.output_contract.view_type, written_views: [] });
+      continue;
+    }
+
+    const response = await options.iii.trigger({
+      function_id: AGENT_TASK_SUBMIT_FUNCTION,
+      payload: {
+        signal: signalFromObject(view),
+        speed: "background",
+        autonomy: autonomyForTask(view),
+        dry_run: options.write === false,
+        payload: { task },
+      },
     });
+    const result = unwrapCapabilityResult(response);
     const outputViewIds = result.written_views ?? [];
     writtenViews.push(...outputViewIds);
     const status = result.ok ? "completed" : "failed";
@@ -184,4 +197,14 @@ function stringValue(value: unknown): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function unwrapCapabilityResult(response: unknown): { ok?: boolean; reason?: string; written_views?: string[] } {
+  const body = isRecord(response) && isRecord(response.result) ? response.result : response;
+  if (!isRecord(body)) return { ok: false, reason: "invalid iii capability response" };
+  return {
+    ok: body.ok === true,
+    reason: typeof body.reason === "string" ? body.reason : undefined,
+    written_views: Array.isArray(body.written_views) ? body.written_views.filter((id): id is string => typeof id === "string") : [],
+  };
 }

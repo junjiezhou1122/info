@@ -6,10 +6,7 @@ import { ContextArtifactSchema, ContextConnectorSchema, ContextPackRequestSchema
 import { enrichWithJinaReader, shouldAutoEnrichBrowserRecord } from "@info/sensors";
 import { fetchScreenpipeFrameImage, fetchScreenpipeRecords } from "@info/sensors";
 import { aiSessionRefToRecord, locateAiSessions } from "@info/sensors";
-import { publicRuntimeSettings, runtimeSettings, runtimeStatus, runtimeTick, saveRuntimeSettings } from "@info/runtime/runtime.js";
-import { compileObservationTimeline } from "@info/views/timeline/timeline.js";
-import { compileActivityTimeline } from "@info/views/timeline/activity-timeline.js";
-import { compileProjectTimeline } from "@info/views/timeline/project-timeline.js";
+import { publicRuntimeSettings, runtimeSettings, runtimeStatus, saveRuntimeSettings } from "@info/runtime/runtime.js";
 import { activeThreadId, interpretThread } from "@info/views/threads/thread-interpreter.js";
 import { persistThreadEvidenceMap } from "@info/views/threads/thread-evidence.js";
 import { mergeThreads, splitThread } from "@info/views/threads/thread-ops.js";
@@ -18,6 +15,7 @@ import { listPluginManifests, readPluginManifest } from "@info/core";
 import { runLanguageLearningPlugin } from "@info/core";
 import { createDefaultProgramRuntime, listDefaultCapabilities, listDefaultPrograms } from "@info/programs/registry.js";
 import { signalFromObject } from "@info/programs/signals.js";
+import { III_CASCADE_FUNCTIONS, III_CONTEXT_FUNCTIONS, III_PROGRAM_FUNCTIONS, III_RUNTIME_FUNCTIONS, InProcessIiiRuntimeClient, VIEW_WORKER_FUNCTIONS, registerInfoIiiRuntime, type ContextIngestResult } from "@info/iii-runtime";
 import { ingestFeedback } from "@info/runtime/feedback.js";
 import { collectViewProvenance } from "@info/runtime/view-provenance.js";
 import { filterViewsByQuery } from "@info/core";
@@ -31,7 +29,7 @@ import {
   send, sendBytes, stringValue, summarizeViewForList, viewListCandidateLimit,
 } from "./http-util.js";
 import {
-  cascadeDepth, cascadeGeneratedViews, contextQueryFromPackRequest, runClaudeAcpChat,
+  cascadeDepth, contextQueryFromPackRequest, runClaudeAcpChat,
   summarizePackForChat, withDefaultAgentTaskContextPack, agentTaskOutputViewType,
   type ContextChatHttpBody,
 } from "./agent-task-http.js";
@@ -83,17 +81,15 @@ export function createContextHttpHandler(store: ContextStore) {
         if (!allowed.ok) return send(res, 403, { ok: false, error: allowed.error, plugin_id: pluginParam, plugin_loaded: Boolean(plugin) });
       }
       if (input.privacy?.retention === "do_not_store") return send(res, 202, { ok: true, stored: false });
-      const ingest = store.insertRecordWithDedupe(input);
+      const shouldProcess = url.searchParams.get("process") === "true";
+      const ingest = await runIiiHttpIngest(store, {
+        record: input,
+        cascade: shouldProcess,
+        max_depth: cascadeDepth(url, undefined) + 1,
+        context_plugin_id: pluginParam,
+      });
       const record = ingest.record;
       if (!record) return send(res, 500, { ok: false, error: "ingest failed" });
-      store.appendRuntimeEvent({
-        event_type: ingest.deduped ? "record_deduped" : "record_ingested",
-        actor: input.source.type === "browser" || input.source.type === "screenpipe" ? "connector" : "user",
-        status: "completed",
-        subject_type: "record",
-        subject_id: record.id,
-        payload: { schema: input.schema.name, source: input.source, title: input.content?.title, duplicate_of: ingest.duplicate_of, reason: ingest.reason },
-      });
       if (!ingest.deduped && shouldAutoEnrichBrowserRecord(input)) {
         enrichWithJinaReader(store, record).catch((error) => {
           console.error("[reader-enrichment] failed", error);
@@ -109,23 +105,72 @@ export function createContextHttpHandler(store: ContextStore) {
         plugin_id: pluginParam ?? undefined,
         plugin_loaded: pluginParam ? Boolean(plugin) : undefined,
       };
-      if (url.searchParams.get("process") !== "true" || ingest.deduped) return send(res, ingest.deduped ? 200 : 201, base);
-      const runtime = createDefaultProgramRuntime(store);
-      const processing = await runtime.processObject(record, { context_plugin_id: pluginParam });
-      if (url.searchParams.get("cascade_views") !== "true") return send(res, 201, { ...base, processing });
-
-      const generatedViewIds = [...new Set([
-        ...processing.runs.flatMap(run => run.written_views),
-        ...store.listViews({ source_record_id: record.id }).map(view => view.id),
-      ])];
-      const cascade_processing = await cascadeGeneratedViews({
-        runtime,
-        store,
-        viewIds: generatedViewIds,
-        contextPluginId: pluginParam,
-        maxDepth: cascadeDepth(url, undefined),
+      if (!shouldProcess || ingest.deduped) return send(res, ingest.deduped ? 200 : 201, base);
+      const compatible = httpIngestProcessingPayload(ingest.cascade);
+      return send(res, 201, {
+        ...base,
+        processing: compatible.processing,
+        cascade_processing: url.searchParams.get("cascade_views") === "true" ? compatible.cascade_processing : undefined,
+        iii_processing: ingest.cascade,
       });
-      return send(res, 201, { ...base, processing, cascade_processing });
+    }
+
+    if (req.method === "POST" && url.pathname === "/writing/assist") {
+      const parsed = ContextRecordSchema.safeParse(await readJson(req));
+      if (!parsed.success) return send(res, 400, { ok: false, error: parsed.error.flatten() });
+      if (parsed.data.schema.name !== "observation.editor.text_changed") {
+        return send(res, 400, { ok: false, error: "writing assist requires observation.editor.text_changed" });
+      }
+      const schemaError = recordSchemaIngestError(parsed.data.schema.name);
+      if (schemaError) return send(res, 400, { ok: false, error: schemaError });
+      const input = sanitizeHttpIngestRecord(store.withConnectorDefaults(parsed.data));
+      if (input.privacy?.retention === "do_not_store") return send(res, 202, { ok: true, stored: false });
+      const ingest = await runIiiHttpIngest(store, {
+        record: input,
+        cascade: false,
+        max_depth: 1,
+      });
+      const record = ingest.record;
+      if (!record) return send(res, 500, { ok: false, error: "ingest failed" });
+      if (ingest.deduped) {
+        const views = store.listViews({
+          view_types: ["draft.writing_continuation", "advice.writing_assist"],
+          source_record_id: record.id,
+          active_only: true,
+          limit: 4,
+        });
+        return send(res, 200, {
+          ok: true,
+          id: record.id,
+          record,
+          deduped: true,
+          duplicate_of: ingest.duplicate_of,
+          processing: { ok: true, generated_at: new Date().toISOString(), runs: [] },
+          written_views: views.map(view => view.id),
+          views,
+          fast_path: true,
+        });
+      }
+      const startedAt = Date.now();
+      const processing = await createDefaultProgramRuntime(store).processObject(record, {
+        program_id: "program.writing_ambient",
+        max_programs: 1,
+        speed: "glance",
+        autonomy: "suggest",
+      });
+      const writtenViewIds = [...new Set(processing.runs.flatMap(run => run.written_views ?? []))];
+      const views = writtenViewIds.map(id => store.getView(id)).filter((view): view is NonNullable<typeof view> => Boolean(view));
+      return send(res, 201, {
+        ok: true,
+        id: record.id,
+        record,
+        deduped: false,
+        processing,
+        written_views: writtenViewIds,
+        views,
+        fast_path: true,
+        elapsed_ms: Date.now() - startedAt,
+      });
     }
 
     if (req.method === "GET" && url.pathname === "/context/recent") {
@@ -476,7 +521,15 @@ export function createContextHttpHandler(store: ContextStore) {
       }
       const result = ingestFeedback(pluginParam ? { ...parsed.data, plugin_id: pluginParam } : parsed.data, store);
       if (url.searchParams.get("process") !== "true") return send(res, 201, { ...result, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
-      const processing = await createDefaultProgramRuntime(store).processObject(result.record);
+      const iii = await createLocalInfoIiiRuntime(store);
+      const programResult = await iii.trigger({
+        function_id: III_PROGRAM_FUNCTIONS.processRecord,
+        payload: {
+          record_id: result.record.id,
+          context_plugin_id: pluginParam,
+        },
+      }) as { result?: Record<string, unknown> };
+      const processing = programResult.result ?? programResult;
       return send(res, 201, { ...result, processing, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
     }
 
@@ -593,7 +646,6 @@ export function createContextHttpHandler(store: ContextStore) {
       const pluginParam = url.searchParams.get("plugin_id") ?? (typeof body.plugin_id === "string" ? body.plugin_id : undefined);
       const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
       if (pluginParam && !plugin) return send(res, 404, pluginNotFoundBody(pluginParam));
-      const runtime = createDefaultProgramRuntime(store);
       const record = body.record_id ? store.getRecord(String(body.record_id)) : undefined;
       const view = body.view_id ? store.getView(String(body.view_id)) : undefined;
       if (body.record_id && !record) return send(res, 404, { ok: false, error: "record not found" });
@@ -612,14 +664,21 @@ export function createContextHttpHandler(store: ContextStore) {
           : allowedView ?? filterRecordsForPlugin([object as StoredContextRecord], plugin)[0];
         if (!allowed) return send(res, 403, { ok: false, error: "plugin cannot access program process source", plugin_id: pluginParam, plugin_loaded: Boolean(plugin) });
       }
-      const result = await runtime.processObject(object, {
-        dry_run: Boolean(body.dry_run),
-        speed: body.speed,
-        autonomy: body.autonomy,
-        max_programs: body.max_programs,
-        program_id: body.program_id ?? body.programId,
-        context_plugin_id: pluginParam,
-      });
+      const iii = await createLocalInfoIiiRuntime(store);
+      const programResult = await iii.trigger({
+        function_id: "view_type" in object ? III_PROGRAM_FUNCTIONS.processView : III_PROGRAM_FUNCTIONS.processRecord,
+        payload: {
+          record_id: "schema" in object ? object.id : undefined,
+          view_id: "view_type" in object ? object.id : undefined,
+          dry_run: Boolean(body.dry_run),
+          speed: body.speed,
+          autonomy: body.autonomy,
+          max_programs: body.max_programs,
+          program_id: body.program_id ?? body.programId,
+          context_plugin_id: pluginParam,
+        },
+      }) as { result?: Record<string, unknown> };
+      const result = programResult.result ?? programResult;
       return send(res, 200, { ...result, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
     }
 
@@ -649,25 +708,39 @@ export function createContextHttpHandler(store: ContextStore) {
         const writePermission = canPluginWriteAgentTaskView(plugin, agentTaskOutputViewType(task));
         if (!writePermission.ok) return send(res, 403, { ok: false, error: writePermission.error, plugin_id: pluginParam, plugin_loaded: Boolean(plugin) });
       }
-      const runtime = createDefaultProgramRuntime(store);
-      const result = await runtime.runCapability("capability.agent_task.submit", {
-        signal,
-        autonomy: body.autonomy ?? "suggest",
-        speed: body.speed,
-        dry_run: Boolean(body.dry_run),
-        payload: { task },
-      });
+      const iii = await createLocalInfoIiiRuntime(store);
+      const capabilityResult = await iii.trigger({
+        function_id: III_PROGRAM_FUNCTIONS.agentTaskSubmit,
+        payload: {
+          signal,
+          autonomy: body.autonomy ?? "suggest",
+          speed: body.speed,
+          dry_run: Boolean(body.dry_run),
+          context_plugin_id: pluginParam,
+          payload: { task },
+        },
+      }) as { result?: any };
+      const result = capabilityResult.result ?? capabilityResult;
       if (!result.ok || url.searchParams.get("cascade_views") !== "true" || body.dry_run) {
         return send(res, result.ok ? 201 : 400, { ok: result.ok, result, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
       }
-      const cascade_processing = await cascadeGeneratedViews({
-        runtime,
-        store,
-        viewIds: result.written_views ?? [],
-        contextPluginId: pluginParam,
-        maxDepth: cascadeDepth(url, body),
+      const cascade = await iii.trigger({
+        function_id: III_CASCADE_FUNCTIONS.viewWritten,
+        payload: {
+          view_ids: result.written_views ?? [],
+          source_view_ids: result.written_views ?? [],
+          context_plugin_id: pluginParam,
+          max_depth: cascadeDepth(url, body),
+        },
+      }) as ContextIngestResult["cascade"];
+      return send(res, 201, {
+        ok: true,
+        result,
+        cascade_processing: httpIngestProcessingPayload(cascade, { includeDepthOne: true }).cascade_processing,
+        iii_processing: cascade,
+        plugin_id: pluginParam ?? undefined,
+        plugin_loaded: pluginParam ? Boolean(plugin) : undefined,
       });
-      return send(res, 201, { ok: true, result, cascade_processing, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
     }
 
 
@@ -683,7 +756,13 @@ export function createContextHttpHandler(store: ContextStore) {
         store.recent(contextRecordCandidateLimit({ limit, pluginScoped: true }), undefined, { minutes }),
         plugin,
       ).slice(0, limit) : undefined;
-      const result = compileObservationTimeline({ minutes, limit, write: body.write, records, pluginId: pluginParam }, store);
+      const result = await runIiiViewCompile(store, VIEW_WORKER_FUNCTIONS.observationTimeline, {
+        minutes,
+        limit,
+        write: body.write,
+        records,
+        plugin_id: pluginParam,
+      });
       return send(res, 200, { ...result, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
     }
 
@@ -703,24 +782,24 @@ export function createContextHttpHandler(store: ContextStore) {
       const runtimeEvents = pluginParam
         ? filterEventsForPlugin(store.listRuntimeEvents({ limit: runtimeEventCandidateLimit({ limit: eventLimit, pluginScoped: true }), timeWindow: { minutes } }), store, plugin).slice(0, eventLimit)
         : undefined;
-      const result = compileActivityTimeline({
+      const result = await runIiiViewCompile(store, VIEW_WORKER_FUNCTIONS.activityTimeline, {
         minutes,
         limit,
-        eventLimit,
-        bucketMinutes: body.bucket_minutes ?? body.bucketMinutes,
+        event_limit: eventLimit,
+        bucket_minutes: body.bucket_minutes ?? body.bucketMinutes,
         write: body.write,
-        includeRuntimeEvents: body.include_runtime_events ?? body.includeRuntimeEvents,
-        includeLowLevelScreenpipe: body.include_low_level_screenpipe ?? body.includeLowLevelScreenpipe,
+        include_runtime_events: body.include_runtime_events ?? body.includeRuntimeEvents,
+        include_low_level_screenpipe: body.include_low_level_screenpipe ?? body.includeLowLevelScreenpipe,
         dedupe: body.dedupe,
-        bucketItemLimit: body.bucket_item_limit ?? body.bucketItemLimit,
-        summarizeHeartbeats: body.summarize_heartbeats ?? body.summarizeHeartbeats,
-        sourceFilter: body.source_filter ?? body.sourceFilter,
-        mergeContinuous: body.merge_continuous ?? body.mergeContinuous,
-        mergeGapMinutes: body.merge_gap_minutes ?? body.mergeGapMinutes,
+        bucket_item_limit: body.bucket_item_limit ?? body.bucketItemLimit,
+        summarize_heartbeats: body.summarize_heartbeats ?? body.summarizeHeartbeats,
+        source_filter: body.source_filter ?? body.sourceFilter,
+        merge_continuous: body.merge_continuous ?? body.mergeContinuous,
+        merge_gap_minutes: body.merge_gap_minutes ?? body.mergeGapMinutes,
         records,
-        runtimeEvents,
-        pluginId: pluginParam,
-      }, store);
+        runtime_events: runtimeEvents,
+        plugin_id: pluginParam,
+      });
       return send(res, 200, { ...result, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
     }
 
@@ -740,23 +819,22 @@ export function createContextHttpHandler(store: ContextStore) {
       const runtimeEvents = pluginParam
         ? filterEventsForPlugin(store.listRuntimeEvents({ limit: runtimeEventCandidateLimit({ limit: eventLimit, pluginScoped: true }), timeWindow: { minutes } }), store, plugin).slice(0, eventLimit)
         : undefined;
-      const workThreadViews = pluginParam
+      const sourceViews = pluginParam
         ? filterViewsForPlugin(store.listViews({ view_types: ["work_thread"], limit: viewListCandidateLimit({ limit: 80, pluginScoped: true }), timeWindow: { minutes } }), store, plugin).slice(0, 80)
         : undefined;
-      const result = compileProjectTimeline({
-        projectPath: body.project_path ?? body.projectPath,
+      const result = await runIiiViewCompile(store, VIEW_WORKER_FUNCTIONS.projectTimeline, {
+        project_path: body.project_path ?? body.projectPath,
         project: body.project,
         minutes,
         limit,
-        eventLimit,
-        bucketMinutes: body.bucket_minutes ?? body.bucketMinutes,
+        event_limit: eventLimit,
+        bucket_minutes: body.bucket_minutes ?? body.bucketMinutes,
         write: body.write,
         records,
-        runtimeEvents,
-        workThreadViews,
-        includeStoredWorkThreads: pluginParam ? false : undefined,
-        pluginId: pluginParam,
-      }, store);
+        runtime_events: runtimeEvents,
+        source_views: sourceViews,
+        plugin_id: pluginParam,
+      });
       return send(res, 200, { ...result, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
     }
 
@@ -806,7 +884,10 @@ export function createContextHttpHandler(store: ContextStore) {
       const pluginParam = url.searchParams.get("plugin_id") ?? (typeof body.plugin_id === "string" ? body.plugin_id : undefined);
       const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
       if (pluginParam) return send(res, 403, { ok: false, error: "plugins cannot run runtime tick", plugin_id: pluginParam, plugin_loaded: Boolean(plugin) });
-      const result = await runtimeTick({
+      const iii = await createLocalInfoIiiRuntime(store);
+      const tick = await iii.trigger({
+        function_id: III_RUNTIME_FUNCTIONS.tick,
+        payload: {
         window_minutes: Number(body.window_minutes ?? body.window ?? 10),
         project_hints: Array.isArray(body.project_hints) ? body.project_hints : body.project ? [String(body.project)] : undefined,
         include_screenpipe: body.include_screenpipe,
@@ -832,7 +913,9 @@ export function createContextHttpHandler(store: ContextStore) {
         work_thread_view_minutes: body.work_thread_view_minutes,
         activity_timeline_minutes: body.activity_timeline_minutes,
         project_timeline_minutes: body.project_timeline_minutes,
-      }, store);
+        },
+      }) as { result?: any };
+      const result = tick.result ?? tick;
       store.appendRuntimeEvent({ event_type: "runtime_tick_completed", actor: "system", status: "completed", subject_type: "runtime", subject_id: "runtime_tick", related_threads: result.written_threads, related_records: result.evidence.written_records, payload: { active_workspace: result.active_workspace, evidence: result.evidence, candidate_count: result.candidate_threads.length } });
       return send(res, 200, result);
     }
@@ -922,6 +1005,84 @@ export function createContextHttpHandler(store: ContextStore) {
   };
 }
 
+async function runIiiHttpIngest(store: ContextStore, input: { record: ContextRecord; cascade: boolean; max_depth: number; context_plugin_id?: string }): Promise<ContextIngestResult> {
+  const iii = await createLocalInfoIiiRuntime(store);
+  return iii.trigger({
+    function_id: III_CONTEXT_FUNCTIONS.ingest,
+    payload: input,
+  }) as Promise<ContextIngestResult>;
+}
+
+async function runIiiViewCompile(store: ContextStore, functionId: string, payload: Record<string, unknown>) {
+  const iii = await createLocalInfoIiiRuntime(store);
+  const result = await iii.trigger({ function_id: functionId, payload }) as {
+    ok?: boolean;
+    views?: Array<Record<string, unknown>>;
+    diagnostics?: Record<string, unknown>;
+  };
+  const view = result.views?.[0];
+  return {
+    ok: result.ok === true,
+    view,
+    records_used: numberValue(result.diagnostics?.records_used),
+    events_used: numberValue(result.diagnostics?.events_used),
+    buckets: Array.isArray((view?.content as Record<string, unknown> | undefined)?.buckets)
+      ? (view?.content as Record<string, unknown>).buckets
+      : [],
+    work_threads: Array.isArray((view?.content as Record<string, unknown> | undefined)?.work_threads)
+      ? (view?.content as Record<string, unknown>).work_threads
+      : undefined,
+    iii_processing: result,
+  };
+}
+
+async function createLocalInfoIiiRuntime(store: ContextStore): Promise<InProcessIiiRuntimeClient> {
+  const iii = new InProcessIiiRuntimeClient();
+  await registerInfoIiiRuntime(iii, { store, workerName: "info-http-runtime" });
+  return iii;
+}
+
+function httpIngestProcessingPayload(cascade: ContextIngestResult["cascade"], options: { includeDepthOne?: boolean } = {}): {
+  processing: Record<string, unknown>;
+  cascade_processing: Array<Record<string, unknown>>;
+} {
+  const programResults = (cascade?.steps ?? [])
+    .map(step => (step.raw_result as { result?: Record<string, unknown> } | undefined)?.result)
+    .filter((result): result is Record<string, unknown> => Boolean(result));
+  const primary = programResults[0] ?? {
+    ok: true,
+    generated_at: cascade?.generated_at ?? new Date().toISOString(),
+    decisions: [],
+    runs: [],
+    diagnostics: { runtime: "@info/iii-runtime", mode: cascade?.mode },
+  };
+  const depthOffset = options.includeDepthOne ? 0 : 1;
+  const cascadeProcessing = (cascade?.steps ?? [])
+    .filter(step => options.includeDepthOne ? step.depth >= 1 : step.depth > 1)
+    .map(step => {
+      const result = (step.raw_result as { result?: Record<string, unknown> } | undefined)?.result;
+      const cascadeDepth = step.depth - depthOffset;
+      if (result) return { ...result, cascade_depth: cascadeDepth, iii_function_id: step.function_id };
+      return {
+        ok: true,
+        generated_at: cascade?.generated_at,
+        cascade_depth: cascadeDepth,
+        iii_function_id: step.function_id,
+        runs: step.result?.views_written?.length
+          ? [{ program_id: step.function_id, written_views: step.result.views_written }]
+          : [],
+        diagnostics: step.result?.diagnostics ?? {},
+      };
+    });
+  return {
+    processing: { ...primary, iii_cascade: cascade },
+    cascade_processing: cascadeProcessing,
+  };
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
+}
 
 export function createContextHttpServer(store = new ContextStore()) {
   return createServer(createContextHttpHandler(store));

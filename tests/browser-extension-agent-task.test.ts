@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { DEFAULT_RELATED_VIEW_TYPES, DEFAULT_VIEW_FILTERS, agentTasksEndpointFromSettings, buildBrowserAgentTaskRequest, buildViewFeedbackRequest, buildViewQueryFromTab, contextChatEndpointFromSettings, contextIngestEndpointFromSettings, contextViewUrlFromSettings, contextViewsEndpointFromSettings, feedbackEndpointFromSettings, feedbackTargetFromInput, formatAmbientViewResult, formatViewSubscriptionResult, selectedViewFromInput, selectedViewIdFromInput, viewIdsFromAgentTaskResponse, viewIdsFromProcessedIngestResponse, viewKeyPoints, viewSummaryText } from "../apps/browser-extension/agent-task.js";
+import { DEFAULT_RELATED_VIEW_TYPES, DEFAULT_VIEW_FILTERS, agentTasksEndpointFromSettings, buildBrowserAgentTaskRequest, buildViewFeedbackRequest, buildViewQueryFromTab, contextChatEndpointFromSettings, contextIngestEndpointFromSettings, contextViewUrlFromSettings, contextViewsEndpointFromSettings, feedbackEndpointFromSettings, feedbackTargetFromInput, formatAmbientViewResult, formatViewSubscriptionResult, selectedViewFromInput, selectedViewIdFromInput, viewIdsFromAgentTaskResponse, viewIdsFromProcessedIngestResponse, viewKeyPoints, viewSummaryText, writingAssistEndpointFromSettings } from "../apps/browser-extension/agent-task.js";
 
 test("Browser ambient save button posts an Observation into Program processing", () => {
   assert.equal(
@@ -53,6 +53,13 @@ test("Browser ambient can derive exact View URLs from the ingest endpoint", () =
   assert.equal(
     contextViewUrlFromSettings({ endpoint: "http://127.0.0.1:3111/context/ingest" }, "analysis:browser:123"),
     "http://127.0.0.1:3111/context/views/analysis%3Abrowser%3A123",
+  );
+});
+
+test("Browser ambient can derive the fast writing assist endpoint", () => {
+  assert.equal(
+    writingAssistEndpointFromSettings({ endpoint: "http://127.0.0.1:3111/context/ingest?process=true" }),
+    "http://127.0.0.1:3111/writing/assist",
   );
 });
 
@@ -120,13 +127,35 @@ test("Browser popup can narrow to writing assist Views", () => {
   );
 });
 
+test("Browser ambient can query Views by source record id", () => {
+  assert.equal(
+    contextViewsEndpointFromSettings(
+      { endpoint: "http://127.0.0.1:3111/context/ingest" },
+      {
+        viewTypes: ["advice.writing_assist", "draft.writing_continuation"],
+        sourceRecordId: "record:writing-input",
+        limit: 4,
+        activeOnly: true,
+      },
+    ),
+    "http://127.0.0.1:3111/context/views?limit=4&view_types=advice.writing_assist%2Cdraft.writing_continuation&active_only=true&source_record_id=record%3Awriting-input",
+  );
+});
+
 test("Browser content script captures writing input and renders inline writing assist", () => {
   const background = readFileSync("apps/browser-extension/background.js", "utf8");
   const content = readFileSync("apps/browser-extension/content.js", "utf8");
 
   assert.match(content, /context\.capture\.writing_input/);
   assert.match(content, /document\.addEventListener\("input"/);
+  assert.match(content, /document\.addEventListener\("focusin"/);
+  assert.match(content, /document\.addEventListener\("keyup"/);
+  assert.match(content, /document\.addEventListener\("compositionend"/);
   assert.match(content, /id = "info-writing-assist"/);
+  assert.match(content, /showWritingIdle/);
+  assert.match(content, /showWritingPending/);
+  assert.match(content, /showWritingError/);
+  assert.match(content, /editablePositionRect/);
   assert.match(content, /insertDraft/);
   assert.match(content, /submitWritingFeedback/);
   assert.match(content, /feedbackType:\s*"analysis\.useful"/);
@@ -134,11 +163,165 @@ test("Browser content script captures writing input and renders inline writing a
   assert.match(content, /feedbackType:\s*"output\.edited"/);
   assert.match(content, /observeInsertedDraftEdit/);
   assert.match(content, /rememberInsertedDraftForEdit/);
+  assert.match(content, /focusedWritingText/);
+  assert.match(content, /full_text/);
+  assert.match(content, /pollWritingAssist/);
+  assert.match(content, /sourceRecordId/);
+  assert.match(content, /WRITING_ASSIST_POLL_ATTEMPTS\s*=\s*45/);
   assert.match(content, /applicationId:\s*"editor\.inline_assist"/);
   assert.match(background, /observation\.editor\.text_changed/);
-  assert.match(background, /postRecord\(record, \{ process: true, cascadeViews: true \}\)/);
+  assert.match(background, /postWritingAssistRecord\(record\)/);
+  assert.match(background, /writingAssistEndpointFromSettings/);
   assert.match(background, /viewIdsFromProcessedIngestResponse\(posted\.body\)/);
+  assert.match(background, /sourceRecordId:\s*message\.sourceRecordId/);
   assert.match(background, /applicationId:\s*message\.applicationId \|\| "browser\.popup"/);
+});
+
+test("Browser content script shows selection Explain Save toolbar", () => {
+  const background = readFileSync("apps/browser-extension/background.js", "utf8");
+  const content = readFileSync("apps/browser-extension/content.js", "utf8");
+
+  assert.match(content, /id = "info-selection-toolbar"/);
+  assert.match(content, /showSelectionToolbar/);
+  assert.match(content, /selectionRect/);
+  assert.match(content, /positionSelectionToolbar/);
+  assert.match(content, /Explain/);
+  assert.match(content, /Translate/);
+  assert.match(content, /Save/);
+  assert.match(content, /selectionActions/);
+  assert.match(content, /selectionActions"\)/);
+  assert.match(content, /context\.capture\.browser_attention/);
+  assert.match(content, /sidepanel\.run\.selection_action/);
+  assert.match(content, /showSelectionStatus\("Opening Chat\.\.\."\)/);
+  assert.match(content, /Sent to Chat/);
+  assert.match(content, /surrounding_text/);
+  assert.match(background, /context\.explain\.selection/);
+  assert.match(background, /async function explainSelection/);
+  assert.match(background, /contextChatEndpointFromSettings/);
+  assert.match(background, /sendBrowserAttention\(\{[\s\S]+explain_requested:\s*true/);
+});
+
+test("Chrome ACP extension carries browser observations and inline writing assist", () => {
+  const manifest = readFileSync("apps/chrome-acp/packages/chrome-extension/manifest.json", "utf8");
+  const background = readFileSync("apps/chrome-acp/packages/chrome-extension/src/background.ts", "utf8");
+  const capture = readFileSync("apps/chrome-acp/packages/chrome-extension/src/lib/info-capture.ts", "utf8");
+  const content = readFileSync("apps/chrome-acp/packages/chrome-extension/src/content.ts", "utf8");
+  const build = readFileSync("apps/chrome-acp/packages/chrome-extension/build.ts", "utf8");
+
+  assert.match(manifest, /"content_scripts"/);
+  assert.match(manifest, /"dist\/content\.js"/);
+  assert.match(manifest, /"storage"/);
+  assert.match(build, /path\.resolve\("src", "content\.ts"\)/);
+  assert.match(background, /startInfoCapture\(\)/);
+  assert.match(background, /handleInfoCaptureMessage/);
+  assert.match(background, /sidepanel\.explain\.selection/);
+  assert.match(background, /sidepanel\.run\.selection_action/);
+  assert.match(background, /sidepanel\.consume-pending-prompt/);
+  assert.match(capture, /observation\.browser_page_visit/);
+  assert.match(capture, /observation\.browser_page_snapshot/);
+  assert.match(capture, /observation\.browser_text_selected/);
+  assert.match(capture, /observation\.browser_text_copied/);
+  assert.match(capture, /observation\.editor\.text_changed/);
+  assert.match(capture, /postRecord\(record, \{ process: true, cascadeViews: true \}\)/);
+  assert.match(content, /context\.capture\.writing_input/);
+  assert.match(content, /document\.addEventListener\("input"/);
+  assert.match(content, /document\.addEventListener\("focusin"/);
+  assert.match(content, /document\.addEventListener\("keyup"/);
+  assert.match(content, /document\.addEventListener\("compositionend"/);
+  assert.match(content, /id = "info-writing-assist"/);
+  assert.match(content, /showWritingIdle/);
+  assert.match(content, /showWritingPending/);
+  assert.match(content, /showWritingError/);
+  assert.match(content, /editablePositionRect/);
+  assert.match(content, /Insert/);
+  assert.match(content, /Dismiss/);
+  assert.match(content, /feedbackType:\s*"analysis\.useful"/);
+  assert.match(content, /feedbackType:\s*"analysis\.dismissed"/);
+  assert.match(content, /feedbackType:\s*"output\.edited"/);
+  assert.match(content, /focusedWritingText/);
+  assert.match(content, /full_text/);
+  assert.match(content, /pollWritingAssist/);
+  assert.match(content, /sourceRecordId/);
+  assert.match(content, /WRITING_ASSIST_POLL_ATTEMPTS\s*=\s*45/);
+  assert.match(capture, /poll-context-views/);
+  assert.match(capture, /postWritingAssistRecord\(record\)/);
+  assert.match(capture, /writingAssistEndpoint/);
+  assert.match(capture, /sourceRecordId:\s*message\.sourceRecordId/);
+});
+
+test("Chrome ACP content script shows selection Explain Save toolbar", () => {
+  const capture = readFileSync("apps/chrome-acp/packages/chrome-extension/src/lib/info-capture.ts", "utf8");
+  const content = readFileSync("apps/chrome-acp/packages/chrome-extension/src/content.ts", "utf8");
+
+  assert.match(content, /id = "info-selection-toolbar"/);
+  assert.match(content, /showSelectionToolbar/);
+  assert.match(content, /selectionRect/);
+  assert.match(content, /positionSelectionToolbar/);
+  assert.match(content, /Explain/);
+  assert.match(content, /Translate/);
+  assert.match(content, /Save/);
+  assert.match(content, /selectionActions/);
+  assert.match(content, /selectionActions"\)/);
+  assert.match(content, /context\.capture\.browser_attention/);
+  assert.match(content, /sidepanel\.run\.selection_action/);
+  assert.match(content, /showSelectionStatus\("Opening Chat\.\.\."\)/);
+  assert.match(content, /Sent to Chat/);
+  assert.match(content, /surrounding_text/);
+  assert.match(capture, /context\.explain\.selection/);
+  assert.match(capture, /async function explainSelection/);
+  assert.match(capture, /contextChatEndpoint/);
+  assert.match(capture, /sendBrowserAttention\(\{[\s\S]+explain_requested:\s*true/);
+});
+
+test("Chrome ACP sidepanel can consume selected text prompts into Chat", () => {
+  const app = readFileSync("apps/chrome-acp/packages/chrome-extension/src/App.tsx", "utf8");
+  const main = readFileSync("apps/chrome-acp/packages/shared/src/components/ACPMain.tsx", "utf8");
+  const chat = readFileSync("apps/chrome-acp/packages/shared/src/components/ChatInterface.tsx", "utf8");
+
+  assert.match(app, /sidepanel\.consume-pending-prompt/);
+  assert.match(app, /Explain this selected text in plain language/);
+  assert.match(app, /action\.prompt/);
+  assert.match(app, /setActiveTabOverride\("chat"\)/);
+  assert.match(main, /activeTabOverride/);
+  assert.match(main, /incomingPrompt/);
+  assert.match(chat, /incomingPrompt/);
+  assert.match(chat, /onIncomingPromptConsumed/);
+  assert.match(chat, /handleSubmit\(\{ text: prompt, files: \[\] \}\)/);
+});
+
+test("Chrome ACP Tasks and Language tabs render readable ambient state", () => {
+  const tasks = readFileSync("apps/chrome-acp/packages/chrome-extension/src/components/TasksView.tsx", "utf8");
+  const language = readFileSync("apps/chrome-acp/packages/chrome-extension/src/components/LanguageReviewView.tsx", "utf8");
+  const content = readFileSync("apps/chrome-acp/packages/chrome-extension/src/content.ts", "utf8");
+  const background = readFileSync("apps/chrome-acp/packages/chrome-extension/src/background.ts", "utf8");
+
+  assert.match(tasks, /keyPointsOf/);
+  assert.match(tasks, /detailRowsOf/);
+  assert.match(tasks, /Raw view/);
+  assert.match(tasks, /break-words/);
+  assert.doesNotMatch(tasks, /break-all/);
+  assert.match(language, /Recent caption segments/);
+  assert.match(language, /language\.recent_caption_gaps/);
+  assert.match(language, /loadRecentGaps/);
+  assert.match(language, /Live now/);
+  assert.match(language, /current_caption/);
+  assert.match(language, /recentCaptionLines/);
+  assert.match(language, /chrome\.storage\?\.onChanged\?\.addListener/);
+  assert.match(content, /YT_RECENT_GAPS_KEY/);
+  assert.match(content, /rememberRecentCaptionGap/);
+  assert.match(content, /language\.caption_gap\.recent/);
+  assert.match(content, /ytApplyCaptionState/);
+  assert.match(content, /ytApplyPlaybackState/);
+  assert.match(content, /ytFinishCaptionFragment/);
+  assert.match(content, /ytSendGap/);
+  assert.match(content, /current_caption:\s*ytReadCaptionText\(\)/);
+  assert.match(content, /location\.hostname\.endsWith\("\.youtube\.com"\)/);
+  assert.match(content, /Plain C is YouTube's native subtitle shortcut/);
+  assert.match(content, /if \(!ytActive && ytIsWatchPage\(\)\) ytBind\(\)/);
+  assert.match(background, /RECENT_CAPTION_GAPS_KEY/);
+  assert.match(background, /language\.caption_gap\.recent/);
+  assert.match(background, /fragmentKey/);
+  assert.match(background, /chrome\.storage\?\.session\?\.set/);
 });
 
 test("Browser ambient builds a View query from current tab context", () => {

@@ -1,4 +1,5 @@
 import { ProgramRuntime } from "./runner.js";
+import type { ProgramRuntimeConfig } from "./runner.js";
 import type { ContextStore } from "@info/core";
 import { languageLearningProgram } from "./builtins/language-learning.js";
 import { browserAmbientExploreCapability, browserAmbientProgram } from "./builtins/browser-ambient.js";
@@ -9,21 +10,35 @@ import { dailySummaryProgram } from "./builtins/daily-summary.js";
 import { researchShadowProgram } from "./builtins/research-shadow.js";
 import { proactiveResearchProgram, toolsmithAmbientProgram, writingAmbientProgram } from "./builtins/proactive-ambient.js";
 import { agentTaskSubmitCapability } from "./capabilities/agent-task-submit.js";
+import type { Capability, Program } from "./types.js";
 
-export function createDefaultProgramRuntime(store?: ContextStore): ProgramRuntime {
-  return new ProgramRuntime(store)
-    .registerCapability(agentTaskSubmitCapability)
-    .registerCapability(browserAmbientExploreCapability)
-    .registerProgram(languageLearningProgram)
-    .registerProgram(browserAmbientProgram)
-    .registerProgram(researchShadowProgram)
-    .registerProgram(projectAmbientProgram)
-    .registerProgram(routingLearningProgram)
-    .registerProgram(feedbackLearningProgram)
-    .registerProgram(dailySummaryProgram)
-    .registerProgram(proactiveResearchProgram)
-    .registerProgram(writingAmbientProgram)
-    .registerProgram(toolsmithAmbientProgram);
+export function defaultProgramDefinitions(): Program[] {
+  return [
+    languageLearningProgram,
+    browserAmbientProgram,
+    researchShadowProgram,
+    projectAmbientProgram,
+    routingLearningProgram,
+    feedbackLearningProgram,
+    dailySummaryProgram,
+    proactiveResearchProgram,
+    writingAmbientProgram,
+    toolsmithAmbientProgram,
+  ];
+}
+
+export function defaultCapabilityDefinitions(): Capability[] {
+  return [
+    agentTaskSubmitCapability,
+    browserAmbientExploreCapability,
+  ];
+}
+
+export function createDefaultProgramRuntime(store?: ContextStore, config: ProgramRuntimeConfig = {}): ProgramRuntime {
+  const runtime = new ProgramRuntime(store, config);
+  for (const capability of defaultCapabilityDefinitions()) runtime.registerCapability(capability);
+  for (const program of defaultProgramDefinitions()) runtime.registerProgram(program);
+  return runtime;
 }
 
 export function listDefaultPrograms() {

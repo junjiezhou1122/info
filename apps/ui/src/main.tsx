@@ -12,6 +12,7 @@ const FALLBACK_VIEW_TYPE_ORDER = [
   "advice.research", "advice.writing_assist",
   "task.background_research", "draft.writing_continuation",
   "opportunity.tool", "task.toolsmith_prototype", "draft.tool_prototype", "tool.prototype_artifact",
+  "app.language.review_queue", "memory.language.difficult_segments",
 ];
 const AMBIENT_VIEW_TYPES = [
   "advice.research",
@@ -23,6 +24,8 @@ const AMBIENT_VIEW_TYPES = [
   "task.toolsmith_prototype",
   "draft.tool_prototype",
   "tool.prototype_artifact",
+  "app.language.review_queue",
+  "memory.language.difficult_segments",
 ];
 const VIEW_CATALOG_CACHE = new Map<string, ViewFamilyDefinition>();
 let VIEW_CATALOG_ORDER_CACHE: string[] = FALLBACK_VIEW_TYPE_ORDER;
@@ -265,6 +268,7 @@ function AmbientPanel({ onInspect }: { onInspect: (state: { view?: ContextViewSu
   const researchViews = sortedViews.filter(view => ["advice.research", "task.background_research", "brief.background_research"].includes(view.view_type));
   const writingViews = sortedViews.filter(view => ["advice.writing_assist", "draft.writing_continuation"].includes(view.view_type));
   const toolViews = sortedViews.filter(view => ["opportunity.tool", "task.toolsmith_prototype", "draft.tool_prototype", "tool.prototype_artifact"].includes(view.view_type));
+  const languageViews = sortedViews.filter(view => ["app.language.review_queue", "memory.language.difficult_segments"].includes(view.view_type));
   const pendingTasks = sortedViews.filter(view => view.view_type.startsWith("task.") && !taskProcessedStatus(view));
   const processedTasks = sortedViews.filter(view => taskProcessedStatus(view) === "completed");
 
@@ -432,6 +436,7 @@ function AmbientPanel({ onInspect }: { onInspect: (state: { view?: ContextViewSu
         <AmbientColumn title="Research" subtitle="background search" views={researchViews} selectedId={selectedSummary?.id} actionBusy={actionBusy} onSelect={setSelectedViewId} onFeedback={markFeedback} onCopy={copyDraft} empty={loading ? "Loading research..." : "No research suggestions yet."} />
         <AmbientColumn title="Writing" subtitle="inline drafts" views={writingViews} selectedId={selectedSummary?.id} actionBusy={actionBusy} onSelect={setSelectedViewId} onFeedback={markFeedback} onCopy={copyDraft} empty={loading ? "Loading writing..." : "No writing assists yet."} />
         <AmbientColumn title="Toolsmith" subtitle="workflow tools" views={toolViews} selectedId={selectedSummary?.id} actionBusy={actionBusy} onSelect={setSelectedViewId} onFeedback={markFeedback} onCopy={copyDraft} empty={loading ? "Loading tools..." : "No tool opportunities yet."} />
+        <AmbientColumn title="Language" subtitle="youtube review" views={languageViews} selectedId={selectedSummary?.id} actionBusy={actionBusy} onSelect={setSelectedViewId} onFeedback={markFeedback} onCopy={copyDraft} empty={loading ? "Loading language..." : "No review items yet."} />
       </div>
     </section>
   );

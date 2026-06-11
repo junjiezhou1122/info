@@ -359,7 +359,11 @@ test("Proactive Research queues background research when a project focus View ap
   }
 }));
 
-test("Writing Ambient does not surface scaffold writing advice by default", async () => withStore(async (store) => {
+test("Writing Ambient does not surface generated writing advice by default", async () => withStore(async (store) => {
+  const oldRuntime = process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME;
+  const oldScaffold = process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD;
+  delete process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME;
+  delete process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD;
   const record = store.insertRecord({
     id: "writing-ambient-record",
     schema: { name: "observation.editor.text_changed", version: 1 },
@@ -375,11 +379,145 @@ test("Writing Ambient does not surface scaffold writing advice by default", asyn
   });
   const runtime = new ProgramRuntime(store).registerProgram(writingAmbientProgram);
 
-  const result = await runtime.processObject(record, { program_id: "program.writing_ambient" });
+  try {
+    const result = await runtime.processObject(record, { program_id: "program.writing_ambient" });
 
-  assert.equal(result.runs[0].ok, true);
-  assert.deepEqual(result.runs[0].written_views, []);
-  assert.equal(result.runs[0].diagnostics?.generated, false);
+    assert.equal(result.runs[0].ok, true);
+    assert.deepEqual(result.runs[0].written_views, []);
+    assert.equal(result.runs[0].diagnostics?.generated, false);
+  } finally {
+    if (oldRuntime === undefined) delete process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME;
+    else process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME = oldRuntime;
+    if (oldScaffold === undefined) delete process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD;
+    else process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD = oldScaffold;
+  }
+}));
+
+test("Writing Ambient can run as an AI worker through AgentTask", async () => withStore(async (store) => {
+  const oldRuntime = process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME;
+  process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME = "local_mock";
+  try {
+    const record = store.insertRecord({
+      id: "writing-ambient-agent-record",
+      schema: { name: "observation.editor.text_changed", version: 1 },
+      source: { type: "local_app", connector: "metaflow-mac-companion" },
+      scope: { app: "com.kingsoft.wpsoffice.mac", project: "writing" },
+      content: {
+        title: "WPS document",
+        text: "我们正在设计一个本地办公写作助手，它可以观察用户当前正在输入的内容，然后给出一个轻量的 inline 建议。",
+      },
+      signal: { confidence: 0.9, importance: 0.78, status: "inbox" },
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+      payload: { writing_surface: "mac_accessibility" },
+    });
+    const runtime = new ProgramRuntime(store)
+      .registerCapability(agentTaskSubmitCapability)
+      .registerProgram(writingAmbientProgram);
+
+    const result = await runtime.processObject(record, { program_id: "program.writing_ambient" });
+    const draft = store.getView(result.runs[0].written_views.find(id => id.includes("draft.writing_continuation")) ?? "");
+
+    assert.equal(result.runs[0].ok, true);
+    assert.equal(result.runs[0].diagnostics?.generator, "agent_task");
+    assert.equal(result.runs[0].diagnostics?.runtime, "local_mock");
+    assert.ok(draft);
+    assert.equal(draft.view_type, "draft.writing_continuation");
+    assert.equal(draft.compiler?.id, "program.writing_ambient");
+    assert.equal(draft.content?.generated_by, "agent_task");
+    assert.equal(draft.content?.inline_safe, true);
+    assert.equal(typeof draft.content?.draft_text, "string");
+    assert.ok(Array.isArray(draft.content?.suggestions));
+  } finally {
+    if (oldRuntime === undefined) delete process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME;
+    else process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME = oldRuntime;
+  }
+}));
+
+test("Writing Ambient can generate inline Views with the configured LLM", async () => withStore(async (store) => {
+  const oldRuntime = process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME;
+  const oldScaffold = process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD;
+  const oldMock = process.env.LLM_MOCK_RESPONSE;
+  delete process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME;
+  delete process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD;
+  process.env.LLM_MOCK_RESPONSE = JSON.stringify({
+    suggestions: ["Make the claim concrete before adding more background.", "Keep the next sentence focused on the user-visible behavior."],
+    draft_text: "A practical next step is to show the suggestion as a small inline draft, then let the user insert, dismiss, or edit it.",
+    rationale: "The text is describing an interaction pattern and needs a concrete next step.",
+  });
+  try {
+    const record = store.insertRecord({
+      id: "writing-ambient-llm-record",
+      schema: { name: "observation.editor.text_changed", version: 1 },
+      source: { type: "browser", connector: "chrome-acp" },
+      scope: { app: "chrome", domain: "example.com" },
+      content: {
+        title: "Browser writing input",
+        url: "https://example.com/editor",
+        text: "我们现在想让网页输入框旁边出现一个真实 AI 生成的 inline writing 建议，而不是之前的 scaffold。",
+      },
+      signal: { confidence: 0.9, importance: 0.78, status: "inbox" },
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+    });
+    const runtime = new ProgramRuntime(store).registerProgram(writingAmbientProgram);
+
+    const result = await runtime.processObject(record, { program_id: "program.writing_ambient" });
+    const written = result.runs[0].written_views.map(id => store.getView(id)).filter(Boolean);
+    const advice = written.find(view => view?.view_type === "advice.writing_assist");
+    const draft = written.find(view => view?.view_type === "draft.writing_continuation");
+
+    assert.equal(result.runs[0].ok, true);
+    assert.equal(result.runs[0].diagnostics?.generator, "llm");
+    assert.ok(advice);
+    assert.ok(draft);
+    assert.equal(advice.compiler?.mode, "llm");
+    assert.equal(draft.compiler?.mode, "llm");
+    assert.equal(advice.content?.generated_by, "llm");
+    assert.equal(draft.content?.generated_by, "llm");
+    assert.equal(draft.content?.inline_safe, true);
+    assert.match(String(draft.content?.draft_text), /inline draft/);
+  } finally {
+    if (oldRuntime === undefined) delete process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME;
+    else process.env.WRITING_AMBIENT_AGENT_TASK_RUNTIME = oldRuntime;
+    if (oldScaffold === undefined) delete process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD;
+    else process.env.WRITING_AMBIENT_ENABLE_SCAFFOLD = oldScaffold;
+    if (oldMock === undefined) delete process.env.LLM_MOCK_RESPONSE;
+    else process.env.LLM_MOCK_RESPONSE = oldMock;
+  }
+}));
+
+test("Writing Ambient treats long CJK browser input as active writing", async () => withStore(async (store) => {
+  const oldMock = process.env.LLM_MOCK_RESPONSE;
+  process.env.LLM_MOCK_RESPONSE = JSON.stringify({
+    suggestions: ["把问题拆成学习机制、历史原因和个人理解三部分。"],
+    draft_text: "可以先从机器学习如何从数据中归纳模式说起，再讨论为什么大模型在语言和推理任务上表现得像是学到了知识。",
+    rationale: "中文输入没有空格，应该按字符信号判断写作状态。",
+  });
+  try {
+    const record = store.insertRecord({
+      id: "writing-ambient-cjk-browser-record",
+      schema: { name: "observation.editor.text_changed", version: 1 },
+      source: { type: "browser", connector: "chrome-acp" },
+      scope: { app: "chrome", domain: "www.google.com" },
+      content: {
+        title: "how to learn - Google Search",
+        url: "https://www.google.com/search?q=how+to+learn",
+        text: "什么是机器学习呢，我觉得这是需要思考的。以及ai为什么这么厉害，到底ai在这里吗学习到了啥 我们都是不知道的呀！也值得思考",
+      },
+      signal: { confidence: 0.86, importance: 0.78, status: "inbox" },
+      privacy: { level: "private", retention: "normal", allow_external_llm: true },
+    });
+    const runtime = new ProgramRuntime(store).registerProgram(writingAmbientProgram);
+
+    const result = await runtime.processObject(record, { program_id: "program.writing_ambient" });
+    const written = result.runs[0].written_views.map(id => store.getView(id)).filter(Boolean);
+
+    assert.equal(result.decisions[0].action, "run");
+    assert.equal(result.runs[0].diagnostics?.generator, "llm");
+    assert.ok(written.some(view => view?.view_type === "draft.writing_continuation"));
+  } finally {
+    if (oldMock === undefined) delete process.env.LLM_MOCK_RESPONSE;
+    else process.env.LLM_MOCK_RESPONSE = oldMock;
+  }
 }));
 
 test("Toolsmith Ambient proposes small tools and requests no-file-edit prototype drafts", async () => withStore(async (store) => {

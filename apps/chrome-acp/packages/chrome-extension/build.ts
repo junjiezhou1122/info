@@ -145,9 +145,12 @@ const result = await Bun.build({
 
 const end = performance.now();
 
-// Build background service worker separately
-const bgResult = await Bun.build({
-  entrypoints: [path.resolve("src", "background.ts")],
+// Build extension workers separately.
+const workerResult = await Bun.build({
+  entrypoints: [
+    path.resolve("src", "background.ts"),
+    path.resolve("src", "content.ts"),
+  ],
   outdir,
   minify: true,
   target: "browser",
@@ -157,7 +160,7 @@ const bgResult = await Bun.build({
   },
 });
 
-const allOutputs = [...result.outputs, ...bgResult.outputs];
+const allOutputs = [...result.outputs, ...workerResult.outputs];
 const outputTable = allOutputs.map(output => {
   return {
     File: path.relative(process.cwd(), output.path),

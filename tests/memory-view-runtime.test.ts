@@ -14,12 +14,20 @@ import {
   compileWorkflowViews,
   buildMemoryView,
 } from "../packages/views/_shared/memory-views.js";
-import { runtimeTick } from "@info/runtime/runtime.js";
+import type { RuntimeTickRequest, RuntimeTickResult } from "@info/runtime/runtime.js";
+import { III_RUNTIME_FUNCTIONS, InProcessIiiRuntimeClient, registerInfoIiiRuntime } from "@info/iii-runtime";
 
 function withStore(fn: (store: ContextStore) => Promise<void> | void) {
   const dir = mkdtempSync(join(tmpdir(), "info-memory-view-runtime-test-"));
   const store = new ContextStore(join(dir, "context.sqlite"));
   return Promise.resolve(fn(store)).finally(() => rmSync(dir, { recursive: true, force: true }));
+}
+
+async function runtimeTickViaIii(req: RuntimeTickRequest, store: ContextStore): Promise<RuntimeTickResult> {
+  const iii = new InProcessIiiRuntimeClient();
+  await registerInfoIiiRuntime(iii, { store, workerName: "info-memory-runtime-test" });
+  const response = await iii.trigger({ function_id: III_RUNTIME_FUNCTIONS.tick, payload: req }) as { result?: RuntimeTickResult };
+  return (response.result ?? response) as RuntimeTickResult;
 }
 
 test("ActivityView composes continuous page EvidenceViews through source_views", () => withStore((store) => {
@@ -408,7 +416,7 @@ test("runtimeTick compiles EvidenceView, ActivityView, and ProposalView families
     });
   }
 
-  const result = await runtimeTick({
+  const result = await runtimeTickViaIii({
     include_screenpipe: false,
     include_ai_sessions: false,
     include_git: false,

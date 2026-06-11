@@ -112,8 +112,9 @@ export function ThreadHistory({ client, onSelectSession }: ThreadHistoryProps) {
     setError(null);
 
     try {
-      const response = await client.listSessions();
-      setSessions(response.sessions);
+      const cwd = client.getSettings().cwd;
+      const response = await client.listSessions(cwd ? { cwd } : undefined);
+      setSessions(cwd ? response.sessions.filter((session) => session.cwd === cwd) : response.sessions);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -301,4 +302,3 @@ export function ThreadHistory({ client, onSelectSession }: ThreadHistoryProps) {
     </div>
   );
 }
-

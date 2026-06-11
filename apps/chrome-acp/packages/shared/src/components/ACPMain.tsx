@@ -1,11 +1,18 @@
-import { useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { FolderOpen, MessageSquare, History } from "lucide-react";
 import type { ACPClient } from "../acp/client";
 import type { AgentSessionInfo } from "../acp/types";
-import { ChatInterface } from "./ChatInterface";
+import { ChatInterface, type PromptContextPreview } from "./ChatInterface";
 import { FileExplorer } from "./FileExplorer";
 import { ThreadHistory } from "./ThreadHistory";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
+
+export interface ACPMainExtraTab {
+  id: string;
+  label: string;
+  icon?: React.ReactNode;
+  render: () => React.ReactNode;
+}
 
 interface ACPMainProps {
   client: ACPClient;
@@ -13,20 +20,47 @@ interface ACPMainProps {
   // the active tab's url/title/text excerpt so the agent can answer
   // "what is on this page" without first calling browser_tabs.
   prependContext?: () => Promise<string | null>;
+  previewContext?: () => Promise<PromptContextPreview | null>;
+  dangerouslyAutoApprovePermissions?: boolean;
+  incomingPrompt?: string | null;
+  onIncomingPromptConsumed?: () => void;
+  activeTabOverride?: string | null;
+  onActiveTabOverrideConsumed?: () => void;
+  // Optional extra tabs appended after the built-in chat/history/files tabs.
+  // The chrome extension uses this to mount a Tasks tab that reads from
+  // /context/views without coupling shared UI to chrome.* APIs.
+  extraTabs?: ACPMainExtraTab[];
 }
 
 const TAB_ORDER = ["chat", "history", "files"] as const;
-type TabValue = (typeof TAB_ORDER)[number];
+type BuiltinTabValue = (typeof TAB_ORDER)[number];
+type TabValue = BuiltinTabValue | (string & {});
 
 /**
  * Main container component that provides tabs for Chat, History, and File explorer.
  * Reference: Zed's AgentPanel with ThreadHistory integration
  * This component should be rendered after successful connection.
  */
-export function ACPMain({ client, prependContext }: ACPMainProps) {
+export function ACPMain({
+  client,
+  prependContext,
+  previewContext,
+  dangerouslyAutoApprovePermissions,
+  incomingPrompt,
+  onIncomingPromptConsumed,
+  activeTabOverride,
+  onActiveTabOverrideConsumed,
+  extraTabs,
+}: ACPMainProps) {
   const [activeTab, setActiveTab] = useState<TabValue>("chat");
   const touchStartX = useRef<number | null>(null);
   const touchStartY = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!activeTabOverride) return;
+    setActiveTab(activeTabOverride as TabValue);
+    onActiveTabOverrideConsumed?.();
+  }, [activeTabOverride, onActiveTabOverrideConsumed]);
 
   // Handle session selection from history
   // Reference: Zed's connection_view.rs line 616-631
@@ -116,6 +150,12 @@ export function ACPMain({ client, prependContext }: ACPMainProps) {
           <FolderOpen className="h-4 w-4" />
           <span>Files</span>
         </TabsTrigger>
+        {extraTabs?.map(tab => (
+          <TabsTrigger key={tab.id} value={tab.id} className="gap-1.5">
+            {tab.icon}
+            <span>{tab.label}</span>
+          </TabsTrigger>
+        ))}
       </TabsList>
 
       <div
@@ -124,7 +164,14 @@ export function ACPMain({ client, prependContext }: ACPMainProps) {
         onTouchEnd={handleTouchEnd}
       >
         <TabsContent value="chat" forceMount className="w-full h-full m-0 max-w-2xl mx-auto">
-          <ChatInterface client={client} prependContext={prependContext} />
+          <ChatInterface
+            client={client}
+            prependContext={prependContext}
+            previewContext={previewContext}
+            dangerouslyAutoApprovePermissions={dangerouslyAutoApprovePermissions}
+            incomingPrompt={incomingPrompt}
+            onIncomingPromptConsumed={onIncomingPromptConsumed}
+          />
         </TabsContent>
 
         <TabsContent value="history" forceMount className="flex flex-col h-full m-0 max-w-2xl mx-auto w-full">
@@ -134,6 +181,17 @@ export function ACPMain({ client, prependContext }: ACPMainProps) {
         <TabsContent value="files" forceMount className="flex flex-col h-full m-0">
           <FileExplorer client={client} />
         </TabsContent>
+        {extraTabs?.map(tab => (
+          <TabsContent
+            key={tab.id}
+            value={tab.id}
+            forceMount
+            hidden={activeTab !== tab.id}
+            className="flex flex-col h-full m-0 w-full"
+          >
+            {tab.render()}
+          </TabsContent>
+        ))}
       </div>
     </Tabs>
   );

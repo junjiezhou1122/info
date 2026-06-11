@@ -1,10 +1,11 @@
 import type { ContextBrokerPack, ContextQuery, ContextRecord, ContextView, StoredContextRecord, StoredContextView } from "@info/core";
-import { activeContextView } from "@info/core";
+import { activeContextView, chatCompletion, parseJsonObject } from "@info/core";
 import type { AttentionDecision, ContextSignal, Program, ProgramRunResult } from "../types.js";
 import { analysisTextFromView, keyPointsFromView } from "@info/core";
 
 const AGENT_TASK_CAPABILITY = "capability.agent_task.submit";
 const WRITING_SCAFFOLD_ENV = "WRITING_AMBIENT_ENABLE_SCAFFOLD";
+const WRITING_AGENT_TASK_RUNTIME_ENV = "WRITING_AMBIENT_AGENT_TASK_RUNTIME";
 
 const FOCUS_VIEW_TYPES = new Set([
   "thread.active_work",
@@ -105,6 +106,7 @@ export const writingAmbientProgram: Program = {
   version: "0.1.0",
   default_speed: "glance",
   default_autonomy: "suggest",
+  capabilities: [AGENT_TASK_CAPABILITY],
   applications: ["editor.inline_assist", "browser.sidebar", "project.cockpit"],
   produces: ["advice.writing_assist", "draft.writing_continuation"],
   learns_from: ["feedback.writing_suggestion.accepted", "feedback.writing_suggestion.dismissed", "feedback.writing_suggestion.edited"],
@@ -116,19 +118,62 @@ export const writingAmbientProgram: Program = {
     return { action: "defer", reason: `weak writing signal (${score})`, confidence: score };
   },
 
-  run({ signal, store }): ProgramRunResult {
+  async run({ signal, store, buildContextPack, runCapability }): Promise<ProgramRunResult> {
     const record = store.getRecord(signal.object_id);
     if (!record) return { ok: false, reason: `writing record not found: ${signal.object_id}` };
+    if (process.env[WRITING_AGENT_TASK_RUNTIME_ENV]) {
+      const task = buildWritingAgentTask(record, buildContextPack);
+      const agentResult = await runCapability(AGENT_TASK_CAPABILITY, { payload: { task } });
+      const agentViews = normalizeWritingAgentViews(agentResult.written_views ?? [], store, record);
+      return {
+        ok: agentResult.ok,
+        reason: agentResult.ok
+          ? `created AI writing assistance through ${task.runtime}`
+          : `writing AI worker failed: ${agentResult.reason}`,
+        views: agentViews,
+        diagnostics: {
+          writing_schema: record.schema.name,
+          generated: agentResult.ok,
+          generator: "agent_task",
+          runtime: task.runtime,
+          agent_task: {
+            ok: agentResult.ok,
+            reason: agentResult.reason,
+            written_views: agentResult.written_views,
+            diagnostics: agentResult.diagnostics,
+          },
+        },
+      };
+    }
+    if (writingDirectLlmConfigured()) {
+      const result = await generateWritingViewsWithLlm(record, buildContextPack);
+      return {
+        ok: result.ok,
+        reason: result.ok
+          ? `created AI writing assistance with ${result.model}`
+          : `writing LLM generation failed: ${result.reason}`,
+        views: result.views,
+        diagnostics: {
+          writing_schema: record.schema.name,
+          generated: result.ok,
+          generator: "llm",
+          model: result.model,
+          base_url: result.base_url,
+          reason: result.reason,
+        },
+      };
+    }
     if (!writingScaffoldEnabled()) {
       return {
         ok: true,
-        reason: `captured active writing but skipped generated advice; set ${WRITING_SCAFFOLD_ENV}=1 only for local scaffold demos`,
+        reason: `captured active writing but skipped generated advice; configure LLM_BASE_URL/LLM_MODEL for direct AI generation, set ${WRITING_AGENT_TASK_RUNTIME_ENV}=local_mock|claude_code|acp_stdio for an AgentTask worker, or ${WRITING_SCAFFOLD_ENV}=1 for local scaffold demos`,
         views: [],
         diagnostics: {
           writing_schema: record.schema.name,
           generated: false,
           generator: "none",
           scaffold_env: WRITING_SCAFFOLD_ENV,
+          agent_task_runtime_env: WRITING_AGENT_TASK_RUNTIME_ENV,
         },
       };
     }
@@ -286,6 +331,194 @@ function buildToolPrototypeAgentTask(source: StoredContextView, opportunity: Con
   };
 }
 
+function buildWritingAgentTask(record: StoredContextRecord, buildContextPack: BuildContextPack) {
+  const text = String(record.content?.text ?? "");
+  const topic = writingTopic(record);
+  const goal = [
+    "You are helping Info act as an ambient inline writing assistant.",
+    `Current writing surface: ${topic}.`,
+    "Return a short, safe writing suggestion or continuation for the user's current text.",
+    "Keep the answer concise enough for an inline bubble.",
+    "Do not claim to have edited the user's text. Do not include actions, tool plans, or file edits.",
+    "Prefer preserving the user's tone and language.",
+    "",
+    "Current text:",
+    text.slice(0, 4000),
+  ].join("\n");
+  const pack = buildContextPack({
+    goal,
+    mode: "thread",
+    include_records: true,
+    include_views: true,
+    allow_external_llm: true,
+    scope: record.scope,
+    limit: 8,
+  });
+  return {
+    runtime: process.env[WRITING_AGENT_TASK_RUNTIME_ENV] || process.env.AGENT_TASK_DEFAULT_RUNTIME || "claude_code",
+    goal,
+    context_pack: { markdown: pack.markdown, sources: pack.sources, diagnostics: pack.diagnostics },
+    constraints: {
+      write_policy: "views_only",
+      no_file_edits: true,
+      no_external_actions: true,
+      inline_only: true,
+      max_suggestion_count: 3,
+      max_draft_characters: 500,
+    },
+    output_contract: {
+      view_type: "draft.writing_continuation",
+      title: `AI writing draft: ${topic}`.slice(0, 180),
+      purpose: "Inline writing assistance candidate generated by an agent runtime.",
+    },
+  };
+}
+
+async function generateWritingViewsWithLlm(record: StoredContextRecord, buildContextPack: BuildContextPack): Promise<{
+  ok: boolean;
+  reason?: string;
+  views: ContextView[];
+  model?: string;
+  base_url?: string;
+}> {
+  if (record.privacy?.allow_external_llm === false) {
+    return { ok: false, reason: "privacy.external_llm_denied", views: [] };
+  }
+  const text = String(record.content?.text ?? "").trim();
+  if (text.length < 12) return { ok: false, reason: "writing text too short", views: [] };
+  const topic = writingTopic(record);
+  const pack = buildContextPack({
+    goal: `Inline writing assistance for ${topic}`,
+    mode: "thread",
+    include_records: true,
+    include_views: true,
+    allow_external_llm: true,
+    scope: record.scope,
+    limit: 6,
+  });
+  const prompt = [
+    "You are Info's inline writing assistant.",
+    "Return only JSON with this shape:",
+    `{"suggestions":["short suggestion 1","short suggestion 2"],"draft_text":"one concise continuation or rewrite","rationale":"brief reason"}`,
+    "Rules:",
+    "- Keep suggestions short enough for a small browser bubble.",
+    "- Preserve the user's language and tone.",
+    "- Do not say you edited the text.",
+    "- Do not include tool calls, markdown fences, file edits, or action plans.",
+    "- draft_text must be 500 characters or less.",
+    "",
+    "Current writing context:",
+    text.slice(0, 4000),
+    "",
+    "Relevant Info context:",
+    pack.markdown.slice(0, 4000),
+  ].join("\n");
+  const completion = await chatCompletion([
+    { role: "system", content: "You generate safe, concise inline writing suggestions as strict JSON." },
+    { role: "user", content: prompt },
+  ], {
+    temperature: 0.3,
+    max_tokens: 500,
+    allow_external: record.privacy?.allow_external_llm === true,
+  });
+  if (!completion.ok || !completion.content) {
+    return { ok: false, reason: completion.error ?? "empty completion", views: [], model: completion.model, base_url: completion.base_url };
+  }
+  const parsed = parseJsonObject(completion.content);
+  if (!parsed) {
+    return { ok: false, reason: "LLM returned non-JSON writing output", views: [], model: completion.model, base_url: completion.base_url };
+  }
+  const suggestions = stringArrayValue(parsed.suggestions).slice(0, 3);
+  const draft = stringValue(parsed.draft_text).slice(0, 500);
+  if (!draft && suggestions.length === 0) {
+    return { ok: false, reason: "LLM returned empty writing output", views: [], model: completion.model, base_url: completion.base_url };
+  }
+  const advice = buildLlmWritingAdviceView(record, {
+    suggestions,
+    rationale: stringValue(parsed.rationale).slice(0, 300),
+    model: completion.model,
+    base_url: completion.base_url,
+  });
+  const draftView = draft ? buildLlmWritingDraftView(record, advice, {
+    draft,
+    model: completion.model,
+    base_url: completion.base_url,
+  }) : undefined;
+  return {
+    ok: true,
+    views: draftView ? [advice, draftView] : [advice],
+    model: completion.model,
+    base_url: completion.base_url,
+  };
+}
+
+function buildLlmWritingAdviceView(record: StoredContextRecord, input: { suggestions: string[]; rationale?: string; model: string; base_url: string }): ContextView {
+  const topic = writingTopic(record);
+  const key = `${record.id}:${input.model}:${input.suggestions.join("|")}:${input.rationale ?? ""}`;
+  return {
+    id: `advice:writing-assist:llm:${stableKey(key)}`,
+    view_type: "advice.writing_assist",
+    title: `Writing assist: ${topic}`.slice(0, 180),
+    summary: input.suggestions[0] ?? input.rationale ?? "AI writing help is available.",
+    status: "candidate",
+    source_records: [record.id],
+    compiler: { id: "program.writing_ambient", version: "0.1.0", mode: "llm" },
+    purpose: "Inline-safe AI writing suggestion shown without changing the user's text.",
+    scope: withPlugin(record.scope, "program.writing_ambient"),
+    content: {
+      speed: "glance",
+      autonomy: "suggest",
+      topic,
+      suggestions: input.suggestions,
+      rationale: input.rationale,
+      source_schema: record.schema.name,
+      source_path: record.content?.path,
+      based_on_text_excerpt: String(record.content?.text ?? "").slice(0, 800),
+      generated_by: "llm",
+      model: input.model,
+      base_url: input.base_url,
+      inline_safe: true,
+    },
+    confidence: Math.max(0.56, Math.min(0.88, record.signal?.confidence ?? 0.7)),
+    stability: "ephemeral",
+    lossiness: "medium",
+    privacy: record.privacy,
+    validity: { stale_after: new Date(Date.now() + 10 * 60_000).toISOString() },
+  };
+}
+
+function buildLlmWritingDraftView(record: StoredContextRecord, advice: ContextView, input: { draft: string; model: string; base_url: string }): ContextView {
+  const topic = writingTopic(record);
+  return {
+    id: `draft:writing-continuation:llm:${stableKey(`${record.id}:${input.model}:${input.draft}`)}`,
+    view_type: "draft.writing_continuation",
+    title: `Writing draft: ${topic}`.slice(0, 180),
+    summary: input.draft,
+    status: "candidate",
+    source_records: [record.id],
+    source_views: [advice.id!],
+    compiler: { id: "program.writing_ambient", version: "0.1.0", mode: "llm" },
+    purpose: "Inline-safe AI draft that the user may insert, edit, or ignore.",
+    scope: withPlugin(record.scope, "program.writing_ambient"),
+    content: {
+      speed: "glance",
+      autonomy: "draft",
+      draft_text: input.draft,
+      based_on_text_excerpt: String(record.content?.text ?? "").slice(0, 800),
+      advice_view_id: advice.id,
+      generated_by: "llm",
+      model: input.model,
+      base_url: input.base_url,
+      inline_safe: true,
+    },
+    confidence: Math.max(0.5, Math.min(0.84, advice.confidence ?? 0.68)),
+    stability: "ephemeral",
+    lossiness: "high",
+    privacy: record.privacy,
+    validity: { stale_after: new Date(Date.now() + 10 * 60_000).toISOString() },
+  };
+}
+
 function buildBackgroundResearchTaskView(source: StoredContextView, goal: string): ContextView {
   const focus = focusText(source);
   const id = `task:background-research:${stableKey(`${source.id}:${focus}`)}`;
@@ -406,6 +639,40 @@ function buildWritingDraftView(record: StoredContextRecord, advice: ContextView)
   };
 }
 
+function normalizeWritingAgentViews(viewIds: string[], store: { getView(id: string): StoredContextView | undefined }, record: StoredContextRecord): ContextView[] {
+  return viewIds
+    .map(id => store.getView(id))
+    .filter((item): item is StoredContextView => Boolean(item))
+    .map(view => {
+      if (view.view_type !== "draft.writing_continuation" && view.view_type !== "advice.writing_assist") return view;
+      const agentOutput = objectValue(view.content?.agent_output);
+      const summary = String(agentOutput?.summary ?? view.summary ?? "").trim();
+      const keyPoints = Array.isArray(agentOutput?.key_points)
+        ? agentOutput.key_points.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        : [];
+      return {
+        ...view,
+        id: `${view.id}:inline`,
+        compiler: { id: "program.writing_ambient", version: "0.1.0", mode: "hybrid" },
+        source_records: [...new Set([...(view.source_records ?? []), record.id])],
+        source_views: view.source_views ?? [view.id],
+        content: {
+          ...(view.content ?? {}),
+          speed: "glance",
+          autonomy: "draft",
+          topic: writingTopic(record),
+          draft_text: String(view.content?.draft_text ?? summary).slice(0, 500),
+          suggestions: keyPoints.length ? keyPoints.slice(0, 3) : summary ? [summary] : [],
+          based_on_text_excerpt: String(record.content?.text ?? "").slice(0, 800),
+          generated_by: "agent_task",
+          inline_safe: true,
+        },
+        stability: "ephemeral",
+        validity: view.validity ?? { stale_after: new Date(Date.now() + 10 * 60_000).toISOString() },
+      };
+    });
+}
+
 function buildToolOpportunityView(source: StoredContextView): ContextView {
   const focus = focusText(source);
   const id = `opportunity:tool:${stableKey(`${source.id}:${focus}`)}`;
@@ -478,9 +745,14 @@ function focusScore(signal: ContextSignal, view: StoredContextView): number {
 function writingScore(signal: ContextSignal): number {
   let score = WRITING_SCHEMAS.has(signal.object_type) ? 0.35 : 0;
   const hay = [signal.title, signal.text_preview, signal.path, signal.app, ...(signal.keywords ?? [])].filter(Boolean).join(" ").toLowerCase();
+  if (signal.object_type === "observation.editor.text_changed") score += 0.22;
   if (/\.(md|mdx|txt|rst|docx?)$|readme|docs?|issue|proposal|draft|writing|note|design|spec/.test(hay)) score += 0.3;
-  const wordCount = (signal.text_preview ?? "").trim().split(/\s+/).filter(Boolean).length;
+  const preview = signal.text_preview ?? "";
+  const wordCount = preview.trim().split(/\s+/).filter(Boolean).length;
+  const cjkCount = (preview.match(/[\u4e00-\u9fff]/g) ?? []).length;
+  const letterCount = (preview.match(/[A-Za-z]/g) ?? []).length;
   if (wordCount >= 12) score += 0.2;
+  if (cjkCount >= 18 || letterCount >= 80) score += 0.2;
   if (signal.source === "editor" || /obsidian|notion|cursor|vscode|code|editor/.test(String(signal.app ?? "").toLowerCase())) score += 0.15;
   if (signal.confidence !== undefined) score += Math.min(0.1, Math.max(0, signal.confidence) * 0.1);
   return Number(Math.min(1, score).toFixed(3));
@@ -545,6 +817,10 @@ function writingScaffoldEnabled(): boolean {
   return process.env[WRITING_SCAFFOLD_ENV] === "1" || process.env[WRITING_SCAFFOLD_ENV] === "true";
 }
 
+function writingDirectLlmConfigured(): boolean {
+  return Boolean(process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || process.env.LLM_MOCK_RESPONSE);
+}
+
 function inferToolKind(source: StoredContextView): string {
   const hay = `${source.title ?? ""} ${source.summary ?? ""} ${analysisTextFromView(source) ?? ""}`.toLowerCase();
   if (/search|research|source|reader|firecrawl|jina/.test(hay)) return "research_helper";
@@ -560,6 +836,22 @@ function withPlugin(scope: ContextRecord["scope"] | undefined, plugin_id: string
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function stringArrayValue(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map(item => item.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
 }
 
 function stableKey(value: string): string {

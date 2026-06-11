@@ -1,6 +1,6 @@
 import { ContextStore } from "@info/core";
-import { runtimeStatus, runtimeTick, type RuntimeTickRequest } from "@info/runtime/runtime.js";
-import { compileObservationTimeline } from "@info/views/timeline/timeline.js";
+import { runtimeStatus, type RuntimeTickRequest, type RuntimeTickResult } from "@info/runtime/runtime.js";
+import { III_RUNTIME_FUNCTIONS, InProcessIiiRuntimeClient, VIEW_WORKER_FUNCTIONS, registerInfoIiiRuntime } from "@info/iii-runtime";
 import { interpretThread, shouldInterpretThread } from "@info/views/threads/thread-interpreter.js";
 
 function parseArgs(argv: string[]): RuntimeTickRequest & { interval_seconds?: number; once?: boolean; interpret?: boolean; interpret_force?: boolean; interpret_interval_seconds?: number; timeline?: boolean; timeline_interval_seconds?: number; timeline_minutes?: number; timeline_limit?: number } {
@@ -74,9 +74,16 @@ function parseArgs(argv: string[]): RuntimeTickRequest & { interval_seconds?: nu
 
 const { interval_seconds = 30, once, interpret, interpret_force, interpret_interval_seconds = 300, timeline, timeline_interval_seconds = 300, timeline_minutes = 24 * 60, timeline_limit = 200, ...tickReq } = parseArgs(process.argv.slice(2));
 const store = new ContextStore();
+const iii = new InProcessIiiRuntimeClient();
+await registerInfoIiiRuntime(iii, { store, workerName: "info-daemon-runtime" });
+
+async function runtimeTickViaIii(req: RuntimeTickRequest): Promise<RuntimeTickResult> {
+  const tick = await iii.trigger({ function_id: III_RUNTIME_FUNCTIONS.tick, payload: req }) as { result?: RuntimeTickResult };
+  return (tick.result ?? tick) as RuntimeTickResult;
+}
 
 async function runOnce() {
-  const result = await runtimeTick(tickReq, store);
+  const result = await runtimeTickViaIii(tickReq);
   const top: any = result.top_thread;
   let interpretation: Record<string, unknown> | undefined;
   const topId = top?.id ?? top?.thread_id;
@@ -102,7 +109,7 @@ async function runOnce() {
       interpretation = { attempted: false, reason: `thread not persisted: ${topId}` };
     }
   }
-  const timelineState = maybeCompileTimeline();
+  const timelineState = await maybeCompileTimeline();
   console.log(JSON.stringify({
     ok: result.ok,
     at: result.generated_at,
@@ -117,18 +124,18 @@ async function runOnce() {
   }, null, 2));
 }
 
-function maybeCompileTimeline(): Record<string, unknown> | undefined {
+async function maybeCompileTimeline(): Promise<Record<string, unknown> | undefined> {
   if (!timeline) return undefined;
   const last = store.getRuntimeState("last_timeline_compile")?.value ?? {};
   const lastAt = typeof last.generated_at === "string" ? last.generated_at : undefined;
   if (lastAt && (Date.now() - Date.parse(lastAt)) / 1000 < timeline_interval_seconds) {
     return { attempted: false, reason: "throttled", last_generated_at: lastAt, interval_seconds: timeline_interval_seconds };
   }
-  const compiled = compileObservationTimeline({
+  const compiled = await compileObservationTimelineViaIii({
     minutes: timeline_minutes,
     limit: timeline_limit,
     write: tickReq.write !== false,
-  }, store);
+  });
   if (tickReq.write !== false) {
     store.setRuntimeState("last_timeline_compile", {
       generated_at: new Date().toISOString(),
@@ -138,6 +145,17 @@ function maybeCompileTimeline(): Record<string, unknown> | undefined {
     });
   }
   return { attempted: true, ok: compiled.ok, view_id: compiled.view.id, records_used: compiled.records_used, buckets: compiled.buckets.length };
+}
+
+async function compileObservationTimelineViaIii(payload: Record<string, unknown>) {
+  const result = await iii.trigger({ function_id: VIEW_WORKER_FUNCTIONS.observationTimeline, payload }) as { ok?: boolean; views?: any[]; diagnostics?: Record<string, unknown> };
+  const view = result.views?.[0];
+  return {
+    ok: result.ok === true,
+    view,
+    records_used: result.diagnostics?.records_used,
+    buckets: Array.isArray(view?.content?.buckets) ? view.content.buckets : [],
+  };
 }
 
 if (once) {

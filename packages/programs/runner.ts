@@ -14,6 +14,15 @@ export type ProgramRuntimeOptions = {
   dry_run?: boolean;
 };
 
+export type ProgramRuntimeCapabilityInvoker = (
+  capabilityId: string,
+  input: { signal: ContextSignal; program?: Program; speed?: SpeedTier; autonomy?: AutonomyProfile; context_plugin_id?: string; dry_run?: boolean; payload?: Record<string, unknown> },
+) => Promise<CapabilityRunResult & { written_records?: string[]; written_views?: string[] }>;
+
+export type ProgramRuntimeConfig = {
+  capabilityInvoker?: ProgramRuntimeCapabilityInvoker;
+};
+
 export type ProgramRuntimeResult = {
   ok: true;
   generated_at: string;
@@ -27,7 +36,7 @@ export class ProgramRuntime {
   private programs = new Map<string, Program>();
   private capabilities = new Map<string, Capability>();
 
-  constructor(private store = new ContextStore()) {}
+  constructor(private store = new ContextStore(), private config: ProgramRuntimeConfig = {}) {}
 
   registerProgram(program: Program): this {
     this.programs.set(program.id, program);
@@ -336,6 +345,7 @@ export class ProgramRuntime {
   }
 
   async runCapability(capabilityId: string, input: { signal: ContextSignal; program?: Program; speed?: SpeedTier; autonomy?: AutonomyProfile; context_plugin_id?: string; dry_run?: boolean; payload?: Record<string, unknown> }): Promise<CapabilityRunResult & { written_records?: string[]; written_views?: string[] }> {
+    if (this.config.capabilityInvoker) return this.config.capabilityInvoker(capabilityId, input);
     const eventCapabilityInput = eventSafeCapabilityInput(capabilityId, input.payload);
     const capability = this.capabilities.get(capabilityId);
     if (!capability) {

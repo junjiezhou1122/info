@@ -144,7 +144,7 @@ test("Browser Ambient metadata and docs prefer AgentTask output with determinist
     "docs/info-design-consensus.md",
   ];
 
-  assert.match(source, /produces:\s*\["analysis\.browser_agent_task",\s*"analysis\.browser_page"\]/);
+  assert.match(source, /produces:\s*\["analysis\.browser_agent_task",\s*"analysis\.browser_page"(?:,\s*"task\.browser_ambient")?\]/);
   assert.match(source, /fallback_used:\s*false/);
   assert.match(source, /fallback_used:\s*true/);
 

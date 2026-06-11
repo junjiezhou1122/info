@@ -972,7 +972,7 @@ export const PromptInputHeader = ({
   ...props
 }: PromptInputHeaderProps) => (
   <InputGroupAddon
-    align="block-end"
+    align="block-start"
     className={cn("order-first flex-wrap gap-1", className)}
     {...props}
   />

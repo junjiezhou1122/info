@@ -5,12 +5,20 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "@info/core";
 import { buildEvidenceView, compileEvidenceViews } from "@info/views/evidence/index.js";
-import { runtimeTick } from "@info/runtime/runtime.js";
+import type { RuntimeTickRequest, RuntimeTickResult } from "@info/runtime/runtime.js";
+import { III_RUNTIME_FUNCTIONS, InProcessIiiRuntimeClient, registerInfoIiiRuntime } from "@info/iii-runtime";
 
 function withStore(fn: (store: ContextStore) => Promise<void> | void) {
   const dir = mkdtempSync(join(tmpdir(), "info-evidence-view-test-"));
   const store = new ContextStore(join(dir, "context.sqlite"));
   return Promise.resolve(fn(store)).finally(() => rmSync(dir, { recursive: true, force: true }));
+}
+
+async function runtimeTickViaIii(req: RuntimeTickRequest, store: ContextStore): Promise<RuntimeTickResult> {
+  const iii = new InProcessIiiRuntimeClient();
+  await registerInfoIiiRuntime(iii, { store, workerName: "info-evidence-runtime-test" });
+  const response = await iii.trigger({ function_id: III_RUNTIME_FUNCTIONS.tick, payload: req }) as { result?: RuntimeTickResult };
+  return (response.result ?? response) as RuntimeTickResult;
 }
 
 test("Evidence View compiler normalizes raw browser and Screenpipe observations", () => withStore((store) => {
@@ -100,7 +108,7 @@ test("runtimeTick compiles Evidence Views before higher-level runtime Views", as
     privacy: { level: "private", retention: "normal", allow_external_llm: false },
   });
 
-  const result = await runtimeTick({
+  const result = await runtimeTickViaIii({
     include_screenpipe: false,
     include_ai_sessions: false,
     include_git: false,

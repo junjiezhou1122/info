@@ -65,14 +65,20 @@ import {
   usePromptInputAttachments,
   type PromptInputMessage,
 } from "./ai-elements/prompt-input";
-import { ImageIcon, Plus } from "lucide-react";
+import { Globe2, ImageIcon, Plus, TextQuote, X } from "lucide-react";
 import { ModelSelectorPopover } from "./model-selector";
 import { Button } from "./ui/button";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "./ui/hover-card";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "./ui/tooltip";
+import { cn } from "../lib/utils";
 
 // Reference: Zed's add_images_from_picker() - Button to open file dialog for images
 // Must be inside PromptInput to access attachments context
@@ -175,6 +181,74 @@ interface ChatInterfaceProps {
   // "what is on this page" without first having to call browser_tabs.
   // Web client does not pass this; behavior is unchanged.
   prependContext?: () => Promise<string | null>;
+  previewContext?: () => Promise<PromptContextPreview | null>;
+  dangerouslyAutoApprovePermissions?: boolean;
+  incomingPrompt?: string | null;
+  onIncomingPromptConsumed?: () => void;
+}
+
+export interface PromptContextPreview {
+  id: string;
+  kind: "page" | "selection";
+  label: string;
+  source: string;
+  title: string;
+  detail: string;
+}
+
+function PromptContextChip({
+  context,
+  onDismiss,
+}: {
+  context: PromptContextPreview;
+  onDismiss: () => void;
+}) {
+  const Icon = context.kind === "selection" ? TextQuote : Globe2;
+  const chipText = context.kind === "selection" ? "Selected text" : context.title;
+
+  return (
+    <HoverCard openDelay={150} closeDelay={80}>
+      <HoverCardTrigger asChild>
+        <div
+          className={cn(
+            "group flex h-10 max-w-full cursor-default items-center gap-2 rounded-xl px-3 text-base font-medium transition-colors",
+            context.kind === "selection"
+              ? "bg-blue-50 text-blue-950 hover:bg-blue-100 dark:bg-blue-500/15 dark:text-blue-100"
+              : "bg-muted text-foreground hover:bg-muted/80"
+          )}
+        >
+          <Icon className="size-5 shrink-0" />
+          <span className="min-w-0 truncate">{chipText}</span>
+          <Button
+            aria-label={`Remove ${context.label}`}
+            className="ml-1 size-6 shrink-0 rounded-md p-0 text-muted-foreground opacity-70 hover:text-foreground group-hover:opacity-100 [&>svg]:size-3.5"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onDismiss();
+            }}
+            type="button"
+            variant="ghost"
+          >
+            <X />
+          </Button>
+        </div>
+      </HoverCardTrigger>
+      <HoverCardContent align="start" className="w-80 p-4">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-muted-foreground text-sm">
+            <Icon className="size-4" />
+            <span className="truncate">{context.source}</span>
+          </div>
+          <div className="font-semibold leading-snug">{context.title}</div>
+          <div className="border-l-2 pl-3 text-muted-foreground text-sm leading-relaxed">
+            <div className="font-medium text-blue-700 dark:text-blue-300">{context.label}</div>
+            <div className="mt-1 line-clamp-3">{context.detail}</div>
+          </div>
+        </div>
+      </HoverCardContent>
+    </HoverCard>
+  );
 }
 
 // Helper to format tool call content for display
@@ -237,15 +311,25 @@ function findToolCallIndex(entries: ThreadEntry[], toolCallId: string): number {
 // ChatInterface Component
 // =============================================================================
 
-export function ChatInterface({ client, prependContext }: ChatInterfaceProps) {
+export function ChatInterface({
+  client,
+  prependContext,
+  previewContext,
+  dangerouslyAutoApprovePermissions = false,
+  incomingPrompt,
+  onIncomingPromptConsumed,
+}: ChatInterfaceProps) {
   // Flat list of entries (like Zed's entries: Vec<AgentThreadEntry>)
   const [entries, setEntries] = useState<ThreadEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [promptContextPreview, setPromptContextPreview] = useState<PromptContextPreview | null>(null);
+  const [dismissedPromptContextIds, setDismissedPromptContextIds] = useState<Set<string>>(() => new Set());
   const activeSessionIdRef = useRef<string | null>(null);
   // Reference: Zed's supports_images() checks prompt_capabilities.image
   const [supportsImages, setSupportsImages] = useState(false);
+  const lastIncomingPromptRef = useRef<string | null>(null);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -269,6 +353,85 @@ export function ChatInterface({ client, prependContext }: ChatInterfaceProps) {
     console.log("[ChatInterface] Active session:", sessionId, "supportsImages:", client.supportsImages);
   }, [client]);
 
+  const visiblePromptContext =
+    promptContextPreview && !dismissedPromptContextIds.has(promptContextPreview.id)
+      ? promptContextPreview
+      : null;
+
+  const refreshPromptContext = useCallback(async () => {
+    if (!previewContext) {
+      setPromptContextPreview(null);
+      return;
+    }
+
+    try {
+      const preview = await previewContext();
+      setPromptContextPreview(preview);
+    } catch (error) {
+      console.warn("[ChatInterface] previewContext hook failed:", error);
+      setPromptContextPreview(null);
+    }
+  }, [previewContext]);
+
+  useEffect(() => {
+    if (!previewContext) {
+      setPromptContextPreview(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshPreview = async () => {
+      try {
+        const preview = await previewContext();
+        if (!cancelled) {
+          setPromptContextPreview(preview);
+        }
+      } catch (error) {
+        console.warn("[ChatInterface] previewContext hook failed:", error);
+        if (!cancelled) {
+          setPromptContextPreview(null);
+        }
+      }
+    };
+
+    refreshPreview();
+    const interval = window.setInterval(refreshPreview, 1500);
+    window.addEventListener("visibilitychange", refreshPreview);
+    window.addEventListener("focus", refreshPreview);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("visibilitychange", refreshPreview);
+      window.removeEventListener("focus", refreshPreview);
+    };
+  }, [previewContext]);
+
+  const dismissPromptContext = useCallback((contextId: string) => {
+    setDismissedPromptContextIds((prev) => {
+      const next = new Set(prev);
+      next.add(contextId);
+      return next;
+    });
+  }, []);
+
+  const autoApprovePermission = useCallback((request: PermissionRequestPayload): boolean => {
+    const option =
+      request.options.find((candidate) => candidate.kind === "allow_always") ??
+      request.options.find((candidate) => candidate.kind === "allow_once");
+
+    if (!option) return false;
+
+    console.warn("[ChatInterface] Auto-approving permission request:", {
+      requestId: request.requestId,
+      optionKind: option.kind,
+      toolTitle: request.toolCall.title,
+    });
+    client.respondToPermission(request.requestId, option.optionId);
+    return true;
+  }, [client]);
+
   // =============================================================================
   // Permission Request Handler
   // =============================================================================
@@ -277,6 +440,10 @@ export function ChatInterface({ client, prependContext }: ChatInterfaceProps) {
       return;
     }
     console.log("[ChatInterface] Permission request:", request);
+
+    if (dangerouslyAutoApprovePermissions && autoApprovePermission(request)) {
+      return;
+    }
 
     setEntries((prev) => {
       // Find matching tool call (search from end)
@@ -322,7 +489,7 @@ export function ChatInterface({ client, prependContext }: ChatInterfaceProps) {
         return [...prev, permissionToolCall];
       }
     });
-  }, []);
+  }, [autoApprovePermission, dangerouslyAutoApprovePermissions]);
 
   // =============================================================================
   // Session Update Handler (Zed-style: check last entry type)
@@ -622,7 +789,8 @@ export function ChatInterface({ client, prependContext }: ChatInterfaceProps) {
     // before the user's text. Failures are silent — the user message
     // still goes through unmodified.
     let displayContent = text;
-    if (prependContext) {
+    const shouldPrependContext = prependContext && (!previewContext || visiblePromptContext);
+    if (shouldPrependContext) {
       try {
         const ctx = await prependContext();
         if (ctx) {
@@ -640,7 +808,6 @@ export function ChatInterface({ client, prependContext }: ChatInterfaceProps) {
               contentBlocks.unshift({ type: "text", text: combined });
             }
           }
-          displayContent = combined;
         }
       } catch (error) {
         console.warn("[ChatInterface] prependContext hook failed:", error);
@@ -765,6 +932,18 @@ export function ChatInterface({ client, prependContext }: ChatInterfaceProps) {
       setIsLoading(false);
     }
   };
+
+  useEffect(() => {
+    const prompt = incomingPrompt?.trim();
+    if (!prompt || prompt === lastIncomingPromptRef.current) return;
+    if (isLoading || !sessionReady) return;
+    lastIncomingPromptRef.current = prompt;
+    void handleSubmit({ text: prompt, files: [] });
+    onIncomingPromptConsumed?.();
+    // handleSubmit intentionally stays out of deps; it captures the latest
+    // render state, and this effect is only a bridge for one-shot external prompts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incomingPrompt, isLoading, sessionReady, onIncomingPromptConsumed]);
 
   // Cancel handler - matches Zed's cancel() logic in acp_thread.rs
   // 1. Mark all pending/running/waiting_for_confirmation tool calls as canceled
@@ -1034,16 +1213,25 @@ export function ChatInterface({ client, prependContext }: ChatInterfaceProps) {
       </Conversation>
 
       {/* Input area */}
-      <div className="border-t p-4">
+      <div
+        className="border-t p-4"
+        onFocusCapture={refreshPromptContext}
+        onMouseEnter={refreshPromptContext}
+      >
         {/* Reference: Zed's MessageEditor conditionally shows attachment UI based on supports_images() */}
         <PromptInput
           onSubmit={handleSubmit}
           accept={supportsImages ? "image/*" : undefined}
           multiple={supportsImages}
         >
-          {/* Show attachments header when images are supported */}
-          {supportsImages && (
-            <PromptInputHeader>
+          {(visiblePromptContext || supportsImages) && (
+            <PromptInputHeader className="gap-2">
+              {visiblePromptContext && (
+                <PromptContextChip
+                  context={visiblePromptContext}
+                  onDismiss={() => dismissPromptContext(visiblePromptContext.id)}
+                />
+              )}
               <PromptInputAttachments>
                 {/* children is called per-file, not with array */}
                 {(file) => <PromptInputAttachment data={file} />}
