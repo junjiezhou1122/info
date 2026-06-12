@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LexiLearn - Master English Vocabulary</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        * { font-family: 'Inter', sans-serif; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .gradient-animate {
+            background: linear-gradient(-45deg, #6366f1, #8b5cf6, #a855f7, #6366f1);
+            background-size: 400% 400%;
+            animation: gradient 15s ease infinite;
+        }
+        @keyframes gradient {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-10px); }
+        }
+        .float { animation: float 3s ease-in-out infinite; }
+        @keyframes bounce-in {
+            0% { transform: scale(0.5); opacity: 0; }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .bounce-in { animation: bounce-in 0.5s ease-out; }
+        .card-flip { perspective: 1000px; }
+        .card-flip-inner { transition: transform 0.8s cubic-bezier(0.4, 0, 0.2, 1); transform-style: preserve-3d; }
+        .card-flip.flipped .card-flip-inner { transform: rotateY(180deg); }
+        .card-front, .card-back { backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+        .card-back { transform: rotateY(180deg); }
+        .modal-backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px); }
+    </style>
+</head>
+<body class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors duration-300">
+    <header class="gradient-animate text-white sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto px-4 py-4">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <span class="text-3xl float">📚</span>
+                    <h1 class="text-2xl md:text-3xl font-bold tracking-tight">LexiLearn</h1>
+                    <span class="text-sm opacity-80 hidden sm:block">YouTube Learning</span>
+                </div>
+                <button id="darkModeToggle" class="p-2 rounded-xl hover:bg-white/20 transition-all text-xl">🌙</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-6 mb-8">
+            <div class="bg-white dark:bg-gray-800 rounded-2xl p-4 md:p-6 shadow-lg">
+                <div class="text-2xl md:text-3xl font-bold text-indigo-600 dark:text-indigo-400" id="totalWords">18</div>
+                <div class="text-gray-500 dark:text-gray-400 text-sm md:text-base">Total Words</div>
+            </div>
+            <div class="bg-white dark:bg-gray-800 rounded-2xl p-4 md:p-6 shadow-lg">
+                <div class="text-2xl md:text-3xl font-bold text-emerald-500" id="masteredCount">0</div>
+                <div class="text-gray-500 dark:text-gray-400 text-sm md:text-base">Mastered</div>
+            </div>
+            <div class="bg-white dark:bg-gray-800 rounded-2xl p-4 md:p-6 shadow-lg">
+                <div class="text-2xl md:text-3xl font-bold text-amber-500" id="learningCount">0</div>
+                <div class="text-gray-500 dark:text-gray-400 text-sm md:text-base">Learning</div>
+            </div>
+            <div class="bg-white dark:bg-gray-800 rounded-2xl p-4 md:p-6 shadow-lg">
+                <div class="text-2xl md:text-3xl font-bold text-violet-500" id="quizAccuracy">0%</div>
+                <div class="text-gray-500 dark:text-gray-400 text-sm md:text-base">Quiz Score</div>
+            </div>
+        </div>
+
+        <div class="flex gap-2 mb-6 bg-white dark:bg-gray-800 rounded-2xl p-2 shadow-lg">
+            <button onclick="switchTab('vocabulary')" id="tab-vocabulary" class="flex-1 py-3 px-4 rounded-xl font-semibold transition-all bg-indigo-600 text-white">📖 Vocabulary</button>
+            <button onclick="switchTab('flashcards')" id="tab-flashcards" class="flex-1 py-3 px-4 rounded-xl font-semibold transition-all text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">🃏 Flashcards</button>
+            <button onclick="switchTab('quiz')" id="tab-quiz" class="flex-1 py-3 px-4 rounded-xl font-semibold transition-all text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">📝 Quiz</button>
+        </div>
+
+        <section id="vocabulary-section">
+            <div class="flex flex-col sm:flex-row gap-3 mb-4">
+                <div class="relative flex-1">
+                    <input type="text" id="searchInput" placeholder="Search words..." class="w-full pl-12 pr-4 py-3 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none">
+                    <span class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400">🔍</span>
+                </div>
+                <select id="filterStatus" class="px-4 py-3 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 outline-none">
+                    <option value="all">All Words</option>
+                    <option value="learning">Learning</option>
+                    <option value="mastered">Mastered</option>
+                </select>
+            </div>
+            <div id="vocabularyGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+        </section>
+
+        <section id="flashcards-section" class="hidden">
+            <div class="max-w-2xl mx-auto">
+                <div id="flashcardContainer" class="card-flip w-full aspect-[3/2] mb-6 cursor-pointer" onclick="flipCard()">
+                    <div class="card-flip-inner relative w-full h-full">
+                        <div class="card-front absolute inset-0 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-3xl p-8 flex flex-col items-center justify-center text-white shadow-2xl">
+                            <div id="flashcardWord" class="text-4xl md:text-5xl font-bold mb-4 text-center">Word</div>
+                            <div id="flashcardPhonetic" class="text-xl opacity-80 mono">/phonetic/</div>
+                            <div class="mt-4 text-sm opacity-60">Click to flip</div>
+                        </div>
+                        <div class="card-back absolute inset-0 bg-white dark:bg-gray-800 rounded-3xl p-8 flex flex-col justify-center shadow-2xl overflow-auto">
+                            <div id="flashcardDefinition" class="text-lg md:text-xl font-semibold text-indigo-600 dark:text-indigo-400 mb-4 text-center">Definition</div>
+                            <div id="flashcardExample" class="text-gray-600 dark:text-gray-300 italic text-center mb-4">"Example"</div>
+                            <div id="flashcardPartOfSpeech" class="text-sm text-gray-400 text-center">noun</div>
+                            <div id="flashcardSource" class="mt-4 text-center"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex justify-center gap-4 mb-6">
+                    <button onclick="prevCard()" class="px-6 py-3 bg-gray-200 dark:bg-gray-700 rounded-xl font-semibold hover:bg-gray-300 dark:hover:bg-gray-600 transition-all">← Prev</button>
+                    <button onclick="nextCard()" class="px-6 py-3 bg-gray-200 dark:bg-gray-700 rounded-xl font-semibold hover:bg-gray-300 dark:hover:bg-gray-600 transition-all">Next →</button>
+                </div>
+                <div class="flex justify-center gap-4">
+                    <button onclick="markAsLearning()" class="px-6 py-3 bg-amber-500 text-white rounded-xl font-semibold hover:bg-amber-600 transition-all shadow-lg">📚 Still Learning</button>
+                    <button onclick="markAsMastered()" class="px-6 py-3 bg-emerald-500 text-white rounded-xl font-semibold hover:bg-emerald-600 transition-all shadow-lg">✨ I Know This</button>
+                </div>
+                <div class="text-center mt-6 text-gray-500 dark:text-gray-400">Card <span id="cardProgress">1</span> of <span id="cardTotal">18</span></div>
+            </div>
+        </section>
+
+        <section id="quiz-section" class="hidden">
+            <div class="max-w-2xl mx-auto">
+                <div id="quizStart" class="text-center">
+                    <h2 class="text-2xl font-bold mb-6 text-gray-800 dark:text-white">Ready to test your knowledge?</h2>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
+                        <button onclick="startQuiz('multiple-choice')" class="p-6 bg-white dark:bg-gray-800 rounded-2xl shadow-lg hover:shadow-xl transition-all text-left">
+                            <div class="text-4xl mb-3">🎯</div>
+                            <div class="font-bold text-lg text-gray-800 dark:text-white">Multiple Choice</div>
+                            <div class="text-gray-500 dark:text-gray-400 text-sm">Choose the correct definition</div>
+                        </button>
+                        <button onclick="startQuiz('type-answer')" class="p-6 bg-white dark:bg-gray-800 rounded-2xl shadow-lg hover:shadow-xl transition-all text-left">
+                            <div class="text-4xl mb-3">⌨️</div>
+                            <div class="font-bold text-lg text-gray-800 dark:text-white">Type Answer</div>
+                            <div class="text-gray-500 dark:text-gray-400 text-sm">Spell the word correctly</div>
+                        </button>
+                    </div>
+                </div>
+                <div id="quizInProgress" class="hidden">
+                    <div class="mb-6">
+                        <div class="flex justify-between text-sm text-gray-500 mb-2">
+                            <span>Question <span id="questionNumber">1</span> of <span id="totalQuestions">10</span></span>
+                            <span id="quizScore">Score: 0</span>
+                        </div>
+                        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                            <div id="quizProgressBar" class="bg-indigo-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div id="quizQuestion" class="bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-lg mb-6">
+                        <div id="quizWord" class="text-3xl font-bold text-center mb-2 text-gray-800 dark:text-white">Word</div>
+                        <div id="quizPhonetic" class="text-center text-gray-500 dark:text-gray-400 mono mb-6">/phonetic/</div>
+                        <div id="multipleChoiceOptions" class="space-y-3"></div>
+                        <div id="typeAnswerInput" class="hidden">
+                            <input type="text" id="answerInput" placeholder="Type the word..." class="w-full px-6 py-4 text-center text-xl rounded-xl border-2 border-gray-200 dark:border-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none" autocomplete="off">
+                            <button onclick="submitTypeAnswer()" class="w-full mt-4 py-4 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-all">Submit</button>
+                        </div>
+                    </div>
+                    <div id="quizFeedback" class="hidden text-center p-4 rounded-xl mb-4"></div>
+                </div>
+                <div id="quizResults" class="hidden text-center">
+                    <div class="text-8xl mb-6">🎉</div>
+                    <h2 class="text-3xl font-bold mb-2 text-gray-800 dark:text-white">Quiz Complete!</h2>
+                    <div class="text-6xl font-bold text-indigo-600 dark:text-indigo-400 mb-4" id="finalScore">0%</div>
+                    <p class="text-gray-500 dark:text-gray-400 mb-8" id="resultMessage">Great job!</p>
+                    <button onclick="resetQuiz()" class="px-8 py-4 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-all shadow-lg">Take Another Quiz</button>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <div id="celebrationModal" class="fixed inset-0 z-50 hidden modal-backdrop flex items-center justify-center p-4">
+        <div class="bg-white dark:bg-gray-800 rounded-3xl p-8 max-w-md w-full text-center bounce-in shadow-2xl">
+            <div class="text-7xl mb-4">🎉</div>
+            <h3 class="text-2xl font-bold text-gray-800 dark:text-white mb-2">Congratulations!</h3>
+            <p id="celebrationMessage" class="text-gray-600 dark:text-gray-400 mb-6">You've mastered 5 new words!</p>
+            <button onclick="document.getElementById('celebrationModal').classList.add('hidden')" class="px-8 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold rounded-full">Awesome!</button>
+        </div>
+    </div>
+
+    <script>
+const vocabularyData = [
+    { word: "database", phonetic: "/ˈdeɪtəbeɪs/", definition: "A structured set of data held in a computer", example: "A database built from first principles on top of object storage.", partOfSpeech: "noun", difficulty: "intermediate", source: "YouTube", videoTitle: "RAG is dead, right?? — Kuba Rogut" },
+    { word: "object storage", phonetic: "/ˈɒbdʒɪkt ˈstɔːrɪdʒ/", definition: "A method of storing data in buckets/objects", example: "Built from first principles on top of object storage.", partOfSpeech: "noun", difficulty: "intermediate", source: "YouTube", videoTitle: "RAG is dead, right?? — Kuba Rogut" },
+    { word: "search volume", phonetic: "/sɜːrtʃ ˈvɒljuːm/", definition: "The number of searches for a particular term", example: "If you're to look at something like the Google search volume.", partOfSpeech: "noun", difficulty: "beginner", source: "YouTube", videoTitle: "RAG is dead, right?? — Kuba Rogut" },
+    { word: "token", phonetic: "/ˈtəʊkən/", definition: "A unit of text processed by an LLM", example: "Token consumption represents energy flow through branching pathways.", partOfSpeech: "noun", difficulty: "intermediate", source: "YouTube", videoTitle: "RAG is dead, right?? — Kuba Rogut" },
+    { word: "thermodynamic", phonetic: "/ˌθɜːməʊdaɪˈnæmɪk/", definition: "Relating to heat and energy transfer in systems", example: "LLM agents operate as thermodynamic systems.", partOfSpeech: "adjective", difficulty: "advanced", source: "YouTube", videoTitle: "RAG is dead, right?? — Kuba Rogut" },
+    { word: "bottleneck", phonetic: "/ˈbɒtəlnek/", definition: "A point of congestion in a system that slows performance", example: "The bottleneck. I'm a DX engineer at WorkOS.", partOfSpeech: "noun", difficulty: "intermediate", source: "YouTube", videoTitle: "How I deleted 95% of my agent skills — Nick Nisi" },
+    { word: "DX", phonetic: "/diː ˈeks/", definition: "Developer Experience - how easy it is for developers to use a product", example: "I'm a DX engineer at WorkOS and I work on 20 plus repos.", partOfSpeech: "noun", difficulty: "intermediate", source: "YouTube", videoTitle: "How I deleted 95% of my agent skills — Nick Nisi" },
+    { word: "repo", phonetic: "/ˈrɛpoʊ/", definition: "A repository for storing code version history", example: "I work on 20 plus repos across eight different languages.", partOfSpeech: "noun", difficulty: "beginner", source: "YouTube", videoTitle: "How I deleted 95% of my agent skills — Nick Nisi" },
+    { word: "agent", phonetic: "/ˈeɪdʒənt/", definition: "An AI system that can perform tasks autonomously", example: "LLM agents operate as thermodynamic systems.", partOfSpeech: "noun", difficulty: "intermediate", source: "YouTube", videoTitle: "How I deleted 95% of my agent skills — Nick Nisi" },
+    { word: "workflow", phonetic: "/ˈwɜːrkfloʊ/", definition: "A sequence of processes for completing a task", example: "Flow engineering optimizes decision boundaries to maximize workflow.", partOfSpeech: "noun", difficulty: "intermediate", source: "YouTube", videoTitle: "How I deleted 95% of my agent skills — Nick Nisi" },
+    { word: "paradigm", phonetic: "/ˈpærədaɪm/", definition: "A typical example or model; a dominant framework", example: "The discovery created a new paradigm in physics.", partOfSpeech: "noun", difficulty: "advanced", source: "general" },
+    { word: "eloquent", phonetic: "/ˈeləkwənt/", definition: "Fluent or persuasive in speaking or writing", example: "His eloquent speech moved the entire audience.", partOfSpeech: "adjective", difficulty: "intermediate", source: "general" },
+    { word: "resilient", phonetic: "/rɪˈzɪliənt/", definition: "Able to recover quickly from difficulties", example: "Children are often more resilient than adults give them credit for.", partOfSpeech: "adjective", difficulty: "intermediate", source: "general" },
+    { word: "pragmatic", phonetic: "/præɡˈmætɪk/", definition: "Dealing with things sensibly and realistically", example: "She took a pragmatic approach to solving the problem.", partOfSpeech: "adjective", difficulty: "intermediate", source: "general" },
+    { word: "ubiquitous", phonetic: "/juːˈbɪkwɪtəs/", definition: "Present, appearing, or found everywhere", example: "Smartphones have become ubiquitous in modern society.", partOfSpeech: "adjective", difficulty: "intermediate", source: "general" },
+    { word: "meticulous", phonetic: "/məˈtɪkjələs/", definition: "Showing great attention to detail; very careful", example: "She was meticulous in her research, checking every source.", partOfSpeech: "adjective", difficulty: "intermediate", source: "general" },
+    { word: "ephemeral", phonetic: "/ɪˈfemərəl/", definition: "Lasting for a very short time; transitory", example: "The ephemeral beauty of cherry blossoms.", partOfSpeech: "adjective", difficulty: "advanced", source: "general" },
+    { word: "serendipity", phonetic: "/ˌserənˈdɪpɪti/", definition: "The occurrence of events by chance in a happy way", example: "A serendipitous meeting that changed my life.", partOfSpeech: "noun", difficulty: "advanced", source: "general" }
+];
+
+let state = {
+    vocabulary: vocabularyData.map(w => ({ ...w, status: 'new' })),
+    currentTab: 'vocabulary',
+    currentCardIndex: 0,
+    isCardFlipped: false,
+    quizType: null,
+    quizQuestions: [],
+    currentQuestionIndex: 0,
+    quizScore: 0,
+    totalAnswered: 0
+};
+
+function loadState() {
+    const saved = localStorage.getItem('lexilearn-state');
+    if (saved) {
+        const parsed = JSON.parse(saved);
+        state.vocabulary = vocabularyData.map(word => {
+            const savedWord = parsed.vocabulary?.find(w => w.word === word.word);
+            return { ...word, status: savedWord?.status || 'new' };
+        });
+        state.totalAnswered = parsed.totalAnswered || 0;
+        state.quizScore = parsed.quizScore || 0;
+    } else {
+        state.vocabulary = vocabularyData.map(w => ({ ...w, status: 'new' }));
+    }
+}
+
+function saveState() {
+    localStorage.setItem('lexilearn-state', JSON.stringify({
+        vocabulary: state.vocabulary.map(w => ({ word: w.word, status: w.status })),
+        totalAnswered: state.totalAnswered,
+        quizScore: state.quizScore
+    }));
+}
+
+function init() {
+    loadState();
+    setupDarkMode();
+    renderVocabulary();
+    updateStats();
+    document.getElementById('searchInput').addEventListener('input', renderVocabulary);
+    document.getElementById('filterStatus').addEventListener('change', renderVocabulary);
+    document.getElementById('answerInput')?.addEventListener('keypress', (e) => { if (e.key === 'Enter') submitTypeAnswer(); });
+}
+
+function setupDarkMode() {
+    const toggle = document.getElementById('darkModeToggle');
+    const isDark = localStorage.getItem('theme') === 'dark' || (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    if (isDark) { document.documentElement.classList.add('dark'); toggle.textContent = '☀️'; }
+    toggle.addEventListener('click', () => {
+        document.documentElement.classList.toggle('dark');
+        const isDarkNow = document.documentElement.classList.contains('dark');
+        toggle.textContent = isDarkNow ? '☀️' : '🌙';
+        localStorage.setItem('theme', isDarkNow ? 'dark' : 'light');
+    });
+}
+
+function switchTab(tab) {
+    state.currentTab = tab;
+    ['vocabulary', 'flashcards', 'quiz'].forEach(t => {
+        document.getElementById(t + '-section').classList.toggle('hidden', t !== tab);
+        const btn = document.getElementById('tab-' + t);
+        btn.classList.toggle('bg-indigo-600', t === tab);
+        btn.classList.toggle('text-white', t === tab);
+        btn.classList.toggle('text-gray-600', t !== tab);
+        btn.classList.toggle('dark:text-gray-300', t !== tab);
+    });
+    if (tab === 'flashcards') renderFlashcard();
+    if (tab === 'quiz') resetQuiz();
+}
+
+function renderVocabulary() {
+    const search = document.getElementById('searchInput').value.toLowerCase();
+    const filter = document.getElementById('filterStatus').value;
+    const grid = document.getElementById('vocabularyGrid');
+    
+    const filtered = state.vocabulary.filter(w => {
+        const matchesSearch = w.word.toLowerCase().includes(search) || w.definition.toLowerCase().includes(search);
+        const matchesFilter = filter === 'all' || w.status === filter;
+        return matchesSearch && matchesFilter;
+    });
+
+    if (filtered.length === 0) {
+        grid.innerHTML = '<div class="col-span-full text-center py-12 text-gray-500 dark:text-gray-400">No words found.</div>';
+        return;
+    }
+
+    grid.innerHTML = filtered.map(word => {
+        const diffColors = { beginner: 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300', intermediate: 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300', advanced: 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300' };
+        const statusColors = { new: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300', learning: 'bg-amber-100 text-amber-600 dark:bg-amber-900 dark:text-amber-300', mastered: 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900 dark:text-emerald-300' };
+        const statusLabels = { new: '🆕 New', learning: '📚 Learning', mastered: '✨ Mastered' };
+        return `
+            <div class="bg-white dark:bg-gray-800 rounded-2xl p-5 shadow-lg hover:shadow-xl transition-all">
+                <div class="flex justify-between items-start mb-3">
+                    <div><h3 class="font-bold text-lg text-gray-800 dark:text-white">${word.word}</h3><span class="mono text-sm text-gray-500 dark:text-gray-400">${word.phonetic}</span></div>
+                    <span class="px-2 py-1 text-xs rounded-full ${diffColors[word.difficulty]}">${word.difficulty}</span>
+                </div>
+                <p class="text-gray-600 dark:text-gray-300 text-sm mb-3">${word.definition}</p>
+                <p class="text-gray-500 dark:text-gray-400 text-xs italic mb-3">"${word.example}"</p>
+                ${word.source ? `<div class="mb-3"><span class="text-xs px-2 py-1 bg-red-100 dark:bg-red-900 text-red-600 dark:text-red-300 rounded-full">📺 ${word.source}: ${word.videoTitle || ''}</span></div>` : ''}
+                <div class="flex justify-between items-center pt-3 border-t border-gray-100 dark:border-gray-700">
+                    <span class="text-xs text-gray-400">${word.partOfSpeech}</span>
+                    <button onclick="toggleWordStatus('${word.word.replace(/'/g, "\\'")}')" class="text-xs px-3 py-1 rounded-full ${statusColors[word.status]} font-medium">${statusLabels[word.status]}</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function toggleWordStatus(word) {
+    const w = state.vocabulary.find(v => v.word === word);
+    if (!w) return;
+    w.status = w.status === 'mastered' ? 'new' : w.status === 'learning' ? 'mastered' : 'learning';
+    const masteredCount = state.vocabulary.filter(v => v.status === 'mastered').length;
+    if (masteredCount === 5 || masteredCount === 10 || masteredCount === 15) showCelebration(masteredCount);
+    saveState();
+    renderVocabulary();
+    updateStats();
+}
+
+function renderFlashcard() {
+    const word = state.vocabulary[state.currentCardIndex];
+    document.getElementById('flashcardWord').textContent = word.word;
+    document.getElementById('flashcardPhonetic').textContent = word.phonetic;
+    document.getElementById('flashcardDefinition').textContent = word.definition;
+    document.getElementById('flashcardExample').textContent = '"' + word.example + '"';
+    document.getElementById('flashcardPartOfSpeech').textContent = word.partOfSpeech;
+    document.getElementById('flashcardSource').innerHTML = word.source ? '<span class="inline-block px-2 py-1 bg-red-100 dark:bg-red-900 text-red-600 dark:text-red-300 rounded-full text-xs">📺 ' + word.source + ': ' + (word.videoTitle || '') + '</span>' : '';
+    document.getElementById('flashcardContainer').classList.remove('flipped');
+    document.getElementById('cardProgress').textContent = state.currentCardIndex + 1;
+    document.getElementById('cardTotal').textContent = state.vocabulary.length;
+    state.isCardFlipped = false;
+}
+
+function flipCard() {
+    const container = document.getElementById('flashcardContainer');
+    container.classList.toggle('flipped');
+    state.isCardFlipped = !state.isCardFlipped;
+}
+
+function prevCard() { state.currentCardIndex = (state.currentCardIndex - 1 + state.vocabulary.length) % state.vocabulary.length; renderFlashcard(); }
+function nextCard() { state.currentCardIndex = (state.currentCardIndex + 1) % state.vocabulary.length; renderFlashcard(); }
+
+function markAsLearning() { state.vocabulary[state.currentCardIndex].status = 'learning'; saveState(); updateStats(); nextCard(); }
+function markAsMastered() {
+    state.vocabulary[state.currentCardIndex].status = 'mastered';
+    const masteredCount = state.vocabulary.filter(v => v.status === 'mastered').length;
+    if (masteredCount === 5 || masteredCount === 10 || masteredCount === 15) showCelebration(masteredCount);
+    saveState(); updateStats(); nextCard();
+}
+
+function startQuiz(type) {
+    state.quizType = type;
+    state.quizQuestions = generateQuizQuestions();
+    state.currentQuestionIndex = 0;
+    state.quizScore = 0;
+    document.getElementById('quizStart').classList.add('hidden');
+    document.getElementById('quizInProgress').classList.remove('hidden');
+    document.getElementById('quizResults').classList.add('hidden');
+    renderQuestion();
+}
+
+function generateQuizQuestions() {
+    const shuffled = [...state.vocabulary].sort(() => Math.random() - 0.5).slice(0, 10);
+    return shuffled.map(word => {
+        if (state.quizType === 'multiple-choice') {
+            const wrong = state.vocabulary.filter(w => w.word !== word.word).sort(() => Math.random() - 0.5).slice(0, 3).map(w => w.definition);
+            const options = [word.definition, ...wrong].sort(() => Math.random() - 0.5);
+            return { word, type: 'multiple-choice', options };
+        }
+        return { word, type: 'type-answer' };
+    });
+}
+
+function renderQuestion() {
+    const q = state.quizQuestions[state.currentQuestionIndex];
+    const word = q.word;
+    document.getElementById('quizWord').textContent = word.word;
+    document.getElementById('quizPhonetic').textContent = word.phonetic;
+    document.getElementById('questionNumber').textContent = state.currentQuestionIndex + 1;
+    document.getElementById('totalQuestions').textContent = state.quizQuestions.length;
+    document.getElementById('quizScore').textContent = 'Score: ' + state.quizScore;
+    document.getElementById('quizProgressBar').style.width = ((state.currentQuestionIndex / state.quizQuestions.length) * 100) + '%';
+    document.getElementById('quizFeedback').classList.add('hidden');
+    if (q.type === 'multiple-choice') {
+        document.getElementById('multipleChoiceOptions').innerHTML = q.options.map((opt, i) => '<button onclick="submitMultipleChoice(this, \'' + opt.replace(/'/g, "\\'") + '\')" class="w-full p-4 text-left rounded-xl border-2 border-gray-200 dark:border-gray-700 hover:border-indigo-500 transition-all"><span class="inline-block w-8 h-8 rounded-full bg-gray-100 dark:bg-gray-700 text-center leading-8 mr-3 font-semibold">' + String.fromCharCode(65 + i) + '</span>' + opt + '</button>').join('');
+        document.getElementById('multipleChoiceOptions').classList.remove('hidden');
+        document.getElementById('typeAnswerInput').classList.add('hidden');
+    } else {
+        document.getElementById('multipleChoiceOptions').classList.add('hidden');
+        document.getElementById('typeAnswerInput').classList.remove('hidden');
+        document.getElementById('answerInput').value = '';
+        document.getElementById('answerInput').focus();
+    }
+}
+
+function submitMultipleChoice(btn, answer) {
+    const q = state.quizQuestions[state.currentQuestionIndex];
+    handleAnswer(answer === q.word.definition);
+}
+
+function submitTypeAnswer() {
+    const answer = document.getElementById('answerInput').value.trim().toLowerCase();
+    const q = state.quizQuestions[state.currentQuestionIndex];
+    handleAnswer(answer === q.word.word.toLowerCase());
+}
+
+function handleAnswer(correct) {
+    const feedback = document.getElementById('quizFeedback');
+    state.totalAnswered++;
+    if (correct) { state.quizScore++; feedback.className = 'text-center p-4 rounded-xl mb-4 bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300'; feedback.innerHTML = '✅ Correct!'; }
+    else { feedback.className = 'text-center p-4 rounded-xl mb-4 bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300'; feedback.innerHTML = '❌ The answer was: <strong>' + state.quizQuestions[state.currentQuestionIndex].word.word + '</strong>'; }
+    feedback.classList.remove('hidden');
+    document.getElementById('quizScore').textContent = 'Score: ' + state.quizScore;
+    saveState();
+    setTimeout(() => {
+        state.currentQuestionIndex++;
+        if (state.currentQuestionIndex >= state.quizQuestions.length) showQuizResults();
+        else renderQuestion();
+    }, 1500);
+}
+
+function showQuizResults() {
+    document.getElementById('quizInProgress').classList.add('hidden');
+    document.getElementById('quizResults').classList.remove('hidden');
+    const percentage = Math.round((state.quizScore / state.quizQuestions.length) * 100);
+    document.getElementById('finalScore').textContent = percentage + '%';
+    document.getElementById('quizAccuracy').textContent = percentage + '%';
+    const messages = ['Keep practicing! 📚', 'Good effort! 💪', 'Well done! 🌟', 'Excellent! 🎉', 'Perfect! 🏆'];
+    document.getElementById('resultMessage').textContent = messages[Math.min(Math.floor(percentage / 25), messages.length - 1)];
+    updateStats();
+}
+
+function resetQuiz() {
+    document.getElementById('quizStart').classList.remove('hidden');
+    document.getElementById('quizInProgress').classList.add('hidden');
+    document.getElementById('quizResults').classList.add('hidden');
+}
+
+function updateStats() {
+    const mastered = state.vocabulary.filter(v => v.status === 'mastered').length;
+    const learning = state.vocabulary.filter(v => v.status === 'learning').length;
+    document.getElementById('totalWords').textContent = state.vocabulary.length;
+    document.getElementById('masteredCount').textContent = mastered;
+    document.getElementById('learningCount').textContent = learning;
+    const accuracy = state.totalAnswered > 0 ? Math.round((state.quizScore / state.totalAnswered) * 100) : 0;
+    document.getElementById('quizAccuracy').textContent = accuracy + '%';
+}
+
+function showCelebration(count) { document.getElementById('celebrationMessage').textContent = "You've mastered " + count + " words!"; document.getElementById('celebrationModal').classList.remove('hidden'); }
+
+document.addEventListener('keydown', (e) => {
+    if (state.currentTab === 'flashcards') {
+        if (e.key === ' ' || e.key === 'f') flipCard();
+        if (e.key === 'ArrowLeft') prevCard();
+        if (e.key === 'ArrowRight') nextCard();
+        if (e.key === 'l') markAsLearning();
+        if (e.key === 'm') markAsMastered();
+    }
+});
+
+init();
+    </script>
+</body>
+</html>

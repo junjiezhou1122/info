@@ -29,14 +29,32 @@ function likeEscape(value: string): string {
   return `%${value.replace(/[\\%_]/g, "\\$&")}%`;
 }
 
+function nextStringPrefix(value: string): string {
+  if (!value) return "\uffff";
+  const chars = Array.from(value);
+  const last = chars.pop();
+  if (!last) return "\uffff";
+  const code = last.codePointAt(0) ?? 0;
+  return `${chars.join("")}${String.fromCodePoint(code + 1)}`;
+}
+
 export class ContextStore {
   private db: DatabaseSync;
+  private lastViewTimestampMs = 0;
 
   constructor(dbPath = process.env.CONTEXT_DB_PATH ?? "data/context.sqlite") {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA busy_timeout = 5000");
     this.migrate();
+  }
+
+  private nextViewTimestamp(): string {
+    const now = Date.now();
+    const timestampMs = now <= this.lastViewTimestampMs ? this.lastViewTimestampMs + 1 : now;
+    this.lastViewTimestampMs = timestampMs;
+    return new Date(timestampMs).toISOString();
   }
 
   migrate() {
@@ -155,6 +173,9 @@ export class ContextStore {
       create index if not exists idx_context_views_type on context_views(view_type);
       create index if not exists idx_context_views_status on context_views(status);
       create index if not exists idx_context_views_updated_at on context_views(updated_at);
+      create index if not exists idx_context_views_type_updated_at on context_views(view_type, updated_at desc);
+      create index if not exists idx_context_views_type_updated_created_id on context_views(view_type, updated_at desc, created_at desc, id desc);
+      create index if not exists idx_context_views_type_status_updated_at on context_views(view_type, status, updated_at desc);
 
       create table if not exists runtime_state (
         key text primary key,
@@ -432,7 +453,7 @@ export class ContextStore {
 
 
   upsertView(view: ContextView): StoredContextView {
-    const now = new Date().toISOString();
+    const now = this.nextViewTimestamp();
     const id = view.id ?? randomUUID();
     const existing = this.getView(id);
     const created_at = existing?.created_at ?? now;
@@ -509,7 +530,7 @@ export class ContextStore {
     return row ? rowToView(row) : undefined;
   }
 
-  listViewFamilySummaries(options: { view_types?: string[]; active_only?: boolean } = {}): Array<{ family: string; count: number; latest?: StoredContextView; kinds: string[] }> {
+  listViewFamilySummaries(options: { view_types?: string[]; active_only?: boolean; include_kinds?: boolean } = {}): Array<{ family: string; count: number; latest?: StoredContextView; kinds: string[] }> {
     const clauses: string[] = [];
     const params: SQLInputValue[] = [];
     if (options.view_types?.length) {
@@ -520,17 +541,27 @@ export class ContextStore {
     const where = clauses.length ? ` where ${clauses.join(" and ")}` : "";
     const rows = this.db.prepare(`select view_type as family, count(*) as count, max(updated_at) as latest_updated_at from context_views${where} group by view_type`).all(...params) as Array<{ family: string; count: number; latest_updated_at?: string }>;
     return rows.map(row => {
-      const latest = this.db.prepare(`select * from context_views where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""} order by updated_at desc limit 1`).get(row.family) as any;
-      const kindRows = this.db.prepare(`select content_json from context_views where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""} order by updated_at desc limit 200`).all(row.family) as Array<{ content_json?: string }>;
-      const kinds = [...new Set(kindRows
-        .map(kindRow => parseJson<Record<string, unknown>>(kindRow.content_json, {}))
-        .map(content => typeof content.kind === "string" ? content.kind : undefined)
-        .filter((value): value is string => Boolean(value)))]
-        .slice(0, 12);
+      const latest = this.db.prepare(`
+        select id, view_type, title, summary, status, compiler_json, confidence, stability, lossiness, created_at, updated_at
+        from context_views indexed by idx_context_views_type_updated_created_id
+        where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""}
+        order by updated_at desc, created_at desc, id desc
+        limit 1
+      `).get(row.family) as any;
+      const kindRows = options.include_kinds
+      ? this.db.prepare(`select content_json from context_views indexed by idx_context_views_type_updated_created_id where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""} order by updated_at desc, created_at desc, id desc limit 80`).all(row.family) as Array<{ content_json?: string }>
+        : [];
+      const kinds = options.include_kinds
+        ? [...new Set(kindRows
+          .map(kindRow => parseJson<Record<string, unknown>>(kindRow.content_json, {}))
+          .map(content => typeof content.kind === "string" ? content.kind : undefined)
+          .filter((value): value is string => Boolean(value)))]
+          .slice(0, 12)
+        : [];
       return {
         family: row.family,
         count: Number(row.count ?? 0),
-        latest: latest ? rowToView(latest) : undefined,
+        latest: latest ? rowToViewSummary(latest) : undefined,
         kinds,
       };
     });
@@ -558,8 +589,8 @@ export class ContextStore {
       params.push(...options.view_types);
     }
     if (options.view_type_prefix) {
-      clauses.push(`view_type like ?`);
-      params.push(`${options.view_type_prefix}%`);
+      clauses.push(`view_type >= ? and view_type < ?`);
+      params.push(options.view_type_prefix, nextStringPrefix(options.view_type_prefix));
     }
     if (options.status) {
       clauses.push(`status = ?`);
@@ -572,8 +603,15 @@ export class ContextStore {
       params.push(options.updated_after);
     }
     const where = clauses.length ? ` where ${clauses.join(" and ")}` : "";
-    const sql = `select * from context_views${where} order by updated_at desc${unbounded ? "" : " limit ?"}`;
-    if (!unbounded) params.push(Math.max(limit * 8, limit));
+    const needsPostFilterOverfetch = Boolean(
+      options.compiler_id ||
+      options.source_record_id ||
+      options.source_view_id ||
+      options.scope ||
+      options.timeWindow,
+    );
+    const sql = `select * from context_views${where} order by updated_at desc, created_at desc, id desc${unbounded ? "" : " limit ?"}`;
+    if (!unbounded) params.push(needsPostFilterOverfetch ? Math.max(limit * 8, limit) : limit);
     const rows = this.db.prepare(sql).all(...params) as any[];
     const filtered = rows
       .map(rowToView)
@@ -1141,6 +1179,30 @@ function rowToView(row: any): StoredContextView {
     privacy: parseJson(row.privacy_json, {}),
     validity: parseJson(row.validity_json, {}),
     metadata: parseJson(row.metadata_json, {}),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function rowToViewSummary(row: any): StoredContextView {
+  return {
+    id: row.id,
+    view_type: row.view_type,
+    title: row.title ?? undefined,
+    summary: row.summary ?? undefined,
+    status: row.status ?? undefined,
+    source_records: [],
+    source_views: [],
+    compiler: parseJson(row.compiler_json, undefined),
+    purpose: row.purpose ?? undefined,
+    scope: {},
+    content: {},
+    confidence: row.confidence ?? undefined,
+    stability: row.stability ?? undefined,
+    lossiness: row.lossiness ?? undefined,
+    privacy: {},
+    validity: {},
+    metadata: {},
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

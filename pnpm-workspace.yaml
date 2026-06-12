@@ -8,6 +8,7 @@ packages:
   - "packages/capabilities"
   - "packages/programs"
   - "packages/runtime"
+  - "packages/processor-runtime"
   - "packages/iii-runtime"
   - "packages/server"
   - "apps/ui"

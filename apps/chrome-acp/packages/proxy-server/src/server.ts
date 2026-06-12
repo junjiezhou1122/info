@@ -119,6 +119,17 @@ const clients = new Map<WSContext, ClientState>();
 // Permission request timeout (5 minutes)
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 
+function buildMcpServers(): acp.McpServer[] {
+  return [
+    {
+      type: "http",
+      url: `http://localhost:${SERVER_PORT}/mcp`,
+      name: "browser",
+      headers: [],
+    },
+  ];
+}
+
 // Heartbeat interval for WebSocket ping/pong (30 seconds)
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -334,14 +345,7 @@ async function handleNewSession(
 
   try {
     const sessionCwd = params.cwd || AGENT_CWD;
-    const mcpServers = [
-      {
-        type: "http" as const,
-        url: `http://localhost:${SERVER_PORT}/mcp`,
-        name: "browser",
-        headers: [],
-      },
-    ];
+    const mcpServers = buildMcpServers();
     const result = await state.connection.newSession({
       cwd: sessionCwd,
       mcpServers,
@@ -467,14 +471,7 @@ async function handleLoadSession(
     const result = await state.connection.loadSession({
       sessionId,
       cwd: sessionCwd,
-      mcpServers: [
-        {
-          type: "http",
-          url: `http://localhost:${SERVER_PORT}/mcp`,
-          name: "browser",
-          headers: [],
-        },
-      ],
+      mcpServers: buildMcpServers(),
     });
 
     state.sessionId = sessionId;
@@ -539,14 +536,7 @@ async function handleResumeSession(
     const result = await state.connection.unstable_resumeSession({
       sessionId,
       cwd: sessionCwd,
-      mcpServers: [
-        {
-          type: "http",
-          url: `http://localhost:${SERVER_PORT}/mcp`,
-          name: "browser",
-          headers: [],
-        },
-      ],
+      mcpServers: buildMcpServers(),
     });
 
     state.sessionId = sessionId;

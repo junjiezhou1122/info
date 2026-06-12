@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
 import { createContext, memo, useContext, useEffect, useState } from "react";
-import { Streamdown } from "streamdown";
+import { Streamdown, defaultRemarkPlugins } from "streamdown";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"];
@@ -307,6 +307,13 @@ export const MessageBranchPage = ({
 
 export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
+const MESSAGE_REMARK_PLUGINS: NonNullable<MessageResponseProps["remarkPlugins"]> = [
+  defaultRemarkPlugins.gfm,
+  [defaultRemarkPlugins.math, { singleDollarTextMath: true }],
+  defaultRemarkPlugins.cjkFriendly,
+  defaultRemarkPlugins.cjkFriendlyGfmStrikethrough,
+];
+
 export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
@@ -314,6 +321,7 @@ export const MessageResponse = memo(
         "size-full break-words [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
         className
       )}
+      remarkPlugins={MESSAGE_REMARK_PLUGINS}
       {...props}
     />
   ),
@@ -447,4 +455,3 @@ export const MessageToolbar = ({
     {children}
   </div>
 );
-

@@ -6,8 +6,9 @@
 //   2. Try to extract visible text + selected text by injecting a content
 //      script. Fall back to just url+title if the content script is
 //      unavailable (e.g. chrome:// pages, the extension store, PDFs).
-//   3. Cache page text by URL. On the same URL, do not resend the full page
-//      context; only send the current selection if there is one.
+//   3. Cache page text by URL. On the same URL, still resend a compact
+//      url/title/excerpt block so follow-up questions cannot drift to another
+//      browser or tool context.
 //
 // The returned string is plain text formatted like:
 //
@@ -24,6 +25,7 @@
 const MAX_TITLE_CHARS = 240;
 const MAX_URL_CHARS = 2000;
 const MAX_EXCERPT_CHARS = 2000;
+const MAX_CACHED_EXCERPT_CHARS = 900;
 const MAX_PREVIEW_CHARS = 180;
 
 export interface ActiveTabContextPreview {
@@ -164,7 +166,7 @@ export async function buildActiveTabContext(): Promise<string | null> {
 
   let excerptRaw: string | null;
   let selected: string | null;
-  let includePageContext = false;
+  let includeFreshPageContext = false;
 
   if (_cachedUrl === url && _cachedPageContextInjected) {
     console.debug("[active-tab-context] CACHE HIT for:", url);
@@ -178,21 +180,20 @@ export async function buildActiveTabContext(): Promise<string | null> {
     _cachedUrl = url;
     _cachedText = excerptRaw;
     _cachedPageContextInjected = true;
-    includePageContext = true;
+    includeFreshPageContext = true;
   }
 
   const title = tab.title ? truncate(tab.title, MAX_TITLE_CHARS) : "(untitled)";
 
-  if (!includePageContext && !selected) return null;
-
   const lines = [
-    includePageContext
-      ? "Current browser tab (auto-injected by the chrome-acp side panel):"
-      : "Current browser tab selection (auto-injected by the chrome-acp side panel):",
+    "Current browser tab (authoritative chrome-acp side panel context):",
     `URL: ${url}`,
     `Title: ${title}`,
+    "Instruction: Answer questions about the current page from this Chrome tab context. Do not use unrelated DevTools, Browser MCP, or about:blank state as the current page unless this URL/title says so.",
   ];
-  if (includePageContext && excerptRaw) lines.push(`Excerpt: ${truncate(excerptRaw, MAX_EXCERPT_CHARS)}`);
+  if (excerptRaw) {
+    lines.push(`Excerpt: ${truncate(excerptRaw, includeFreshPageContext ? MAX_EXCERPT_CHARS : MAX_CACHED_EXCERPT_CHARS)}`);
+  }
   if (selected) lines.push(`Selected text: ${selected}`);
 
   return lines.join("\n");

@@ -37,6 +37,7 @@
     "@agentclientprotocol/sdk": "^0.14.1",
     "@hono/node-server": "^1.13.8",
     "@hono/node-ws": "^1.0.5",
+    "@midscene/web": "1.9.5",
     "@parcel/watcher": "^2.5.6",
     "@stricli/auto-complete": "^1.2.4",
     "@stricli/core": "^1.2.4",

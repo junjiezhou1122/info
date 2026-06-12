@@ -23,6 +23,9 @@ importers:
       '@info/iii-runtime':
         specifier: workspace:*
         version: link:packages/iii-runtime
+      '@info/processor-runtime':
+        specifier: workspace:*
+        version: link:packages/processor-runtime
       '@info/programs':
         specifier: workspace:*
         version: link:packages/programs
@@ -383,6 +386,9 @@ importers:
       '@info/core':
         specifier: workspace:*
         version: link:../core
+      '@info/processor-runtime':
+        specifier: workspace:*
+        version: link:../processor-runtime
       '@info/runtime':
         specifier: workspace:*
         version: link:../runtime
@@ -392,6 +398,12 @@ importers:
       iii-sdk:
         specifier: latest
         version: 0.19.2
+
+  packages/processor-runtime:
+    dependencies:
+      '@info/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/programs:
     dependencies:

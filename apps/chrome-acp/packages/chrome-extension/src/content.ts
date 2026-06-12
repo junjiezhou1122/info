@@ -1,3 +1,9 @@
+const contentGlobal = window as any;
+if (contentGlobal.__metaflowContentScriptLoaded) {
+  throw new Error("metaflow content script already loaded");
+}
+contentGlobal.__metaflowContentScriptLoaded = true;
+
 let maxScrollDepth = 0;
 let scrollEvents = 0;
 let selectionCount = 0;
@@ -173,9 +179,13 @@ function handleStableSelection() {
     removeSelectionToolbar();
     return;
   }
-  activeSelectionPayload = payload;
   showSelectionToolbar(payload);
   chrome.runtime.sendMessage({ type: "context.capture.browser_attention", kind: "selected", payload }).catch(() => undefined);
+}
+
+function queueSelectionCheck(delayMs = 180) {
+  clearTimeout(selectionTimer);
+  selectionTimer = window.setTimeout(() => handleStableSelection(), delayMs);
 }
 
 window.addEventListener("scroll", () => {
@@ -189,9 +199,12 @@ document.addEventListener("selectionchange", () => {
     selectionCount += 1;
     lastSelectedText = selected;
   }
-  clearTimeout(selectionTimer);
-  selectionTimer = window.setTimeout(() => handleStableSelection(), 650);
+  queueSelectionCheck(650);
 });
+
+document.addEventListener("mouseup", () => queueSelectionCheck(), true);
+document.addEventListener("pointerup", () => queueSelectionCheck(), true);
+document.addEventListener("keyup", () => queueSelectionCheck(), true);
 
 document.addEventListener("copy", () => {
   window.setTimeout(() => sendAttention("copied"), 0);
@@ -684,30 +697,37 @@ async function selectionActions() {
 
 function showSelectionToolbar(payload: any) {
   removeSelectionToolbar();
+  activeSelectionPayload = payload;
   const rect = selectionRect();
   if (!rect) return;
   selectionToolbar = document.createElement("div");
   selectionToolbar.id = "info-selection-toolbar";
   selectionToolbar.className = "is-ready";
+  document.documentElement.append(selectionToolbar);
+  renderSelectionButtons(payload, DEFAULT_SELECTION_ACTIONS);
+  positionSelectionToolbar(rect);
+  selectionActions().then((actions) => {
+    renderSelectionButtons(payload, actions);
+  });
+}
+
+function renderSelectionButtons(payload: any, actions: Array<{ id: string; label: string; prompt: string }>) {
+  if (!selectionToolbar || activeSelectionPayload !== payload) return;
+  selectionToolbar.textContent = "";
+  for (const action of actions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = action.label;
+    button.addEventListener("click", () => runSelectionAction(action, payload));
+    selectionToolbar.append(button);
+  }
   const save = document.createElement("button");
   save.type = "button";
   save.textContent = "Save";
   save.addEventListener("click", () => saveSelection(payload));
-  document.documentElement.append(selectionToolbar);
-  selectionActions().then((actions) => {
-    if (!selectionToolbar || activeSelectionPayload !== payload) return;
-    selectionToolbar.textContent = "";
-    for (const action of actions) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = action.label;
-      button.addEventListener("click", () => runSelectionAction(action, payload));
-      selectionToolbar.append(button);
-    }
-    selectionToolbar.append(save);
-    positionSelectionToolbar(rect);
-  });
-  positionSelectionToolbar(rect);
+  selectionToolbar.append(save);
+  const rect = selectionRect();
+  if (rect) positionSelectionToolbar(rect);
 }
 
 function saveSelection(payload = activeSelectionPayload) {
@@ -1122,14 +1142,26 @@ const YT_RECENT_GAPS_KEY = "language.recent_caption_gaps";
 const YT_RECENT_ACTIVE_WRITE_MS = 1_000;
 
 type YtGap = {
+  fragmentId: string;
   videoId: string;
   videoTitle: string;
   startTime: number;        // video seconds
   endTime: number;          // video seconds
+  durationSeconds: number;
+  videoDurationSeconds: number;
   captionOnMs: number;      // accumulated caption-on milliseconds
   toggles: number;          // how many times the user pressed Shift+C
   transcriptSamples: string[];
+  captionSamples: Array<{
+    text: string;
+    start_seconds: number;
+    end_seconds?: number;
+    captured_at: string;
+  }>;
+  triggerReason: string;
+  endedReason?: string;
   startedAt: string;        // ISO
+  endedAt?: string;
 };
 
 let ytActive = false;
@@ -1174,6 +1206,11 @@ function ytGetPlayerTime(): number {
   return ytPlayer?.currentTime ?? 0;
 }
 
+function ytGetVideoDuration(): number {
+  const duration = ytPlayer?.duration;
+  return typeof duration === "number" && Number.isFinite(duration) ? duration : 0;
+}
+
 function ytIsPlayerPaused(): boolean {
   return !ytPlayer || ytPlayer.paused || ytPlayer.ended;
 }
@@ -1200,17 +1237,37 @@ function ytReadCaptionText(): string | null {
   return joined || null;
 }
 
+function ytVideoUrlAt(seconds: number): string {
+  const url = new URL(location.href);
+  url.searchParams.set("t", `${Math.max(0, Math.floor(seconds))}s`);
+  return url.toString();
+}
+
+function ytSubtitleText(gap: YtGap): string {
+  const lines = gap.captionSamples
+    .map(sample => sample.text.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  return Array.from(new Set(lines)).join("\n");
+}
+
 function ytStartFreshGap(): void {
   if (!ytVideoId) return;
+  const startTime = ytGetPlayerTime();
+  const startedAt = new Date().toISOString();
   ytCurrentGap = {
+    fragmentId: `${ytVideoId}:${Math.round(startTime * 1000)}:${Date.now()}`,
     videoId: ytVideoId,
     videoTitle: ytVideoTitle ?? "",
-    startTime: ytGetPlayerTime(),
-    endTime: ytGetPlayerTime(),
+    startTime,
+    endTime: startTime,
+    durationSeconds: 0,
+    videoDurationSeconds: ytGetVideoDuration(),
     captionOnMs: 0,
     toggles: 0,
     transcriptSamples: [],
-    startedAt: new Date().toISOString(),
+    captionSamples: [],
+    triggerReason: "unknown",
+    startedAt,
   };
 }
 
@@ -1218,10 +1275,26 @@ function ytExtendGap(): void {
   if (!ytCurrentGap) return;
   const now = ytGetPlayerTime();
   if (now > ytCurrentGap.endTime) ytCurrentGap.endTime = now;
+  ytCurrentGap.durationSeconds = Math.max(0, ytCurrentGap.endTime - ytCurrentGap.startTime);
+  ytCurrentGap.videoDurationSeconds = ytGetVideoDuration();
   const sample = ytReadCaptionText();
   if (sample && !ytCurrentGap.transcriptSamples.includes(sample)) {
     ytCurrentGap.transcriptSamples.push(sample);
     if (ytCurrentGap.transcriptSamples.length > 6) ytCurrentGap.transcriptSamples.shift();
+  }
+  if (sample) {
+    const last = ytCurrentGap.captionSamples[ytCurrentGap.captionSamples.length - 1];
+    if (!last || last.text !== sample) {
+      if (last && last.end_seconds === undefined) last.end_seconds = now;
+      ytCurrentGap.captionSamples.push({
+        text: sample,
+        start_seconds: now,
+        captured_at: new Date().toISOString(),
+      });
+      if (ytCurrentGap.captionSamples.length > 20) ytCurrentGap.captionSamples.shift();
+    } else {
+      last.end_seconds = now;
+    }
   }
   if (ytCaptionOn && Date.now() - ytLastRecentWriteAt > YT_RECENT_ACTIVE_WRITE_MS) {
     ytLastRecentWriteAt = Date.now();
@@ -1233,6 +1306,7 @@ function ytStartCaptionFragment(reason: "keyboard" | "button" | "poll" | "play")
   if (!ytVideoId) return;
   ytStartFreshGap();
   ytCaptionOnSince = Date.now();
+  if (ytCurrentGap) ytCurrentGap.triggerReason = reason;
   if (ytCurrentGap) ytCurrentGap.toggles += reason === "poll" || reason === "play" ? 0 : 1;
   ytLastRecentWriteAt = 0;
   void rememberCurrentCaptionGap("active");
@@ -1261,14 +1335,27 @@ function ytSendGap(gap: YtGap | null): void {
   if (ytSendTimer) window.clearTimeout(ytSendTimer);
   ytSendTimer = window.setTimeout(() => {
     const payload = {
+      fragment_id: gap.fragmentId,
       video_id: gap.videoId,
       video_title: gap.videoTitle,
       video_url: location.href,
+      fragment_url: ytVideoUrlAt(gap.startTime),
       start_seconds: gap.startTime,
       end_seconds: gap.endTime,
+      duration_seconds: Math.max(0, gap.endTime - gap.startTime),
+      video_current_seconds: ytGetPlayerTime(),
+      video_duration_seconds: gap.videoDurationSeconds || ytGetVideoDuration(),
       caption_on_ms: gap.captionOnMs,
       toggles: gap.toggles,
       transcript_samples: gap.transcriptSamples,
+      caption_samples: gap.captionSamples,
+      subtitle_text: ytSubtitleText(gap),
+      trigger_reason: gap.triggerReason,
+      ended_reason: gap.endedReason,
+      caption_state: ytCaptionOn ? "on" : "off",
+      playback_state: ytIsPlayerPaused() ? "paused" : "playing",
+      fragment_started_at: gap.startedAt,
+      fragment_ended_at: gap.endedAt,
       observed_at: gap.startedAt,
     };
     void rememberRecentCaptionGap(payload, "sent");
@@ -1279,7 +1366,7 @@ function ytSendGap(gap: YtGap | null): void {
   }, YT_SEND_DEBOUNCE_MS);
 }
 
-function ytFinishCaptionFragment(): void {
+function ytFinishCaptionFragment(reason: "caption_off" | "pause" | "navigation" | "idle" = "caption_off"): void {
   if (!ytCurrentGap) {
     ytCaptionOnSince = null;
     return;
@@ -1293,6 +1380,24 @@ function ytFinishCaptionFragment(): void {
     ytCurrentGap.transcriptSamples.push(sample);
     if (ytCurrentGap.transcriptSamples.length > 6) ytCurrentGap.transcriptSamples.shift();
   }
+  ytCurrentGap.endTime = Math.max(ytCurrentGap.endTime, ytGetPlayerTime());
+  ytCurrentGap.durationSeconds = Math.max(0, ytCurrentGap.endTime - ytCurrentGap.startTime);
+  ytCurrentGap.videoDurationSeconds = ytGetVideoDuration();
+  ytCurrentGap.endedReason = reason;
+  ytCurrentGap.endedAt = new Date().toISOString();
+  if (sample) {
+    const last = ytCurrentGap.captionSamples[ytCurrentGap.captionSamples.length - 1];
+    if (!last || last.text !== sample) {
+      if (last && last.end_seconds === undefined) last.end_seconds = ytGetPlayerTime();
+      ytCurrentGap.captionSamples.push({
+        text: sample,
+        start_seconds: ytGetPlayerTime(),
+        captured_at: ytCurrentGap.endedAt,
+      });
+    } else {
+      last.end_seconds = ytGetPlayerTime();
+    }
+  }
   void rememberCurrentCaptionGap("sent");
   const gap = ytCurrentGap;
   ytCurrentGap = null;
@@ -1303,15 +1408,28 @@ async function rememberCurrentCaptionGap(status: "active" | "sent"): Promise<voi
   if (!ytCurrentGap) return;
   const activeDelta = ytCaptionOnSince ? Date.now() - ytCaptionOnSince : 0;
   await rememberRecentCaptionGap({
+    fragment_id: ytCurrentGap.fragmentId,
     video_id: ytCurrentGap.videoId,
     video_title: ytCurrentGap.videoTitle,
     video_url: location.href,
+    fragment_url: ytVideoUrlAt(ytCurrentGap.startTime),
     start_seconds: ytCurrentGap.startTime,
     end_seconds: ytCurrentGap.endTime,
+    duration_seconds: Math.max(0, ytCurrentGap.endTime - ytCurrentGap.startTime),
+    video_current_seconds: ytGetPlayerTime(),
+    video_duration_seconds: ytCurrentGap.videoDurationSeconds || ytGetVideoDuration(),
     caption_on_ms: ytCurrentGap.captionOnMs + activeDelta,
     toggles: ytCurrentGap.toggles,
     transcript_samples: ytCurrentGap.transcriptSamples,
+    caption_samples: ytCurrentGap.captionSamples,
+    subtitle_text: ytSubtitleText(ytCurrentGap),
     current_caption: ytReadCaptionText(),
+    trigger_reason: ytCurrentGap.triggerReason,
+    ended_reason: ytCurrentGap.endedReason,
+    caption_state: ytCaptionOn ? "on" : "off",
+    playback_state: ytIsPlayerPaused() ? "paused" : "playing",
+    fragment_started_at: ytCurrentGap.startedAt,
+    fragment_ended_at: ytCurrentGap.endedAt,
     observed_at: ytCurrentGap.startedAt,
   }, status);
 }
@@ -1335,7 +1453,7 @@ function ytApplyCaptionState(nextOn: boolean, reason: "keyboard" | "button" | "p
   if (ytCaptionOn) {
     if (!ytIsPlayerPaused()) ytStartCaptionFragment(reason);
   } else {
-    ytFinishCaptionFragment();
+    ytFinishCaptionFragment("caption_off");
   }
 }
 
@@ -1345,7 +1463,7 @@ function ytApplyPlaybackState(): void {
   ytVideoPaused = paused;
   if (!ytCaptionOn) return;
   if (paused) {
-    ytFinishCaptionFragment();
+    ytFinishCaptionFragment("pause");
   } else {
     ytStartCaptionFragment("play");
   }
@@ -1393,11 +1511,29 @@ function ytBind(): void {
     }
   }, true);
 
+  document.addEventListener("click", (event) => {
+    if (!ytActive) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target?.closest(".ytp-subtitles-button")) return;
+    window.setTimeout(() => ytApplyCaptionState(ytIsCaptionsOn(), "button"), 120);
+  }, true);
+
+  window.addEventListener("pagehide", () => {
+    if (ytCurrentGap) ytFinishCaptionFragment("navigation");
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden" && ytCurrentGap) {
+      ytFinishCaptionFragment("idle");
+    }
+  });
+
   // SPA navigation: re-bind when the URL changes to a new /watch?v=...
   let lastHref = location.href;
   window.setInterval(() => {
     if (location.href === lastHref) return;
     lastHref = location.href;
+    if (ytCurrentGap) ytFinishCaptionFragment("navigation");
     if (ytIsWatchPage()) {
       ytFlushGap();
       ytVideoId = ytExtractVideoId();
@@ -1405,6 +1541,14 @@ function ytBind(): void {
       ytCurrentGap = null;
       ytCaptionOn = false;
       ytVideoPaused = ytIsPlayerPaused();
+      ytCaptionOnSince = null;
+    } else {
+      ytActive = false;
+      ytPlayer = null;
+      ytVideoId = null;
+      ytVideoTitle = null;
+      ytCurrentGap = null;
+      ytCaptionOn = false;
       ytCaptionOnSince = null;
     }
   }, 1_000);

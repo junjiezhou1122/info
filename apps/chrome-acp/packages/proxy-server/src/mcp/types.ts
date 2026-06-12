@@ -11,10 +11,43 @@
 // Until we have a proper @chrome-acp/protocol package, keep these in sync manually.
 // ============================================================================
 
+export type BrowserDebuggerCommand =
+  | "capture_full_page"
+  | "get_layout_tree"
+  | "get_network_log"
+  | "evaluate_js"
+  | "dispatch_input"
+  | "print_pdf";
+
 export interface BrowserToolParams {
-  action: "tabs" | "read" | "execute";
+  action:
+    | "tabs"
+    | "read"
+    | "execute"
+    | "language_recent"
+    | "debugger"
+    | "open_tab"
+    | "activate_tab"
+    | "close_tab"
+    | "reload_tab"
+    | "click"
+    | "type"
+    | "observe"
+    | "act";
   tabId?: number;   // Required for read/execute
   script?: string;  // Required for execute
+  limit?: number;   // Optional for language_recent
+  command?: BrowserDebuggerCommand; // Required for debugger
+  args?: Record<string, unknown>;   // Optional debugger command args
+  url?: string;      // Required for open_tab
+  selector?: string; // Required for click/type
+  text?: string;     // Required for type
+  active?: boolean;  // Optional for open_tab
+  intent?: string;   // Required for act
+  target?: string;   // Optional natural-language target for act
+  submit?: boolean;  // Optional for act
+  mode?: "click" | "type" | "submit" | "auto"; // Optional for act
+  maxElements?: number; // Optional for observe
 }
 
 export interface BrowserTabInfo {
@@ -52,10 +85,126 @@ export interface BrowserExecuteResult {
   error?: string;
 }
 
+export interface BrowserActionResult {
+  action: "open_tab" | "activate_tab" | "close_tab" | "reload_tab" | "click" | "type" | "act";
+  tabId?: number;
+  url?: string;
+  title?: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}
+
+export interface BrowserObservedElement {
+  ref: string;
+  role: string;
+  tag: string;
+  label: string;
+  selector: string;
+  text?: string;
+  placeholder?: string;
+  ariaLabel?: string;
+  title?: string;
+  href?: string;
+  editable?: boolean;
+  disabled?: boolean;
+  visible?: boolean;
+  rect?: { x: number; y: number; width: number; height: number };
+}
+
+export interface BrowserObserveResult {
+  action: "observe";
+  tabId: number;
+  url: string;
+  title: string;
+  viewport: { width: number; height: number; scrollX: number; scrollY: number };
+  elements: BrowserObservedElement[];
+  elementCount: number;
+}
+
+export interface RecentCaptionGap {
+  id?: string;
+  fragment_id?: string;
+  video_id?: string;
+  video_title?: string;
+  video_url?: string;
+  fragment_url?: string;
+  start_seconds?: number;
+  end_seconds?: number;
+  duration_seconds?: number;
+  video_current_seconds?: number;
+  video_duration_seconds?: number;
+  caption_on_ms?: number;
+  toggles?: number;
+  transcript_samples?: string[];
+  subtitle_text?: string;
+  caption_samples?: Array<{
+    text: string;
+    start_seconds?: number;
+    end_seconds?: number;
+    captured_at?: string;
+  }>;
+  current_caption?: string | null;
+  trigger_reason?: string;
+  ended_reason?: string;
+  caption_state?: "on" | "off";
+  playback_state?: "playing" | "paused" | "ended";
+  fragment_started_at?: string;
+  fragment_ended_at?: string;
+  observed_at?: string;
+  captured_at?: string;
+  status?: string;
+}
+
+export interface SavedCaptionVideo {
+  video_id: string;
+  video_title: string;
+  video_url?: string;
+  updated_at: string;
+  segments: RecentCaptionGap[];
+}
+
+export interface BrowserLanguageRecentResult {
+  action: "language_recent";
+  key: string;
+  count: number;
+  gaps: RecentCaptionGap[];
+  saved_key: string;
+  total_saved: number;
+  saved_videos: SavedCaptionVideo[];
+}
+
+export interface BrowserDebuggerResult {
+  action: "debugger";
+  command: BrowserDebuggerCommand;
+  tabId: number;
+  url: string;
+  domain?: string;
+  allowed: boolean;
+  attached: boolean;
+  result?: unknown;
+  artifact?: {
+    mimeType?: string;
+    data?: string;
+    sizeBytes?: number;
+  };
+  error?: string;
+  policy?: {
+    enabled: boolean;
+    domain_allowed: boolean;
+    sensitive_domain: boolean;
+    requires_confirm?: boolean;
+  };
+}
+
 export type BrowserToolResult =
   | BrowserTabsResult
   | BrowserReadResult
-  | BrowserExecuteResult;
+  | BrowserExecuteResult
+  | BrowserObserveResult
+  | BrowserActionResult
+  | BrowserLanguageRecentResult
+  | BrowserDebuggerResult;
 
 export interface McpRequest {
   jsonrpc: "2.0";
@@ -219,11 +368,201 @@ export const BROWSER_EXECUTE_TOOL: McpTool = {
   },
 };
 
+export const BROWSER_LANGUAGE_RECENT_TOOL: McpTool = {
+  name: "browser_language_recent_captions",
+  description:
+    "Read Metaflow/Info Learn tab recent YouTube caption segments from the Chrome extension session store. " +
+    "Use this when the user asks about language-learning caption segments, recent comprehension gaps, or the Learn tab content. " +
+    "This reads chrome.storage.session['language.recent_caption_gaps']; it does not scrape the side panel DOM.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      limit: {
+        type: "number",
+        description: "Maximum caption segments to return. Defaults to 12, capped at 50.",
+      },
+    },
+  },
+};
+
+export const BROWSER_OPEN_TAB_TOOL: McpTool = {
+  name: "browser_open_tab",
+  description:
+    "Open a URL in a new Chrome tab. Use this for ordinary navigation; it does not require Advanced Browser Control.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      url: { type: "string", description: "URL to open. Include http:// or https:// unless opening a chrome:// page." },
+      active: { type: "boolean", description: "Whether to activate the new tab. Defaults to true." },
+    },
+    required: ["url"],
+  },
+};
+
+export const BROWSER_ACTIVATE_TAB_TOOL: McpTool = {
+  name: "browser_activate_tab",
+  description: "Activate an existing Chrome tab by tabId. Use browser_tabs first to find the tabId.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tabId: { type: "number", description: "Tab ID to activate." },
+    },
+    required: ["tabId"],
+  },
+};
+
+export const BROWSER_CLOSE_TAB_TOOL: McpTool = {
+  name: "browser_close_tab",
+  description: "Close an existing Chrome tab by tabId. Use only when the user clearly asks to close a tab.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tabId: { type: "number", description: "Tab ID to close." },
+    },
+    required: ["tabId"],
+  },
+};
+
+export const BROWSER_RELOAD_TAB_TOOL: McpTool = {
+  name: "browser_reload_tab",
+  description: "Reload an existing Chrome tab by tabId.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tabId: { type: "number", description: "Tab ID to reload." },
+    },
+    required: ["tabId"],
+  },
+};
+
+export const BROWSER_CLICK_TOOL: McpTool = {
+  name: "browser_click",
+  description:
+    "Click an element in a tab using a CSS selector. Uses DOM events for framework compatibility. Use browser_read first when unsure which selector to use.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tabId: { type: "number", description: "Tab ID containing the element." },
+      selector: { type: "string", description: "CSS selector for the element to click." },
+    },
+    required: ["tabId", "selector"],
+  },
+};
+
+export const BROWSER_TYPE_TOOL: McpTool = {
+  name: "browser_type",
+  description:
+    "Type text into an input, textarea, or contenteditable element in a tab using a CSS selector. Dispatches input/change events.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tabId: { type: "number", description: "Tab ID containing the editable element." },
+      selector: { type: "string", description: "CSS selector for input, textarea, or contenteditable target." },
+      text: { type: "string", description: "Text to insert into the editable element." },
+    },
+    required: ["tabId", "selector", "text"],
+  },
+};
+
+export const BROWSER_OBSERVE_TOOL: McpTool = {
+  name: "browser_observe",
+  description:
+    "Observe a Chrome tab and return a compact list of visible interactive elements with stable refs, labels, roles, selectors, and viewport coordinates. " +
+    "Use this before acting on complex pages instead of guessing CSS selectors.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tabId: { type: "number", description: "Tab ID to observe. Use browser_tabs first." },
+      maxElements: { type: "number", description: "Maximum elements to return. Defaults to 80, capped at 200." },
+    },
+    required: ["tabId"],
+  },
+};
+
+export const BROWSER_ACT_TOOL: McpTool = {
+  name: "browser_act",
+  description:
+    "Perform a high-level browser action from natural language. Internally observes the page, locates the best matching element, uses real CDP mouse/text input when needed, then verifies. " +
+    "Prefer this over browser_click/browser_type on complex SPAs such as ChatGPT, Gemini, Xianyu, Notion, Google Docs, and other React/contenteditable sites.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tabId: { type: "number", description: "Tab ID to act in. Use browser_tabs first." },
+      intent: { type: "string", description: "Natural-language action, e.g. 'click chat button', 'type message into main input', 'send message'." },
+      target: { type: "string", description: "Optional target hint, e.g. '聊一聊 button', 'main chat input', 'search box'." },
+      text: { type: "string", description: "Text to enter when the action types/fills an editable element." },
+      submit: { type: "boolean", description: "Whether to submit after typing, usually by Enter or a send button." },
+      mode: { type: "string", enum: ["click", "type", "submit", "auto"], description: "Optional action mode. Defaults to auto." },
+    },
+    required: ["tabId", "intent"],
+  },
+};
+
+export const BROWSER_VISION_ACT_TOOL: McpTool = {
+  name: "browser_vision_act",
+  description:
+    "Use Midscene visual browser automation on the user's current Chrome tab. " +
+    "Use this when browser_observe/browser_act cannot find or click an element, or when the page is visually complex. " +
+    "Requires the proxy to be started with CHROME_ACP_MIDSCENE=1 and MIDSCENE_MODEL_* environment variables.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      intent: { type: "string", description: "Natural-language action, e.g. 'click the 聊一聊 button'." },
+      target: { type: "string", description: "Optional visual target prompt, e.g. 'yellow 聊一聊 button near bottom center'." },
+      text: { type: "string", description: "Text to input when using mode='type'." },
+      submit: { type: "boolean", description: "Whether to press Enter after typing." },
+      mode: { type: "string", enum: ["auto", "click", "tap", "type"], description: "Action mode. Defaults to auto." },
+    },
+    required: ["intent"],
+  },
+};
+
+export const BROWSER_DEBUGGER_TOOL: McpTool = {
+  name: "browser_debugger",
+  description:
+    "Advanced optional Chrome Debugger/CDP tool for approved domains only. " +
+    "Default extension settings deny this tool until Advanced Browser Control is enabled and the tab domain is allowlisted. " +
+    "Use for full-page screenshots, layout/accessibility snapshots, PDF export, or controlled CDP input. " +
+    "High-risk commands such as evaluate_js, dispatch_input, and get_network_log are denied unless the user explicitly disables high-risk confirmation in settings.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tabId: {
+        type: "number",
+        description: "The tab ID to attach Chrome debugger to. Get this from browser_tabs.",
+      },
+      command: {
+        type: "string",
+        enum: ["capture_full_page", "get_layout_tree", "get_network_log", "evaluate_js", "dispatch_input", "print_pdf"],
+        description: "Debugger command to run.",
+      },
+      args: {
+        type: "object",
+        description:
+          "Optional command args. capture_full_page accepts {format:'jpeg'|'png', quality}. " +
+          "evaluate_js accepts {expression}. dispatch_input accepts {type:'mouse'|'text'|'key', x, y, text, key}. print_pdf accepts {landscape, printBackground}.",
+      },
+    },
+    required: ["tabId", "command"],
+  },
+};
+
 // All browser tools
 export const BROWSER_TOOLS = [
   BROWSER_TABS_TOOL,
   BROWSER_READ_TOOL,
   BROWSER_EXECUTE_TOOL,
+  BROWSER_LANGUAGE_RECENT_TOOL,
+  BROWSER_OPEN_TAB_TOOL,
+  BROWSER_ACTIVATE_TAB_TOOL,
+  BROWSER_CLOSE_TAB_TOOL,
+  BROWSER_RELOAD_TAB_TOOL,
+  BROWSER_CLICK_TOOL,
+  BROWSER_TYPE_TOOL,
+  BROWSER_OBSERVE_TOOL,
+  BROWSER_ACT_TOOL,
+  BROWSER_VISION_ACT_TOOL,
+  BROWSER_DEBUGGER_TOOL,
 ];
 
 // ============================================================================
@@ -269,6 +608,55 @@ export const INFO_SEARCH_CONTEXT_TOOL: McpTool = {
       },
     },
     required: ["query"],
+  },
+};
+
+// Info List Views Tool — wraps GET /context/views and returns active view context
+export const INFO_LIST_VIEWS_TOOL: McpTool = {
+  name: "info_list_views",
+  description:
+    "List recent active Info Views directly from the user's local view inbox. " +
+    "Use this to inspect auto analysis, proactive tasks, writing suggestions, language-learning views, tool opportunities, and project context before answering. " +
+    "This is better than browser_read when the question is about what Info/Metaflow already observed, analyzed, or recommended. " +
+    "Use family='related' for a broad working context, or family='analyze' / 'task' / 'language' / 'writing' / 'tool' for focused context.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      family: {
+        type: "string",
+        enum: ["related", "analyze", "task", "language", "writing", "tool", "project", "all"],
+        description:
+          "Optional view family shortcut. 'related' includes current work, browser analysis, writing, research, tool, and language-learning views. 'all' applies no view_type filter.",
+      },
+      view_types: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Optional exact Info view_type filters. Overrides or narrows by concrete types such as ['analysis.browser_agent_task', 'app.language.review_queue'].",
+      },
+      view_type_prefix: {
+        type: "string",
+        description:
+          "Optional prefix filter, e.g. 'app.language.' or 'memory.language.'. Used only when view_types/family do not fully express the request.",
+      },
+      query: {
+        type: "string",
+        description:
+          "Optional text query to rank/filter views against the user's current question, tab title, URL, selected text, or task.",
+      },
+      active_only: {
+        type: "boolean",
+        description: "Whether to exclude archived/rejected views. Defaults to true.",
+      },
+      limit: {
+        type: "number",
+        description: "Maximum number of views to return. Defaults to 12, capped at 50.",
+      },
+      updated_after: {
+        type: "string",
+        description: "Optional ISO timestamp cursor. Only return views updated after this time.",
+      },
+    },
   },
 };
 
@@ -334,7 +722,7 @@ export const INFO_SUBMIT_FEEDBACK_TOOL: McpTool = {
 // All info context tools
 export const INFO_TOOLS = [
   INFO_SEARCH_CONTEXT_TOOL,
+  INFO_LIST_VIEWS_TOOL,
   INFO_GET_VIEW_TOOL,
   INFO_SUBMIT_FEEDBACK_TOOL,
 ];
-

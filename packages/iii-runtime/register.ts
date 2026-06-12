@@ -4,8 +4,10 @@ import { ContextStore } from "@info/core";
 import { createCascadeFunctionDefinitions } from "./cascade.js";
 import { createContextFunctionDefinitions } from "./context-functions.js";
 import { registerProgramWorkers } from "./program-workers.js";
+import { createProcessorWorkerDefinitions } from "./processor-workers.js";
 import { registerRuntimeWorkers } from "./runtime-workers.js";
 import { createViewWorkerDefinitions } from "./view-workers.js";
+import { createWorkerCatalogFunctionDefinitions } from "./workers.js";
 import type { IiiCascadeInput, IiiRuntimeClient, InfoIiiRuntimeOptions, ViewWorkerInput } from "./types.js";
 
 const DEFAULT_ENGINE_URL = process.env.III_ENGINE_URL ?? "ws://localhost:49134";
@@ -17,7 +19,9 @@ export async function registerInfoIiiRuntime(iii: IiiRuntimeClient, options: Inf
   const cascadeDefinitions = createCascadeFunctionDefinitions(definitions);
   const contextDefinitions = createContextFunctionDefinitions(store, iii);
   const programDefinitions = await registerProgramWorkers(iii, store);
+  const processorDefinitions = createProcessorWorkerDefinitions(store);
   const runtimeDefinitions = await registerRuntimeWorkers(iii, store);
+  const workerCatalogDefinitions = createWorkerCatalogFunctionDefinitions(store, iii);
 
   for (const definition of definitions) {
     await iii.registerFunction(definition.function_id, async (input: unknown) => {
@@ -96,6 +100,54 @@ export async function registerInfoIiiRuntime(iii: IiiRuntimeClient, options: Inf
     }
   }
 
+  for (const definition of workerCatalogDefinitions) {
+    await iii.registerFunction(definition.function_id, async () => definition.handler(), {
+      metadata: {
+        runtime: "@info/iii-runtime",
+        kind: "worker_catalog",
+        triggers: definition.triggers,
+      },
+    });
+
+    if (iii.registerTrigger) {
+      for (const topic of definition.triggers) {
+        await iii.registerTrigger({
+          type: "subscribe",
+          function_id: definition.function_id,
+          config: { topic },
+          metadata: {
+            runtime: "@info/iii-runtime",
+            kind: "worker_catalog",
+          },
+        });
+      }
+    }
+  }
+
+  for (const definition of processorDefinitions) {
+    await iii.registerFunction(definition.function_id, async (input: unknown) => definition.handler(input), {
+      metadata: {
+        runtime: "@info/iii-runtime",
+        kind: "processor",
+        triggers: definition.triggers,
+      },
+    });
+
+    if (iii.registerTrigger) {
+      for (const topic of definition.triggers) {
+        await iii.registerTrigger({
+          type: "subscribe",
+          function_id: definition.function_id,
+          config: { topic },
+          metadata: {
+            runtime: "@info/iii-runtime",
+            kind: "processor",
+          },
+        });
+      }
+    }
+  }
+
   return {
     ok: true as const,
     worker_name: options.workerName ?? DEFAULT_WORKER_NAME,
@@ -104,14 +156,18 @@ export async function registerInfoIiiRuntime(iii: IiiRuntimeClient, options: Inf
       ...cascadeDefinitions.map(definition => definition.function_id),
       ...contextDefinitions.map(definition => definition.function_id),
       ...programDefinitions.map(definition => definition.function_id),
+      ...processorDefinitions.map(definition => definition.function_id),
       ...runtimeDefinitions.map(definition => definition.function_id),
+      ...workerCatalogDefinitions.map(definition => definition.function_id),
     ],
     triggers_registered: [
       ...definitions.flatMap(definition => definition.input_topics.map(topic => ({ function_id: definition.function_id, topic }))),
       ...cascadeDefinitions.flatMap(definition => definition.triggers.map(topic => ({ function_id: definition.function_id, topic }))),
       ...contextDefinitions.flatMap(definition => definition.triggers.map(topic => ({ function_id: definition.function_id, topic }))),
       ...programDefinitions.flatMap(definition => definition.triggers.map(topic => ({ function_id: definition.function_id, topic }))),
+      ...processorDefinitions.flatMap(definition => definition.triggers.map(topic => ({ function_id: definition.function_id, topic }))),
       ...runtimeDefinitions.flatMap(definition => definition.triggers.map(topic => ({ function_id: definition.function_id, topic }))),
+      ...workerCatalogDefinitions.flatMap(definition => definition.triggers.map(topic => ({ function_id: definition.function_id, topic }))),
     ],
   };
 }

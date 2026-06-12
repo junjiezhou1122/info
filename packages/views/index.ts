@@ -10,3 +10,5 @@ export * as WorkflowView from "./workflow/index.js";
 export * as MemoryView from "./memory/index.js";
 export * as ViewCatalog from "./catalog.js";
 export * from "./catalog.js";
+export * as ViewProcessors from "./processors.js";
+export * from "./processors.js";

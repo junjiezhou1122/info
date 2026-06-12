@@ -728,6 +728,7 @@ function contextViewsEndpoint(settings: InfoSettings, options: any = {}) {
   if (options.limit) url.searchParams.set("limit", String(options.limit));
   if (Array.isArray(options.viewTypes) && options.viewTypes.length) url.searchParams.set("view_types", options.viewTypes.join(","));
   if (options.viewTypePrefix) url.searchParams.set("view_type_prefix", options.viewTypePrefix);
+  if (options.summaryOnly || options.viewTypePrefix) url.searchParams.set("summary_only", "true");
   if (options.activeOnly) url.searchParams.set("active_only", "true");
   if (options.cursor) url.searchParams.set("cursor", options.cursor);
   if (options.query) url.searchParams.set("query", options.query);

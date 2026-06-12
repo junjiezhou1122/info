@@ -4,8 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "@info/core";
-import { III_CASCADE_FUNCTIONS, III_CONTEXT_FUNCTIONS, III_PROGRAM_FUNCTIONS, InProcessIiiRuntimeClient, registerInfoIiiRuntime, VIEW_WORKER_FUNCTIONS } from "@info/iii-runtime";
+import { III_CASCADE_FUNCTIONS, III_CONTEXT_FUNCTIONS, III_PROCESSOR_FUNCTIONS, III_PROGRAM_FUNCTIONS, III_WORKER_FUNCTIONS, InProcessIiiRuntimeClient, registerInfoIiiRuntime, VIEW_WORKER_FUNCTIONS } from "@info/iii-runtime";
 import { signalFromRecord, signalFromView } from "@info/programs/signals.js";
+import { createViewProcessorDefinitions } from "@info/views/processors.js";
 
 async function withStore(fn: (store: ContextStore) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), "info-iii-runtime-test-"));
@@ -28,6 +29,18 @@ test("@info/iii-runtime registers view compiler functions as first-class iii fun
   assert.ok(iii.triggers.length >= result.functions_registered.length);
 }));
 
+test("@info/iii-runtime adapts the shared View processor registry", async () => withStore(async (store) => {
+  const iii = new InProcessIiiRuntimeClient();
+  await registerInfoIiiRuntime(iii, { store });
+  const processors = createViewProcessorDefinitions();
+
+  assert.ok(processors.length >= 1);
+  for (const processor of processors) {
+    assert.equal(iii.functions.has(processor.function_id), true);
+  }
+  assert.equal(processors.find(processor => processor.view_type === "evidence")?.function_id, VIEW_WORKER_FUNCTIONS.evidence);
+}));
+
 test("@info/iii-runtime registers default programs and capabilities as iii functions", async () => withStore(async (store) => {
   const iii = new InProcessIiiRuntimeClient();
   await registerInfoIiiRuntime(iii, { store });
@@ -36,6 +49,68 @@ test("@info/iii-runtime registers default programs and capabilities as iii funct
   assert.equal(iii.functions.has("program::project_ambient"), true);
   assert.equal(iii.functions.has(III_PROGRAM_FUNCTIONS.agentTaskSubmit), true);
   assert.equal(iii.functions.has("capability::browser_ambient_explore"), true);
+}));
+
+test("@info/iii-runtime exposes a unified worker catalog", async () => withStore(async (store) => {
+  const iii = new InProcessIiiRuntimeClient();
+  await registerInfoIiiRuntime(iii, { store });
+
+  const result = await iii.trigger({ function_id: III_WORKER_FUNCTIONS.catalog }) as {
+    ok?: boolean;
+    workers?: Array<{
+      id: string;
+      kind: string;
+      processor: { function_id: string };
+      subscribes: { observations?: string[]; views?: string[]; topics?: string[] };
+      produces: { views?: string[]; observations?: string[] };
+    }>;
+  };
+  const workers = result.workers ?? [];
+  const byId = new Map(workers.map(worker => [worker.id, worker]));
+
+  assert.equal(result.ok, true);
+  assert.equal(iii.functions.has(III_WORKER_FUNCTIONS.catalog), true);
+  assert.equal(byId.get(III_CONTEXT_FUNCTIONS.ingest)?.kind, "ingest");
+  assert.ok(byId.get(III_CONTEXT_FUNCTIONS.ingest)?.subscribes.observations?.includes("observation.*"));
+  assert.equal(byId.get(VIEW_WORKER_FUNCTIONS.evidence)?.kind, "view_compiler");
+  assert.deepEqual(byId.get(VIEW_WORKER_FUNCTIONS.evidence)?.produces.views, ["evidence"]);
+  assert.equal(byId.get(III_PROCESSOR_FUNCTIONS.surfaceState)?.kind, "processor");
+  assert.ok(byId.get(III_PROCESSOR_FUNCTIONS.surfaceState)?.subscribes.observations?.includes("observation.screenpipe_*"));
+  assert.deepEqual(byId.get(III_PROCESSOR_FUNCTIONS.surfaceState)?.produces.views, ["state.surface"]);
+  assert.ok(byId.get("program::writing_ambient")?.subscribes.observations?.includes("observation.editor.text_changed"));
+  assert.ok(byId.get("program::writing_ambient")?.produces.views?.includes("advice.writing_assist"));
+  assert.ok(byId.get("program::browser_ambient")?.subscribes.observations?.includes("observation.browser_page_snapshot"));
+  assert.ok(byId.get("program::browser_ambient")?.produces.views?.includes("analysis.browser_agent_task"));
+}));
+
+test("@info/iii-runtime can compile current surface state from an Observation", async () => withStore(async (store) => {
+  const record = store.insertRecord({
+    id: "record:iii-surface-screen",
+    schema: { name: "observation.screenpipe_activity", version: 1 },
+    source: { type: "screenpipe", connector: "screenpipe-local-api" },
+    scope: { app: "Warp" },
+    time: { observed_at: new Date().toISOString() },
+    content: { title: "Warp - info", text: "pnpm typecheck running in /Users/junjie/info" },
+    payload: {
+      app_name: "Warp",
+      window_name: "info",
+      frame_id: 12345,
+      raw_result: { content: { file_path: "/tmp/surface.jpg" } },
+    },
+  });
+  const iii = new InProcessIiiRuntimeClient();
+  await registerInfoIiiRuntime(iii, { store });
+
+  const result = await iii.trigger({
+    function_id: III_PROCESSOR_FUNCTIONS.surfaceState,
+    payload: { record_id: record.id },
+  }) as { ok?: boolean; views_written?: string[] };
+  const view = result.views_written?.[0] ? store.getView(result.views_written[0]) : undefined;
+
+  assert.equal(result.ok, true);
+  assert.equal(view?.view_type, "state.surface");
+  assert.equal(view?.content?.surface_kind, "terminal");
+  assert.equal((view?.content?.screen as any)?.screenshot_path, "/tmp/surface.jpg");
 }));
 
 test("direct capability iii workers preserve ProgramRuntime capability provenance events", async () => withStore(async (store) => {

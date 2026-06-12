@@ -107,6 +107,13 @@ test("Browser popup can query all active View types without narrowing view_types
     ),
     "http://127.0.0.1:3111/context/views?limit=12&active_only=true&query=anything+searchable",
   );
+  assert.equal(
+    contextViewsEndpointFromSettings(
+      { endpoint: "http://127.0.0.1:3111/context/ingest" },
+      { viewTypePrefix: "analysis.", limit: 60 },
+    ),
+    "http://127.0.0.1:3111/context/views?limit=60&view_type_prefix=analysis.&summary_only=true",
+  );
 });
 
 test("Browser popup can narrow to writing assist Views", () => {
@@ -211,6 +218,7 @@ test("Chrome ACP extension carries browser observations and inline writing assis
   assert.match(manifest, /"content_scripts"/);
   assert.match(manifest, /"dist\/content\.js"/);
   assert.match(manifest, /"storage"/);
+  assert.match(manifest, /"debugger"/);
   assert.match(build, /path\.resolve\("src", "content\.ts"\)/);
   assert.match(background, /startInfoCapture\(\)/);
   assert.match(background, /handleInfoCaptureMessage/);
@@ -247,6 +255,37 @@ test("Chrome ACP extension carries browser observations and inline writing assis
   assert.match(capture, /postWritingAssistRecord\(record\)/);
   assert.match(capture, /writingAssistEndpoint/);
   assert.match(capture, /sourceRecordId:\s*message\.sourceRecordId/);
+});
+
+test("Chrome ACP exposes optional gated Browser Debugger tools", () => {
+  const manifest = readFileSync("apps/chrome-acp/packages/chrome-extension/manifest.json", "utf8");
+  const browserTool = readFileSync("apps/chrome-acp/packages/chrome-extension/src/tools/browser.ts", "utf8");
+  const proxyTypes = readFileSync("apps/chrome-acp/packages/proxy-server/src/mcp/types.ts", "utf8");
+  const proxyHandler = readFileSync("apps/chrome-acp/packages/proxy-server/src/mcp/handler.ts", "utf8");
+  const sharedTypes = readFileSync("apps/chrome-acp/packages/shared/src/acp/types.ts", "utf8");
+
+  assert.match(manifest, /"debugger"/);
+  assert.match(sharedTypes, /BrowserDebuggerCommand/);
+  assert.match(sharedTypes, /action:\s*"tabs" \| "read" \| "execute" \| "language_recent" \| "debugger"/);
+  assert.match(proxyTypes, /BROWSER_DEBUGGER_TOOL/);
+  assert.match(proxyTypes, /browser_debugger/);
+  assert.match(proxyTypes, /capture_full_page/);
+  assert.match(proxyTypes, /get_layout_tree/);
+  assert.match(proxyTypes, /evaluate_js/);
+  assert.match(proxyHandler, /browser_debugger:\s*"debugger"/);
+  assert.match(proxyHandler, /formatDebuggerResult/);
+  assert.match(browserTool, /DEBUGGER_SETTINGS_KEY/);
+  assert.match(browserTool, /chrome\.debugger\.attach/);
+  assert.match(browserTool, /chrome\.debugger\.sendCommand/);
+  assert.match(browserTool, /Page\.captureScreenshot/);
+  assert.match(browserTool, /DOMSnapshot\.captureSnapshot/);
+  assert.match(browserTool, /Accessibility\.getFullAXTree/);
+  assert.match(browserTool, /Runtime\.evaluate/);
+  assert.match(browserTool, /Input\.dispatchMouseEvent/);
+  assert.match(browserTool, /Page\.printToPDF/);
+  assert.match(browserTool, /Advanced Browser Control is disabled/);
+  assert.match(browserTool, /Domain is not allowlisted/);
+  assert.match(browserTool, /blocked on sensitive domain/);
 });
 
 test("Chrome ACP content script shows selection Explain Save toolbar", () => {

@@ -1,4 +1,5 @@
-import type { ContextStore, LlmOptions, StoredContextRecord, StoredContextView, StoredRuntimeEvent } from "@info/core";
+import type { ContextStore, StoredContextRecord, StoredContextView } from "@info/core";
+import type { ViewProcessorDefinition, ViewProcessorInput, ViewProcessorResult } from "@info/views/processors.js";
 
 export type IiiRuntimeClient = {
   registerFunction(id: string, handler: (input: unknown) => Promise<any>, options?: unknown): unknown | Promise<unknown>;
@@ -12,61 +13,54 @@ export type InfoIiiRuntimeOptions = {
   workerName?: string;
 };
 
-export type ViewWorkerInput = {
-  write?: boolean;
-  minutes?: number;
-  limit?: number;
-  llm?: LlmOptions;
-  vision_llm?: LlmOptions;
-  visual_frame_limit?: number;
-  visual_frame_concurrency?: number;
-  visual_frame_sample_seconds?: number;
-  work_thread_minutes?: number;
-  activity_timeline_minutes?: number;
-  project_timeline_minutes?: number;
-  project_path?: string;
-  project?: string;
-  plugin_id?: string;
-  source_record_ids?: string[];
-  source_view_ids?: string[];
-  records?: StoredContextRecord[];
-  runtime_events?: StoredRuntimeEvent[];
-  source_views?: StoredContextView[];
-  event_limit?: number;
-  bucket_minutes?: number;
-  include_runtime_events?: boolean;
-  include_low_level_screenpipe?: boolean;
-  dedupe?: boolean;
-  bucket_item_limit?: number | false;
-  summarize_heartbeats?: boolean;
-  source_filter?: "screenpipe" | "browser" | "runtime" | "all";
-  merge_continuous?: boolean;
-  merge_gap_minutes?: number;
-  cascade?: boolean;
-  cascade_depth?: number;
-  max_depth?: number;
+export type ViewWorkerInput = ViewProcessorInput;
+
+export type InfoWorkerKind = "ingest" | "context" | "processor" | "view_compiler" | "program" | "capability" | "runtime" | "router";
+
+export type InfoWorkerInputSpec = {
+  topics?: string[];
+  observations?: string[];
+  views?: string[];
+  filters?: {
+    source?: string;
+    connector?: string;
+    domain?: string;
+    app?: string;
+    project_path?: string;
+    repo?: string;
+  };
 };
 
-export type ViewWorkerResult = {
-  ok: true;
-  function_id: string;
-  view_type: string;
-  generated_at: string;
-  views_written: string[];
-  views: StoredContextView[];
-  diagnostics: Record<string, unknown>;
+export type InfoWorkerDefinition = {
+  id: string;
+  title: string;
+  kind: InfoWorkerKind;
+  processor: {
+    function_id: string;
+  };
+  subscribes: InfoWorkerInputSpec;
+  produces: {
+    observations?: string[];
+    views?: string[];
+    events?: string[];
+    topics?: string[];
+  };
+  policy?: {
+    speed?: "reflex" | "glance" | "think" | "work" | "background";
+    autonomy?: "manual" | "suggest" | "draft" | "sandbox_auto" | "full_auto";
+  };
+  program_id?: string;
+  capability_id?: string;
 };
+
+export type ViewWorkerResult = ViewProcessorResult;
 
 export type ViewWorkerContext = {
   store: ContextStore;
   iii?: IiiRuntimeClient;
 };
 
-export type ViewWorkerDefinition = {
-  function_id: string;
-  view_type: string;
-  input_topics: string[];
-  output_topic: string;
+export type ViewWorkerDefinition = Omit<ViewProcessorDefinition, "process"> & {
   handler: (input: ViewWorkerInput, context: ViewWorkerContext) => Promise<ViewWorkerResult>;
 };
 

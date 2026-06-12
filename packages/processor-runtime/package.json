@@ -1,0 +1,14 @@
+{
+  "name": "@info/processor-runtime",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./*.js": "./*.ts",
+    "./runtimes/*.js": "./runtimes/*.ts"
+  },
+  "dependencies": {
+    "@info/core": "workspace:*"
+  }
+}

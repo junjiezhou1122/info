@@ -46,6 +46,14 @@ const port = Number(process.env.CONTEXT_HTTP_PORT ?? 3111);
 
 export function createContextHttpHandler(store: ContextStore) {
   return async (req: any, res: any) => {
+  const requestStartedAt = Date.now();
+  const requestUrl = req.url ?? "";
+  const originalEnd = res.end.bind(res);
+  res.end = (chunk?: any, encoding?: any, cb?: any) => {
+    const elapsed = Date.now() - requestStartedAt;
+    if (elapsed > 500) console.warn(`[context-http] slow ${req.method} ${requestUrl} ${elapsed}ms`);
+    return originalEnd(chunk, encoding, cb);
+  };
   try {
     if (req.method === "OPTIONS") return send(res, 204, {});
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -291,8 +299,9 @@ export function createContextHttpHandler(store: ContextStore) {
     if (req.method === "GET" && url.pathname === "/context/views/families") {
       const viewTypes = url.searchParams.get("view_types")?.split(",").map(x => x.trim()).filter(Boolean);
       const activeOnly = url.searchParams.get("active_only") !== "false";
+      const includeKinds = url.searchParams.get("include_kinds") === "true";
       const requestedTypes = viewTypes?.length ? viewTypes : VIEW_FAMILY_ORDER;
-      const listed = new Map(store.listViewFamilySummaries({ view_types: requestedTypes, active_only: activeOnly }).map(family => [family.family, family]));
+      const listed = new Map(store.listViewFamilySummaries({ view_types: requestedTypes, active_only: activeOnly, include_kinds: includeKinds }).map(family => [family.family, family]));
       const families = requestedTypes
         .map(familyType => {
           const family = listed.get(familyType);
@@ -326,10 +335,14 @@ export function createContextHttpHandler(store: ContextStore) {
       const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
       if (pluginParam && !plugin) return send(res, 404, pluginNotFoundBody(pluginParam));
       const surfacingPreferences = surfacingPreferencesForPlugin(store, plugin);
+      const requestedSummaryOnly = url.searchParams.get("summary_only");
+      const viewTypePrefix = url.searchParams.get("view_type_prefix") ?? undefined;
+      const summaryOnly = requestedSummaryOnly === "true";
+      const boundedSummary = Boolean(updatedAfter || viewTypePrefix || ((viewTypes?.length ?? 0) > 1 && limit > 0 && limit <= 20));
       const listedViews = store.listViews({
-        limit: viewListCandidateLimit({ limit, query, pluginScoped: Boolean(pluginParam) }),
+        limit: viewListCandidateLimit({ limit, query, pluginScoped: Boolean(pluginParam), summaryOnly, boundedSummary }),
         view_types: viewTypes,
-        view_type_prefix: url.searchParams.get("view_type_prefix") ?? undefined,
+        view_type_prefix: viewTypePrefix,
         active_only: url.searchParams.get("active_only") === "true",
         status: url.searchParams.get("status") as any || undefined,
         compiler_id: url.searchParams.get("compiler_id") ?? undefined,
@@ -341,7 +354,7 @@ export function createContextHttpHandler(store: ContextStore) {
       const policyViews = filterViewsForPlugin(listedViews, store, plugin);
       const filteredViews = filterViewsByQuery(rankViewsForSurfacing(policyViews, surfacingPreferences), query);
       const views = limit <= 0 ? filteredViews : filteredViews.slice(0, limit);
-      const responseViews = url.searchParams.get("summary_only") === "true" ? views.map(summarizeViewForList) : views;
+      const responseViews = summaryOnly ? views.map(summarizeViewForList) : views;
       const nextCursor = nextViewCursor(views, updatedAfter);
       return send(res, 200, {
         ok: true,

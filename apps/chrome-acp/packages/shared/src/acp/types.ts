@@ -37,10 +37,43 @@ export interface PermissionResponsePayload {
 // They define the protocol between proxy-server and browser extension.
 // ============================================================================
 
+export type BrowserDebuggerCommand =
+  | "capture_full_page"
+  | "get_layout_tree"
+  | "get_network_log"
+  | "evaluate_js"
+  | "dispatch_input"
+  | "print_pdf";
+
 export interface BrowserToolParams {
-  action: "tabs" | "read" | "execute";
+  action:
+    | "tabs"
+    | "read"
+    | "execute"
+    | "language_recent"
+    | "debugger"
+    | "open_tab"
+    | "activate_tab"
+    | "close_tab"
+    | "reload_tab"
+    | "click"
+    | "type"
+    | "observe"
+    | "act";
   tabId?: number;   // Required for read/execute
   script?: string;  // Required for execute
+  limit?: number;   // Optional for language_recent
+  command?: BrowserDebuggerCommand; // Required for debugger
+  args?: Record<string, unknown>;   // Optional debugger command args
+  url?: string;      // Required for open_tab
+  selector?: string; // Required for click/type
+  text?: string;     // Required for type
+  active?: boolean;  // Optional for open_tab
+  intent?: string;   // Required for act
+  target?: string;   // Optional natural-language target for act
+  submit?: boolean;  // Optional for act
+  mode?: "click" | "type" | "submit" | "auto"; // Optional for act
+  maxElements?: number; // Optional for observe
 }
 
 export interface BrowserTabInfo {
@@ -78,10 +111,126 @@ export interface BrowserExecuteResult {
   error?: string;
 }
 
+export interface BrowserActionResult {
+  action: "open_tab" | "activate_tab" | "close_tab" | "reload_tab" | "click" | "type" | "act";
+  tabId?: number;
+  url?: string;
+  title?: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}
+
+export interface BrowserObservedElement {
+  ref: string;
+  role: string;
+  tag: string;
+  label: string;
+  selector: string;
+  text?: string;
+  placeholder?: string;
+  ariaLabel?: string;
+  title?: string;
+  href?: string;
+  editable?: boolean;
+  disabled?: boolean;
+  visible?: boolean;
+  rect?: { x: number; y: number; width: number; height: number };
+}
+
+export interface BrowserObserveResult {
+  action: "observe";
+  tabId: number;
+  url: string;
+  title: string;
+  viewport: { width: number; height: number; scrollX: number; scrollY: number };
+  elements: BrowserObservedElement[];
+  elementCount: number;
+}
+
+export interface RecentCaptionGap {
+  id?: string;
+  fragment_id?: string;
+  video_id?: string;
+  video_title?: string;
+  video_url?: string;
+  fragment_url?: string;
+  start_seconds?: number;
+  end_seconds?: number;
+  duration_seconds?: number;
+  video_current_seconds?: number;
+  video_duration_seconds?: number;
+  caption_on_ms?: number;
+  toggles?: number;
+  transcript_samples?: string[];
+  subtitle_text?: string;
+  caption_samples?: Array<{
+    text: string;
+    start_seconds?: number;
+    end_seconds?: number;
+    captured_at?: string;
+  }>;
+  current_caption?: string | null;
+  trigger_reason?: string;
+  ended_reason?: string;
+  caption_state?: "on" | "off";
+  playback_state?: "playing" | "paused" | "ended";
+  fragment_started_at?: string;
+  fragment_ended_at?: string;
+  observed_at?: string;
+  captured_at?: string;
+  status?: string;
+}
+
+export interface SavedCaptionVideo {
+  video_id: string;
+  video_title: string;
+  video_url?: string;
+  updated_at: string;
+  segments: RecentCaptionGap[];
+}
+
+export interface BrowserLanguageRecentResult {
+  action: "language_recent";
+  key: string;
+  count: number;
+  gaps: RecentCaptionGap[];
+  saved_key: string;
+  total_saved: number;
+  saved_videos: SavedCaptionVideo[];
+}
+
+export interface BrowserDebuggerResult {
+  action: "debugger";
+  command: BrowserDebuggerCommand;
+  tabId: number;
+  url: string;
+  domain?: string;
+  allowed: boolean;
+  attached: boolean;
+  result?: unknown;
+  artifact?: {
+    mimeType?: string;
+    data?: string;
+    sizeBytes?: number;
+  };
+  error?: string;
+  policy?: {
+    enabled: boolean;
+    domain_allowed: boolean;
+    sensitive_domain: boolean;
+    requires_confirm?: boolean;
+  };
+}
+
 export type BrowserToolResult =
   | BrowserTabsResult
   | BrowserReadResult
-  | BrowserExecuteResult;
+  | BrowserExecuteResult
+  | BrowserObserveResult
+  | BrowserActionResult
+  | BrowserLanguageRecentResult
+  | BrowserDebuggerResult;
 
 // Messages sent TO the proxy server
 // Reference: Zed's MessageEditor.contents() builds Vec<acp::ContentBlock>

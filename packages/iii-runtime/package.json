@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@info/core": "workspace:*",
+    "@info/processor-runtime": "workspace:*",
     "@info/runtime": "workspace:*",
     "@info/views": "workspace:*",
     "iii-sdk": "latest"

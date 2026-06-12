@@ -2,7 +2,112 @@ import { handleInfoCaptureMessage, installInfoCaptureDefaults, startInfoCapture 
 
 let pendingSidepanelPrompt: any = null;
 const RECENT_CAPTION_GAPS_KEY = "language.recent_caption_gaps";
+const SAVED_CAPTION_GAPS_BY_VIDEO_KEY = "language.caption_gaps.by_video";
 const MAX_RECENT_CAPTION_GAPS = 12;
+const MAX_SAVED_CAPTION_VIDEOS = 80;
+const MAX_SAVED_GAPS_PER_VIDEO = 50;
+
+type CaptionGap = {
+  id?: string;
+  fragment_id?: string;
+  video_id?: string;
+  video_title?: string;
+  video_url?: string;
+  fragment_url?: string;
+  start_seconds?: number;
+  end_seconds?: number;
+  duration_seconds?: number;
+  video_current_seconds?: number;
+  video_duration_seconds?: number;
+  caption_on_ms?: number;
+  toggles?: number;
+  transcript_samples?: string[];
+  subtitle_text?: string;
+  caption_samples?: Array<{
+    text: string;
+    start_seconds?: number;
+    end_seconds?: number;
+    captured_at?: string;
+  }>;
+  current_caption?: string | null;
+  trigger_reason?: string;
+  ended_reason?: string;
+  caption_state?: "on" | "off";
+  playback_state?: "playing" | "paused" | "ended";
+  fragment_started_at?: string;
+  fragment_ended_at?: string;
+  observed_at?: string;
+  captured_at?: string;
+  status?: string;
+};
+
+type SavedCaptionVideo = {
+  video_id: string;
+  video_title: string;
+  video_url?: string;
+  updated_at: string;
+  segments: CaptionGap[];
+};
+
+async function injectContentScript(tabId: number) {
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: ["dist/content.js"],
+  }).catch(() => undefined);
+}
+
+function captionVideoId(gap: CaptionGap): string {
+  return String(gap.video_id || "unknown");
+}
+
+function captionSegmentKey(gap: CaptionGap): string {
+  if (gap.fragment_id) return gap.fragment_id;
+  if (gap.id) return gap.id;
+  return [
+    captionVideoId(gap),
+    Math.round(Number(gap.start_seconds) || 0),
+    Math.round(Number(gap.end_seconds) || 0),
+    gap.observed_at || gap.captured_at || "",
+  ].join(":");
+}
+
+async function persistCaptionGapByVideo(gap: CaptionGap): Promise<void> {
+  if (gap.status === "active") return;
+  const videoId = captionVideoId(gap);
+  const now = new Date().toISOString();
+  const stored = await chrome.storage?.local?.get?.(SAVED_CAPTION_GAPS_BY_VIDEO_KEY).catch(() => ({}));
+  const current = stored?.[SAVED_CAPTION_GAPS_BY_VIDEO_KEY];
+  const byVideo: Record<string, SavedCaptionVideo> = current && typeof current === "object" && !Array.isArray(current)
+    ? current
+    : {};
+  const existing = byVideo[videoId] ?? {
+    video_id: videoId,
+    video_title: gap.video_title || "YouTube caption segment",
+    video_url: gap.video_url,
+    updated_at: now,
+    segments: [],
+  };
+  const key = captionSegmentKey(gap);
+  const segments = [
+    { ...gap, status: "saved", captured_at: gap.captured_at || now },
+    ...(Array.isArray(existing.segments) ? existing.segments : []).filter(item => captionSegmentKey(item) !== key),
+  ]
+    .sort((a, b) => String(b.captured_at || b.observed_at || "").localeCompare(String(a.captured_at || a.observed_at || "")))
+    .slice(0, MAX_SAVED_GAPS_PER_VIDEO);
+  byVideo[videoId] = {
+    ...existing,
+    video_title: gap.video_title || existing.video_title,
+    video_url: gap.video_url || existing.video_url,
+    updated_at: now,
+    segments,
+  };
+  const limited = Object.fromEntries(
+    Object.entries(byVideo)
+      .sort(([, a], [, b]) => String(b.updated_at).localeCompare(String(a.updated_at)))
+      .slice(0, MAX_SAVED_CAPTION_VIDEOS),
+  );
+  await chrome.storage?.local?.set?.({ [SAVED_CAPTION_GAPS_BY_VIDEO_KEY]: limited }).catch(() => undefined);
+}
 
 chrome.runtime.onInstalled.addListener(async () => {
   await installInfoCaptureDefaults();
@@ -16,8 +121,17 @@ startInfoCapture();
 // Open side panel when the extension icon is clicked.
 chrome.action.onClicked.addListener((tab) => {
   if (tab.id) {
+    injectContentScript(tab.id);
     chrome.sidePanel.open({ tabId: tab.id });
   }
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  injectContentScript(tabId);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "complete") injectContentScript(tabId);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -27,30 +141,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const status = message.status === "sent" ? "sent" : "active";
       const observedKey = typeof gap.observed_at === "string" ? Date.parse(gap.observed_at) : 0;
       const fragmentKey = Number.isFinite(observedKey) && observedKey > 0 ? observedKey : Date.now();
-      const id = status === "active"
-        ? `${gap.video_id ?? "unknown"}:${Math.round(Number(gap.start_seconds) || 0)}:${fragmentKey}:active`
-        : `${gap.video_id ?? "unknown"}:${Math.round(Number(gap.start_seconds) || 0)}-${Math.round(Number(gap.end_seconds) || 0)}:${fragmentKey}`;
+      const fragmentId = typeof gap.fragment_id === "string" && gap.fragment_id
+        ? gap.fragment_id
+        : `${gap.video_id ?? "unknown"}:${Math.round(Number(gap.start_seconds) || 0)}:${fragmentKey}`;
+      const id = status === "active" ? `${fragmentId}:active` : fragmentId;
       const stored = await chrome.storage?.session?.get?.(RECENT_CAPTION_GAPS_KEY).catch(() => ({}));
       const current = Array.isArray(stored?.[RECENT_CAPTION_GAPS_KEY]) ? stored[RECENT_CAPTION_GAPS_KEY] : [];
       const videoId = gap.video_id ?? "unknown";
       const startSeconds = Math.round(Number(gap.start_seconds) || 0);
-      const activeId = `${videoId}:${startSeconds}:${fragmentKey}:active`;
+      const activeId = `${fragmentId}:active`;
       const withoutSame = current.filter((item: any) => {
-        if (item?.id === id || item?.id === activeId) return false;
+        if (item?.id === id || item?.id === activeId || item?.fragment_id === fragmentId) return false;
         return !(item?.video_id === gap.video_id
           && Math.round(Number(item?.start_seconds) || 0) === startSeconds
           && item?.observed_at === gap.observed_at);
       });
+      const savedGap = {
+        ...gap,
+        fragment_id: fragmentId,
+        id,
+        status,
+        captured_at: new Date().toISOString(),
+      };
       const next = [
-        {
-          ...gap,
-          id,
-          status,
-          captured_at: new Date().toISOString(),
-        },
+        savedGap,
         ...withoutSame,
       ].slice(0, MAX_RECENT_CAPTION_GAPS);
       await chrome.storage?.session?.set?.({ [RECENT_CAPTION_GAPS_KEY]: next }).catch(() => undefined);
+      await persistCaptionGapByVideo(savedGap).catch(() => undefined);
       sendResponse({ ok: true, id, count: next.length });
       return;
     }

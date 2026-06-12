@@ -12,12 +12,17 @@ import {
   type BrowserTabsResult,
   type BrowserReadResult,
   type BrowserExecuteResult,
+  type BrowserObserveResult,
+  type BrowserActionResult,
+  type BrowserDebuggerResult,
+  type BrowserLanguageRecentResult,
   MCP_METHODS,
   BROWSER_TOOLS,
   INFO_TOOLS,
 } from "./types.js";
 import { log } from "../logger.js";
 import { executeInfoTool } from "./info-handler.js";
+import { executeMidsceneVisionAct } from "./midscene-handler.js";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 
@@ -124,7 +129,7 @@ function handleToolsList(id: string | number): McpResponse {
 }
 
 function formatTabsResult(result: BrowserTabsResult): McpToolCallResult {
-  const lines = [
+  const lines: Array<string | undefined> = [
     `# Browser Tabs`,
     ``,
     `Found ${result.tabs.length} open tab(s):`,
@@ -207,6 +212,172 @@ function formatExecuteResult(result: BrowserExecuteResult): McpToolCallResult {
   };
 }
 
+function formatActionResult(result: BrowserActionResult): McpToolCallResult {
+  const textContent = [
+    `# Browser Action Result`,
+    ``,
+    `- action: ${result.action}`,
+    result.tabId !== undefined ? `- tab_id: ${result.tabId}` : null,
+    result.url ? `- url: ${result.url}` : null,
+    result.title ? `- title: ${result.title}` : null,
+    `- ok: ${result.ok}`,
+    result.result !== undefined
+      ? `\n## Result\n\`\`\`json\n${JSON.stringify(result.result, null, 2)}\n\`\`\``
+      : null,
+    result.error ? `\n## Error\n${result.error}` : null,
+  ].filter(Boolean).join("\n");
+
+  return {
+    content: [{ type: "text", text: textContent }],
+    isError: !result.ok,
+  };
+}
+
+function formatObserveResult(result: BrowserObserveResult): McpToolCallResult {
+  const lines = [
+    "# Browser Observe",
+    "",
+    `- tab_id: ${result.tabId}`,
+    `- url: ${result.url}`,
+    `- title: ${result.title}`,
+    `- elements: ${result.elements.length}/${result.elementCount}`,
+    "",
+    "## Interactive Elements",
+    ...result.elements.map((element) => {
+      const rect = element.rect ? ` @ ${Math.round(element.rect.x)},${Math.round(element.rect.y)} ${Math.round(element.rect.width)}x${Math.round(element.rect.height)}` : "";
+      const flags = [
+        element.editable ? "editable" : undefined,
+        element.disabled ? "disabled" : undefined,
+      ].filter(Boolean).join(", ");
+      return `- ${element.ref} [${element.role}/${element.tag}] "${element.label || element.text || element.placeholder || "(unlabeled)"}"${flags ? ` (${flags})` : ""}${rect}`;
+    }),
+  ].join("\n");
+  return { content: [{ type: "text", text: lines }] };
+}
+
+function formatSeconds(seconds: number | undefined): string {
+  if (typeof seconds !== "number" || Number.isNaN(seconds)) return "0:00";
+  const safe = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, "0")}`;
+}
+
+function compactLine(text: unknown): string | undefined {
+  if (typeof text !== "string") return undefined;
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact || undefined;
+}
+
+function captionTimeline(gap: { caption_samples?: Array<{ text?: string; start_seconds?: number; end_seconds?: number }> }): string[] {
+  if (!Array.isArray(gap.caption_samples)) return [];
+  return gap.caption_samples
+    .map((sample) => {
+      const text = compactLine(sample.text);
+      if (!text) return undefined;
+      return `${formatSeconds(sample.start_seconds)}-${formatSeconds(sample.end_seconds)} ${text}`;
+    })
+    .filter((line): line is string => Boolean(line));
+}
+
+function formatLanguageRecentResult(result: BrowserLanguageRecentResult): McpToolCallResult {
+  const lines: Array<string | undefined> = [
+    "# Recent Language Caption Segments",
+    "",
+    `Storage key: \`${result.key}\``,
+    `Returned ${result.count} segment(s).`,
+    `Saved key: \`${result.saved_key}\``,
+    `Saved ${result.total_saved ?? 0} segment(s) across ${result.saved_videos?.length ?? 0} video(s).`,
+    "",
+  ];
+
+  if (result.saved_videos?.length) {
+    lines.push("## Saved By Video", "");
+  }
+  for (const [videoIndex, video] of (result.saved_videos ?? []).entries()) {
+    lines.push(
+      `### ${videoIndex + 1}. ${video.video_title || "YouTube video"}`,
+      `- video_id: ${video.video_id}`,
+      video.video_url ? `- video_url: ${video.video_url}` : undefined,
+      `- updated_at: ${video.updated_at}`,
+      `- saved_segments: ${Array.isArray(video.segments) ? video.segments.length : 0}`,
+    );
+    for (const [segmentIndex, gap] of (video.segments ?? []).slice(0, 6).entries()) {
+      const samples = [
+        compactLine(gap.current_caption),
+        compactLine(gap.subtitle_text),
+        ...(Array.isArray(gap.transcript_samples) ? gap.transcript_samples.map(compactLine) : []),
+      ].filter((line, lineIndex, all): line is string => Boolean(line) && all.indexOf(line) === lineIndex);
+      const timeline = captionTimeline(gap);
+      lines.push(
+        `  - ${segmentIndex + 1}. ${formatSeconds(gap.start_seconds)} - ${formatSeconds(gap.end_seconds)}; ${Math.round((gap.caption_on_ms ?? 0) / 1000)}s; toggles ${gap.toggles ?? 0}`,
+        gap.fragment_url ? `    fragment_url: ${gap.fragment_url}` : undefined,
+        samples.length ? `    captions: ${samples.slice(0, 3).join(" | ")}` : undefined,
+        timeline.length ? `    timeline: ${timeline.slice(0, 3).join(" | ")}` : undefined,
+      );
+    }
+    lines.push("");
+  }
+
+  if (result.gaps.length) {
+    lines.push("## Recent Session Segments", "");
+  }
+  for (const [index, gap] of result.gaps.entries()) {
+    const samples = [
+      compactLine(gap.current_caption),
+      compactLine(gap.subtitle_text),
+      ...(Array.isArray(gap.transcript_samples) ? gap.transcript_samples.map(compactLine) : []),
+    ].filter((line, lineIndex, all): line is string => Boolean(line) && all.indexOf(line) === lineIndex);
+    const timeline = captionTimeline(gap);
+    lines.push(
+      `## ${index + 1}. ${gap.video_title || "YouTube caption segment"}`,
+      `- status: ${gap.status || "unknown"}`,
+      `- range: ${formatSeconds(gap.start_seconds)} - ${formatSeconds(gap.end_seconds)}`,
+      `- caption_seconds: ${Math.round((gap.caption_on_ms ?? 0) / 1000)}`,
+      `- toggles: ${gap.toggles ?? 0}`,
+      gap.video_url ? `- video_url: ${gap.video_url}` : undefined,
+      gap.fragment_url ? `- fragment_url: ${gap.fragment_url}` : undefined,
+      samples.length ? `- captions: ${samples.slice(0, 4).join(" | ")}` : undefined,
+      timeline.length ? `- timeline: ${timeline.slice(0, 5).join(" | ")}` : undefined,
+      "",
+    );
+  }
+
+  return {
+    content: [{ type: "text", text: lines.filter((line): line is string => Boolean(line)).join("\n") }],
+  };
+}
+
+function formatDebuggerResult(result: BrowserDebuggerResult): McpToolCallResult {
+  const lines = [
+    "# Browser Debugger Result",
+    "",
+    `- command: ${result.command}`,
+    `- tab_id: ${result.tabId}`,
+    `- url: ${result.url}`,
+    result.domain ? `- domain: ${result.domain}` : undefined,
+    `- allowed: ${result.allowed}`,
+    `- attached: ${result.attached}`,
+    result.policy ? `- policy: ${JSON.stringify(result.policy)}` : undefined,
+    result.error ? `\n## Error\n${result.error}` : undefined,
+    result.result !== undefined ? `\n## Result\n\`\`\`json\n${JSON.stringify(result.result, null, 2)}\n\`\`\`` : undefined,
+    result.artifact ? `\n## Artifact\n- mimeType: ${result.artifact.mimeType ?? "unknown"}\n- sizeBytes: ${result.artifact.sizeBytes ?? 0}\n- data: ${result.artifact.data ? `${result.artifact.data.slice(0, 120)}...` : "(omitted)"}` : undefined,
+  ].filter(Boolean).join("\n");
+
+  if (result.artifact?.data && result.artifact.mimeType?.startsWith("image/")) {
+    return {
+      content: [
+        { type: "text", text: lines },
+        { type: "image", data: result.artifact.data, mimeType: result.artifact.mimeType },
+      ],
+      isError: Boolean(result.error || !result.allowed),
+    };
+  }
+
+  return {
+    content: [{ type: "text", text: lines }],
+    isError: Boolean(result.error || !result.allowed),
+  };
+}
+
 async function handleToolCall(
   id: string | number,
   params: McpToolCallParams,
@@ -238,11 +409,49 @@ async function handleToolCall(
     }
   }
 
+  if (params.name === "browser_vision_act") {
+    try {
+      const result = await executeMidsceneVisionAct((params.arguments ?? {}) as {
+        intent?: string;
+        target?: string;
+        text?: string;
+        mode?: string;
+        submit?: boolean;
+      });
+      log.info("Midscene vision tool call completed", { id, tool: params.name });
+      return { jsonrpc: "2.0", id, result };
+    } catch (error) {
+      log.error("Midscene vision tool call failed", {
+        id,
+        tool: params.name,
+        error: (error as Error).message,
+      });
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          content: [{ type: "text", text: (error as Error).message }],
+          isError: true,
+        },
+      };
+    }
+  }
+
   // Map tool name to action
   const toolToAction: Record<string, BrowserToolParams["action"]> = {
     browser_tabs: "tabs",
     browser_read: "read",
     browser_execute: "execute",
+    browser_language_recent_captions: "language_recent",
+    browser_open_tab: "open_tab",
+    browser_activate_tab: "activate_tab",
+    browser_close_tab: "close_tab",
+    browser_reload_tab: "reload_tab",
+    browser_click: "click",
+    browser_type: "type",
+    browser_observe: "observe",
+    browser_act: "act",
+    browser_debugger: "debugger",
   };
 
   const action = toolToAction[params.name];
@@ -259,11 +468,38 @@ async function handleToolCall(
   }
 
   try {
-    const args = params.arguments as { tabId?: number; script?: string };
+    const args = params.arguments as {
+      tabId?: number;
+      script?: string;
+      limit?: number;
+      command?: BrowserToolParams["command"];
+      args?: Record<string, unknown>;
+      url?: string;
+      selector?: string;
+      text?: string;
+      active?: boolean;
+      intent?: string;
+      target?: string;
+      submit?: boolean;
+      mode?: BrowserToolParams["mode"];
+      maxElements?: number;
+    };
     const browserParams: BrowserToolParams = {
       action,
       tabId: args?.tabId,
       script: args?.script,
+      limit: typeof args?.limit === "number" ? args.limit : undefined,
+      command: args?.command,
+      args: args?.args,
+      url: args?.url,
+      selector: args?.selector,
+      text: args?.text,
+      active: args?.active,
+      intent: args?.intent,
+      target: args?.target,
+      submit: args?.submit,
+      mode: args?.mode,
+      maxElements: args?.maxElements,
     };
 
     const startTime = Date.now();
@@ -288,6 +524,24 @@ async function handleToolCall(
         break;
       case "execute":
         result = formatExecuteResult(browserResult);
+        break;
+      case "observe":
+        result = formatObserveResult(browserResult);
+        break;
+      case "open_tab":
+      case "activate_tab":
+      case "close_tab":
+      case "reload_tab":
+      case "click":
+      case "type":
+      case "act":
+        result = formatActionResult(browserResult);
+        break;
+      case "language_recent":
+        result = formatLanguageRecentResult(browserResult);
+        break;
+      case "debugger":
+        result = formatDebuggerResult(browserResult);
         break;
       default:
         throw new Error(`Unknown action: ${(browserResult as BrowserToolResult).action}`);
