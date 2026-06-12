@@ -292,7 +292,8 @@ export const BROWSER_TABS_TOOL: McpTool = {
   description:
     "List all open tabs in the browser. " +
     "Returns an array of tabs with their id, url, title, and whether it's the active tab. " +
-    "Use this tool first to get the tabId before calling browser_read or browser_execute.",
+    "Use this tool first to get the active tabId before calling browser_read, browser_observe, browser_act, or browser_execute. " +
+    "For user requests about the page they are looking at, choose the tab where active=true. Do not open or navigate a new tab unless the user explicitly asks.",
   inputSchema: {
     type: "object",
     properties: {},
@@ -305,7 +306,7 @@ export const BROWSER_READ_TOOL: McpTool = {
   description:
     "Read the content of a specific browser tab. " +
     "Returns page URL, title, simplified DOM content, viewport size, and selected text. " +
-    "IMPORTANT: You must call browser_tabs first to get the tabId.",
+    "IMPORTANT: Call browser_tabs first and use the active tabId for the user's current page.",
   inputSchema: {
     type: "object",
     properties: {
@@ -388,7 +389,8 @@ export const BROWSER_LANGUAGE_RECENT_TOOL: McpTool = {
 export const BROWSER_OPEN_TAB_TOOL: McpTool = {
   name: "browser_open_tab",
   description:
-    "Open a URL in a new Chrome tab. Use this for ordinary navigation; it does not require Advanced Browser Control.",
+    "Open a URL in a new Chrome tab. Use only when the user explicitly asks to open a new page/tab or when no existing relevant tab is open. " +
+    "For tasks like 'ask Gemini in the page I am viewing', do NOT use this; use browser_tabs to find the active tab, then browser_act.",
   inputSchema: {
     type: "object",
     properties: {
@@ -483,7 +485,8 @@ export const BROWSER_ACT_TOOL: McpTool = {
   name: "browser_act",
   description:
     "Perform a high-level browser action from natural language. Internally observes the page, locates the best matching element, uses real CDP mouse/text input when needed, then verifies. " +
-    "Prefer this over browser_click/browser_type on complex SPAs such as ChatGPT, Gemini, Xianyu, Notion, Google Docs, and other React/contenteditable sites.",
+    "Prefer this over browser_click/browser_type on complex SPAs such as ChatGPT, Gemini, Xianyu, Notion, Google Docs, and other React/contenteditable sites. " +
+    "For current-page tasks, first call browser_tabs and pass the active tabId. Do not navigate away from the user's current tab unless they explicitly ask.",
   inputSchema: {
     type: "object",
     properties: {
@@ -502,8 +505,9 @@ export const BROWSER_VISION_ACT_TOOL: McpTool = {
   name: "browser_vision_act",
   description:
     "Use Midscene visual browser automation on the user's current Chrome tab. " +
-    "Use this when browser_observe/browser_act cannot find or click an element, or when the page is visually complex. " +
-    "Requires the proxy to be started with CHROME_ACP_MIDSCENE=1 and MIDSCENE_MODEL_* environment variables.",
+    "Last-resort fallback only after browser_tabs + browser_observe + browser_act fail. " +
+    "Do not use this for normal Gemini/ChatGPT/search input tasks. " +
+    "Requires the proxy to be started with CHROME_ACP_MIDSCENE=1, CHROME_ACP_EXPOSE_MIDSCENE=1, and MIDSCENE_MODEL_* environment variables.",
   inputSchema: {
     type: "object",
     properties: {
@@ -547,8 +551,8 @@ export const BROWSER_DEBUGGER_TOOL: McpTool = {
   },
 };
 
-// All browser tools
-export const BROWSER_TOOLS = [
+// All browser tools.
+const BASE_BROWSER_TOOLS = [
   BROWSER_TABS_TOOL,
   BROWSER_READ_TOOL,
   BROWSER_EXECUTE_TOOL,
@@ -561,9 +565,19 @@ export const BROWSER_TOOLS = [
   BROWSER_TYPE_TOOL,
   BROWSER_OBSERVE_TOOL,
   BROWSER_ACT_TOOL,
-  BROWSER_VISION_ACT_TOOL,
   BROWSER_DEBUGGER_TOOL,
 ];
+
+export function getBrowserTools(): McpTool[] {
+  const exposeVision =
+    process.env.CHROME_ACP_EXPOSE_MIDSCENE === "1" ||
+    process.env.CHROME_ACP_EXPOSE_MIDSCENE === "true";
+  return exposeVision
+    ? [...BASE_BROWSER_TOOLS, BROWSER_VISION_ACT_TOOL]
+    : BASE_BROWSER_TOOLS;
+}
+
+export const BROWSER_TOOLS = getBrowserTools();
 
 // ============================================================================
 // Info Context Tool Types (custom tools pointing at the local info context layer)

@@ -17,8 +17,8 @@ import {
   type BrowserDebuggerResult,
   type BrowserLanguageRecentResult,
   MCP_METHODS,
-  BROWSER_TOOLS,
   INFO_TOOLS,
+  getBrowserTools,
 } from "./types.js";
 import { log } from "../logger.js";
 import { executeInfoTool } from "./info-handler.js";
@@ -122,7 +122,7 @@ function handleInitialize(id: string | number): McpResponse {
 
 function handleToolsList(id: string | number): McpResponse {
   const result: McpToolsListResult = {
-    tools: [...BROWSER_TOOLS, ...INFO_TOOLS],
+    tools: [...getBrowserTools(), ...INFO_TOOLS],
   };
 
   return { jsonrpc: "2.0", id, result };
@@ -410,6 +410,24 @@ async function handleToolCall(
   }
 
   if (params.name === "browser_vision_act") {
+    const exposed =
+      process.env.CHROME_ACP_EXPOSE_MIDSCENE === "1" ||
+      process.env.CHROME_ACP_EXPOSE_MIDSCENE === "true";
+    if (!exposed) {
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          content: [{
+            type: "text",
+            text:
+              "browser_vision_act is hidden by default. Use browser_tabs, browser_observe, and browser_act for normal page automation. " +
+              "Restart the proxy with CHROME_ACP_EXPOSE_MIDSCENE=1 only if visual automation is explicitly needed.",
+          }],
+          isError: true,
+        },
+      };
+    }
     try {
       const result = await executeMidsceneVisionAct((params.arguments ?? {}) as {
         intent?: string;
