@@ -1100,12 +1100,12 @@ export function ChatInterface({
   const hasMessages = entries.length > 0;
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full min-h-0 flex-col">
       {/* Messages area */}
-      <Conversation className="flex-1">
+      <Conversation className="min-h-0 flex-1">
         <ConversationContent>
           {!sessionReady ? (
-            <div className="flex items-center justify-center p-4">
+            <div className="flex min-h-[16rem] items-center justify-center p-4">
               <Shimmer>Creating session...</Shimmer>
             </div>
           ) : entries.length === 0 ? (
