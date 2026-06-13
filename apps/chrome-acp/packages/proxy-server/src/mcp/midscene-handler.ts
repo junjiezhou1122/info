@@ -10,7 +10,7 @@ type VisionActArgs = {
 };
 
 let agent: AgentOverChromeBridge | null = null;
-let connected = false;
+let visionActQueue: Promise<unknown> = Promise.resolve();
 
 function midsceneEnabled(): boolean {
   return process.env.CHROME_ACP_MIDSCENE === "1" || process.env.CHROME_ACP_MIDSCENE === "true";
@@ -32,21 +32,29 @@ async function ensureBridgeAgent(): Promise<AgentOverChromeBridge> {
       closeConflictServer: true,
       serverListeningTimeout: 20_000,
     });
-    connected = false;
   }
-  if (!connected) {
-    try {
-      await agent.connectCurrentTab({ forceSameTabNavigation: true });
-      connected = true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `Midscene Bridge could not connect to the current Chrome tab: ${message}. ` +
-        "Open the Midscene Chrome extension, enable Bridge Mode, allow current-tab control, then retry.",
-      );
-    }
+  try {
+    await agent.connectCurrentTab({ forceSameTabNavigation: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Midscene Bridge could not connect to the current Chrome tab: ${message}. ` +
+      "Open the Midscene Chrome extension, enable Bridge Mode, allow current-tab control, then retry.",
+    );
   }
   return agent;
+}
+
+function shouldReconnectAfterError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /No tab with given id|target.*closed|detached|not attached|Cannot find context|invalid tab/i.test(message);
+}
+
+async function resetBridgeAgent(): Promise<void> {
+  const old = agent as any;
+  agent = null;
+  if (old && typeof old.destroy === "function") await old.destroy().catch(() => undefined);
+  if (old && typeof old.close === "function") await old.close().catch(() => undefined);
 }
 
 async function callAgent(instance: AgentOverChromeBridge, args: VisionActArgs): Promise<unknown> {
@@ -82,9 +90,17 @@ async function callAgent(instance: AgentOverChromeBridge, args: VisionActArgs): 
   throw new Error("Midscene AgentOverChromeBridge does not expose ai/aiTap/aiInput methods.");
 }
 
-export async function executeMidsceneVisionAct(args: VisionActArgs): Promise<McpToolCallResult> {
-  const instance = await ensureBridgeAgent();
-  const result = await callAgent(instance, args);
+async function executeMidsceneVisionActNow(args: VisionActArgs): Promise<McpToolCallResult> {
+  let instance = await ensureBridgeAgent();
+  let result: unknown;
+  try {
+    result = await callAgent(instance, args);
+  } catch (error) {
+    if (!shouldReconnectAfterError(error)) throw error;
+    await resetBridgeAgent();
+    instance = await ensureBridgeAgent();
+    result = await callAgent(instance, args);
+  }
   return {
     content: [
       {
@@ -107,3 +123,8 @@ export async function executeMidsceneVisionAct(args: VisionActArgs): Promise<Mcp
   };
 }
 
+export async function executeMidsceneVisionAct(args: VisionActArgs): Promise<McpToolCallResult> {
+  const run = visionActQueue.catch(() => undefined).then(() => executeMidsceneVisionActNow(args));
+  visionActQueue = run;
+  return run;
+}

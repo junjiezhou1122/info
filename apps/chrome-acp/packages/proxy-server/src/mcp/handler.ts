@@ -378,6 +378,89 @@ function formatDebuggerResult(result: BrowserDebuggerResult): McpToolCallResult 
   };
 }
 
+function formatBrowserToolResult(result: BrowserToolResult): McpToolCallResult {
+  switch (result.action) {
+    case "tabs":
+      return formatTabsResult(result);
+    case "read":
+      return formatReadResult(result);
+    case "execute":
+      return formatExecuteResult(result);
+    case "observe":
+      return formatObserveResult(result);
+    case "open_tab":
+    case "activate_tab":
+    case "close_tab":
+    case "reload_tab":
+    case "click":
+    case "type":
+    case "act":
+      return formatActionResult(result);
+    case "language_recent":
+      return formatLanguageRecentResult(result);
+    case "debugger":
+      return formatDebuggerResult(result);
+    default:
+      throw new Error(`Unknown action: ${(result as BrowserToolResult).action}`);
+  }
+}
+
+async function activeTabId(): Promise<number> {
+  const tabsResult = await executeBrowserTool({ action: "tabs" });
+  if (tabsResult.action !== "tabs") throw new Error("Failed to list browser tabs");
+  const active = tabsResult.tabs.find(tab => tab.active);
+  if (!active) throw new Error("No active Chrome tab found");
+  return active.id;
+}
+
+async function executeCurrentBrowserTool(
+  name: string,
+  args: {
+    intent?: string;
+    target?: string;
+    text?: string;
+    submit?: boolean;
+    mode?: BrowserToolParams["mode"] | "tap";
+    maxElements?: number;
+    command?: BrowserToolParams["command"];
+    args?: Record<string, unknown>;
+  },
+): Promise<McpToolCallResult> {
+  if (name === "browser_current_vision_act") {
+    return executeMidsceneVisionAct({
+      intent: args.intent,
+      target: args.target,
+      text: args.text,
+      submit: args.submit,
+      mode: typeof args.mode === "string" ? args.mode : undefined,
+    });
+  }
+
+  const tabId = await activeTabId();
+  const actionByTool: Record<string, BrowserToolParams["action"]> = {
+    browser_current_read: "read",
+    browser_current_observe: "observe",
+    browser_current_act: "act",
+    browser_current_debugger: "debugger",
+  };
+  const action = actionByTool[name];
+  if (!action) throw new Error(`Unknown current browser tool: ${name}`);
+
+  const params: BrowserToolParams = {
+    action,
+    tabId,
+    intent: args.intent,
+    target: args.target,
+    text: args.text,
+    submit: args.submit,
+    mode: args.mode === "tap" ? "click" : args.mode,
+    maxElements: args.maxElements,
+    command: args.command,
+    args: args.args,
+  };
+  return formatBrowserToolResult(await executeBrowserTool(params));
+}
+
 async function handleToolCall(
   id: string | number,
   params: McpToolCallParams,
@@ -406,6 +489,37 @@ async function handleToolCall(
         isError: true,
       };
       return { jsonrpc: "2.0", id, result };
+    }
+  }
+
+  if (params.name.startsWith("browser_current_")) {
+    try {
+      const result = await executeCurrentBrowserTool(params.name, (params.arguments ?? {}) as {
+        intent?: string;
+        target?: string;
+        text?: string;
+        submit?: boolean;
+        mode?: BrowserToolParams["mode"] | "tap";
+        maxElements?: number;
+        command?: BrowserToolParams["command"];
+        args?: Record<string, unknown>;
+      });
+      log.info("Current browser tool call completed", { id, tool: params.name });
+      return { jsonrpc: "2.0", id, result };
+    } catch (error) {
+      log.error("Current browser tool call failed", {
+        id,
+        tool: params.name,
+        error: (error as Error).message,
+      });
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          content: [{ type: "text", text: (error as Error).message }],
+          isError: true,
+        },
+      };
     }
   }
 
@@ -531,39 +645,7 @@ async function handleToolCall(
       durationMs: duration,
     });
 
-    let result: McpToolCallResult;
-
-    switch (browserResult.action) {
-      case "tabs":
-        result = formatTabsResult(browserResult);
-        break;
-      case "read":
-        result = formatReadResult(browserResult);
-        break;
-      case "execute":
-        result = formatExecuteResult(browserResult);
-        break;
-      case "observe":
-        result = formatObserveResult(browserResult);
-        break;
-      case "open_tab":
-      case "activate_tab":
-      case "close_tab":
-      case "reload_tab":
-      case "click":
-      case "type":
-      case "act":
-        result = formatActionResult(browserResult);
-        break;
-      case "language_recent":
-        result = formatLanguageRecentResult(browserResult);
-        break;
-      case "debugger":
-        result = formatDebuggerResult(browserResult);
-        break;
-      default:
-        throw new Error(`Unknown action: ${(browserResult as BrowserToolResult).action}`);
-    }
+    const result = formatBrowserToolResult(browserResult);
 
     const response: McpResponse = { jsonrpc: "2.0", id, result };
     log.trace("MCP tool call response", { response });

@@ -521,6 +521,93 @@ export const BROWSER_VISION_ACT_TOOL: McpTool = {
   },
 };
 
+export const BROWSER_CURRENT_READ_TOOL: McpTool = {
+  name: "browser_current_read",
+  description:
+    "Read the user's currently active Chrome tab. This is a current-page facade over browser_tabs + browser_read. " +
+    "Use this instead of browser_read when the user asks about the page they are looking at. Never opens a new browser or tab.",
+  inputSchema: {
+    type: "object",
+    properties: {},
+  },
+};
+
+export const BROWSER_CURRENT_OBSERVE_TOOL: McpTool = {
+  name: "browser_current_observe",
+  description:
+    "Observe visible interactive elements in the user's currently active Chrome tab. " +
+    "This is a current-page facade over browser_tabs + browser_observe and should be used before acting when targets are ambiguous.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      maxElements: { type: "number", description: "Maximum elements to return. Defaults to 80, capped at 200." },
+    },
+  },
+};
+
+export const BROWSER_CURRENT_ACT_TOOL: McpTool = {
+  name: "browser_current_act",
+  description:
+    "Perform a natural-language action in the user's currently active Chrome tab. " +
+    "This is the preferred tool for operating the page the user is looking at. " +
+    "It resolves the active tab internally, uses Chrome ACP DOM/CDP automation, and does not open a separate browser. " +
+    "If this fails because the page is visually complex, use browser_current_vision_act as fallback.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      intent: { type: "string", description: "Natural-language action, e.g. 'click the send button', 'type message into the main input'." },
+      target: { type: "string", description: "Optional target hint, e.g. 'bottom ChatGPT input'." },
+      text: { type: "string", description: "Text to enter when the action types/fills an editable element." },
+      submit: { type: "boolean", description: "Whether to submit after typing, usually by Enter or a send button." },
+      mode: { type: "string", enum: ["click", "type", "submit", "auto"], description: "Optional action mode. Defaults to auto." },
+    },
+    required: ["intent"],
+  },
+};
+
+export const BROWSER_CURRENT_VISION_ACT_TOOL: McpTool = {
+  name: "browser_current_vision_act",
+  description:
+    "Use Midscene visual automation on the user's currently active Chrome tab. " +
+    "Use this only when browser_current_act/browser_observe cannot locate the target or the page is visually complex. " +
+    "This uses Midscene Chrome Bridge Mode and does not use external chrome_devtools.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      intent: { type: "string", description: "Natural-language visual action, e.g. 'click the blue Save button'." },
+      target: { type: "string", description: "Optional visual target prompt." },
+      text: { type: "string", description: "Text to input when using mode='type'." },
+      submit: { type: "boolean", description: "Whether to press Enter after typing." },
+      mode: { type: "string", enum: ["auto", "click", "tap", "type"], description: "Action mode. Defaults to auto." },
+    },
+    required: ["intent"],
+  },
+};
+
+export const BROWSER_CURRENT_DEBUGGER_TOOL: McpTool = {
+  name: "browser_current_debugger",
+  description:
+    "Run an advanced Chrome Debugger/CDP command against the user's currently active Chrome tab. " +
+    "This is a current-page facade over browser_tabs + browser_debugger. Use for screenshots, layout snapshots, PDF export, or controlled CDP diagnostics.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      command: {
+        type: "string",
+        enum: ["capture_full_page", "get_layout_tree", "get_network_log", "evaluate_js", "dispatch_input", "print_pdf"],
+        description: "Debugger command to run on the active tab.",
+      },
+      args: {
+        type: "object",
+        description:
+          "Optional command args. capture_full_page accepts {format:'jpeg'|'png', quality}. " +
+          "evaluate_js accepts {expression}. dispatch_input accepts {type:'mouse'|'text'|'key', x, y, text, key}. print_pdf accepts {landscape, printBackground}.",
+      },
+    },
+    required: ["command"],
+  },
+};
+
 export const BROWSER_DEBUGGER_TOOL: McpTool = {
   name: "browser_debugger",
   description:
@@ -553,6 +640,10 @@ export const BROWSER_DEBUGGER_TOOL: McpTool = {
 
 // All browser tools.
 const BASE_BROWSER_TOOLS = [
+  BROWSER_CURRENT_READ_TOOL,
+  BROWSER_CURRENT_OBSERVE_TOOL,
+  BROWSER_CURRENT_ACT_TOOL,
+  BROWSER_CURRENT_DEBUGGER_TOOL,
   BROWSER_TABS_TOOL,
   BROWSER_READ_TOOL,
   BROWSER_EXECUTE_TOOL,
@@ -573,7 +664,7 @@ export function getBrowserTools(): McpTool[] {
     process.env.CHROME_ACP_EXPOSE_MIDSCENE === "1" ||
     process.env.CHROME_ACP_EXPOSE_MIDSCENE === "true";
   return exposeVision
-    ? [...BASE_BROWSER_TOOLS, BROWSER_VISION_ACT_TOOL]
+    ? [...BASE_BROWSER_TOOLS, BROWSER_CURRENT_VISION_ACT_TOOL, BROWSER_VISION_ACT_TOOL]
     : BASE_BROWSER_TOOLS;
 }
 

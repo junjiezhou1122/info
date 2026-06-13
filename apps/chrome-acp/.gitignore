@@ -6,6 +6,7 @@ dist
 out
 *.tgz
 packages/proxy-server/public/
+midscene_run/
 
 # Chrome extension auto-generated metadata
 _metadata
