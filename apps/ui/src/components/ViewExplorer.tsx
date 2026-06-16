@@ -13,6 +13,7 @@ export default function ViewExplorer({
   const [loading, setLoading] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
   const [selectedViewId, setSelectedViewId] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<ContextViewSummary | null>(null);
   const [filter, setFilter] = useState("");
@@ -44,16 +45,13 @@ export default function ViewExplorer({
     let cancelled = false;
     setLoading(true);
     setStatus("");
-    fetchViewsByType(selectedType, { limit: 80 })
+    setError("");
+    loadViews(selectedType)
       .then(result => {
         if (cancelled) return;
-        setViews(prev => {
-          const map = new Map(prev.map(v => [v.id, v]));
-          for (const v of (result.views ?? [] as ContextViewSummary[])) map.set(v.id, v);
-          return [...map.values()];
-        });
+        setStatus(`${result.views?.length ?? 0} ${viewFamilyLabel(selectedType).toLowerCase()} loaded`);
       })
-      .catch(err => !cancelled && setStatus(err instanceof Error ? err.message : String(err)))
+      .catch(err => !cancelled && setError(err instanceof Error ? err.message : String(err)))
       .finally(() => !cancelled && setLoading(false));
     return () => { cancelled = true; };
   }, [selectedType]);
@@ -86,23 +84,35 @@ export default function ViewExplorer({
 
   async function loadFamilies() {
     setLoading(true);
+    setError("");
     try {
       const res = await fetchViewFamilies();
       const list = res.families?.map(f => ({ family: f.family, count: f.count })) ?? [];
       setFamilies(list.filter(f => f.count > 0));
+      setStatus(`${list.reduce((sum, f) => sum + f.count, 0)} views across ${list.filter(f => f.count > 0).length} families`);
       if (!selectedType || !list.find(f => f.family === selectedType)) {
         setSelectedType(list.find(f => f.count > 0)?.family ?? "intent");
       }
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
   }
 
+  async function loadViews(viewType: string) {
+    const result = await fetchViewsByType(viewType, { limit: 80 });
+    setViews(prev => {
+      const otherTypes = prev.filter(view => view.view_type !== viewType);
+      return [...otherTypes, ...((result.views ?? []) as ContextViewSummary[])];
+    });
+    return result;
+  }
+
   async function loadMore() {
     if (loading || filteredViews.length >= currentTypeCount) return;
     setLoading(true);
+    setError("");
     try {
       const result = await fetchViewsByType(selectedType, { limit: 80, cursor: filteredViews[filteredViews.length - 1]?.updated_at });
       setViews(prev => {
@@ -110,8 +120,9 @@ export default function ViewExplorer({
         for (const v of (result.views ?? [] as ContextViewSummary[])) map.set(v.id, v);
         return [...map.values()];
       });
+      setStatus(`${Math.min(currentTypeCount, filteredViews.length + (result.views?.length ?? 0))} of ${currentTypeCount} visible`);
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -119,19 +130,41 @@ export default function ViewExplorer({
 
   return (
     <section className="vx-panel">
+      <WorkbenchHeader
+        eyebrow="Surface Explorer"
+        title={viewFamilyLabel(selectedType)}
+        summary={`${filteredViews.length} visible · ${currentTypeCount} total`}
+        status={loading ? "Refreshing views..." : status || "Ready"}
+        error={error}
+        onRefresh={() => {
+          void loadFamilies();
+          if (selectedType) {
+            void loadViews(selectedType)
+              .then(result => setStatus(`${result.views?.length ?? 0} ${viewFamilyLabel(selectedType).toLowerCase()} loaded`))
+              .catch(err => setError(err instanceof Error ? err.message : String(err)));
+          }
+        }}
+        refreshLabel={loading ? "Loading..." : "Refresh"}
+        refreshDisabled={loading}
+      />
       <div className="vx-toolbar">
         <div className="vx-family-select">
-          <select value={selectedType} onChange={e => setSelectedType(e.target.value)}>
+          <select value={selectedType} onChange={e => { setSelectedType(e.target.value); setSelectedViewId(null); }} aria-label="View family">
             {families.map(f => (
               <option key={f.family} value={f.family}>{viewFamilyLabel(f.family)} ({f.count})</option>
             ))}
           </select>
         </div>
-        <input className="vx-filter" placeholder="Filter by title/summary..." value={filter} onChange={e => setFilter(e.target.value)} />
+        <input className="vx-filter" placeholder="Filter by title, summary, or id..." value={filter} onChange={e => setFilter(e.target.value)} aria-label="Filter views" />
+      </div>
+      <div className="workbench-metrics" aria-label="View explorer metrics">
+        <Metric label="Selected" value={activeView?.title || activeView?.id || "None"} />
+        <Metric label="Updated" value={relativeTime(activeView?.updated_at)} />
+        <Metric label="Confidence" value={formatConfidence(activeView?.confidence)} />
       </div>
       <div className="vx-list">
         {filteredViews.length === 0 && !loading
-          ? <div className="empty-inline">No {viewFamilyLabel(selectedType)} found.</div>
+          ? <EmptyState title={`No ${viewFamilyLabel(selectedType)} views`} detail={filter ? "No views match the current filter." : "Refresh after the runtime writes this view family."} />
           : filteredViews.map(view => (
             <button
               key={view.id}
@@ -147,14 +180,67 @@ export default function ViewExplorer({
               <div className="vx-row-meta">
                 <span>{relativeTime(view.updated_at)}</span>
                 <span>{view.status ?? "active"}</span>
+                <span>{view.source_view_count ?? view.source_views?.length ?? view.source_record_count ?? view.source_records?.length ?? 0} sources</span>
               </div>
             </button>
           ))}
       </div>
       {filteredViews.length < currentTypeCount && (
-        <div ref={loadMoreRef} className="empty-inline">Loading...</div>
+        <div ref={loadMoreRef} className="load-more-sentinel">{loading ? "Loading more views..." : "Scroll to load more"}</div>
       )}
     </section>
+  );
+}
+
+function WorkbenchHeader({
+  eyebrow,
+  title,
+  summary,
+  status,
+  error,
+  onRefresh,
+  refreshLabel,
+  refreshDisabled,
+}: {
+  eyebrow: string;
+  title: string;
+  summary: string;
+  status: string;
+  error?: string;
+  onRefresh: () => void;
+  refreshLabel: string;
+  refreshDisabled?: boolean;
+}) {
+  return (
+    <div className="workbench-head">
+      <div>
+        <span>{eyebrow}</span>
+        <h2>{title}</h2>
+        <p>{summary}</p>
+      </div>
+      <div className="workbench-head-actions">
+        <div className={`workbench-status ${error ? "error" : ""}`}>{error || status}</div>
+        <button className="secondary" onClick={onRefresh} disabled={refreshDisabled}>{refreshLabel}</button>
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="workbench-metric">
+      <span>{label}</span>
+      <b>{value}</b>
+    </div>
+  );
+}
+
+function EmptyState({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="workbench-empty">
+      <b>{title}</b>
+      <span>{detail}</span>
+    </div>
   );
 }
 
@@ -176,6 +262,10 @@ function viewFamilyLabel(family: string) {
     "work.focus_set": "Work Focus",
   };
   return labels[family] ?? family;
+}
+
+function formatConfidence(value?: number) {
+  return typeof value === "number" ? `${Math.round(value * 100)}%` : "-";
 }
 
 function relativeTime(iso?: string) {

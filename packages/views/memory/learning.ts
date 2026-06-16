@@ -90,6 +90,31 @@ export type CandidateDraft = {
   metadata?: Record<string, unknown>;
 };
 
+export type SanitizedMemoryObservation = {
+  id: string;
+  source_type: "record" | "view";
+  signal_type: string;
+  title?: string;
+  text?: string;
+  payload_keys?: string[];
+  source_records: string[];
+  source_views: string[];
+  scope?: Record<string, unknown>;
+  privacy: {
+    level?: string;
+    retention?: string;
+    allow_llm_summary?: boolean;
+    allow_external_llm?: boolean;
+  };
+};
+
+export type MemoryCandidateSummarizerInput = {
+  observations: SanitizedMemoryObservation[];
+  now: string;
+};
+
+export type MemoryCandidateSummarizer = (input: MemoryCandidateSummarizerInput) => CandidateDraft[];
+
 /**
  * Extract an edited snippet without including sensitive text.
  */
@@ -150,8 +175,8 @@ export function detectConflicts(drafts: CandidateDraft[]): CandidateConflict[] {
 
       if (isDirectContradiction(a.claim, b.claim)) {
         conflicts.push({
-          candidate_id_a: a.sourceRecords?.[0] ?? "",
-          candidate_id_b: b.sourceRecords?.[0] ?? "",
+          candidate_id_a: firstEvidenceId(a),
+          candidate_id_b: firstEvidenceId(b),
           kind: "direct_contradiction",
           severity: "critical",
           description: `Conflicting claims: "${truncate(a.claim, 40)}" vs "${truncate(b.claim, 40)}"`,
@@ -162,8 +187,8 @@ export function detectConflicts(drafts: CandidateDraft[]): CandidateConflict[] {
         similarClaim(a.claim, b.claim)
       ) {
         conflicts.push({
-          candidate_id_a: a.sourceRecords?.[0] ?? "",
-          candidate_id_b: b.sourceRecords?.[0] ?? "",
+          candidate_id_a: firstEvidenceId(a),
+          candidate_id_b: firstEvidenceId(b),
           kind: "confidence_inversion",
           severity: "warning",
           description: "Confidence inversion between similar claims.",
@@ -270,6 +295,10 @@ function feedbackForDraft(
 
 /* --- helpers --- */
 
+function firstEvidenceId(draft: CandidateDraft): string {
+  return draft.sourceRecords?.[0] ?? draft.sourceViews?.[0] ?? draft.claim;
+}
+
 function similarClaim(a: string, b: string): boolean {
   const na = normalize(a);
   const nb = normalize(b);
@@ -281,6 +310,7 @@ function similarClaim(a: string, b: string): boolean {
 }
 
 function sameScopeKey(a?: Record<string, unknown>, b?: Record<string, unknown>): boolean {
+  if (!a && !b) return true;
   if (!a || !b) return false;
   return JSON.stringify([a.project, a.project_path, a.domain]) === JSON.stringify([b.project, b.project_path, b.domain]);
 }

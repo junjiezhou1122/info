@@ -32,6 +32,13 @@ type ProjectLane = {
   evidence: Record<string, unknown>;
 };
 
+type ProjectArtifact = {
+  id: string;
+  title?: string;
+  observed_at?: string;
+  evidence: string[];
+};
+
 export function compileProjectCurrent(options: CompileProjectCurrentOptions = {}, store = new ContextStore()): CompileProjectCurrentResult {
   const now = options.now ?? new Date();
   const generatedAt = now.toISOString();
@@ -88,11 +95,15 @@ function buildProjectCurrentView(
     ...evidenceRecords.map(record => stringValue(record.scope?.session)).filter((value): value is string => Boolean(value)),
     ...evidenceRecords.map(record => stringValue(record.payload?.session_id) ?? stringValue(record.payload?.sessionId)).filter((value): value is string => Boolean(value)),
   ]).slice(0, 10);
+  const webpages = projectWebpages(evidenceRecords);
+  const conversations = projectConversations(evidenceRecords);
+  const files = projectFiles(activeFiles, evidenceRecords);
+  const interruptions = projectInterruptions(evidenceRecords);
   const recentContext = evidenceRecords.map(compactProjectRecord).slice(0, 12);
   const text = evidenceRecords.map(record => `${record.content?.title ?? ""}\n${record.content?.text ?? ""}\n${JSON.stringify(record.payload ?? {})}`).join("\n");
   const decisions = extractDecisionCandidates(text);
   const openQuestions = extractQuestions(text);
-  const nextActions = inferNextActions({ activeFiles, activeSessions, decisions, openQuestions, evidenceRecords });
+  const nextActions = inferNextActions({ activeFiles, activeSessions, decisions, openQuestions, evidenceRecords, interruptions, webpages });
 
   return {
     id: `view:project_current:${stableKey(projectPath || project)}`,
@@ -112,12 +123,26 @@ function buildProjectCurrentView(
     },
     content: {
       focus: inferFocus(lane, evidenceRecords),
+      current_work: {
+        doing: inferFocus(lane, evidenceRecords),
+        attention_share: lane.attention_share,
+        last_seen_at: laneLastSeen(lane, evidenceRecords),
+        interruption_count: interruptions.length,
+      },
       recent_context: recentContext,
       decisions,
       open_questions: openQuestions,
       next_actions: nextActions,
       active_files: activeFiles,
       active_sessions: activeSessions,
+      active_webpages: webpages.map(page => page.url),
+      active_conversations: conversations.map(conversation => conversation.id),
+      interruptions,
+      project_artifacts: {
+        webpages,
+        conversations,
+        files,
+      },
       supporting_sources: evidenceRecords.map(record => ({
         id: record.id,
         schema: record.schema.name,
@@ -171,10 +196,20 @@ function projectLanesFrom(view: StoredContextView): ProjectLane[] {
 }
 
 function inferFocus(lane: ProjectLane, records: StoredContextRecord[]): string {
-  const titles = records.map(record => record.content?.title).filter((value): value is string => Boolean(value)).slice(0, 3);
+  const titles = records
+    .filter(record => record.source.type !== "browser")
+    .map(record => record.content?.title)
+    .filter((value): value is string => Boolean(value))
+    .slice(0, 3);
   if (titles.length) return titles.join(" / ");
   const files = arrayStrings(lane.evidence.file_paths).slice(0, 3);
   if (files.length) return `Work around ${files.join(", ")}`;
+  const browserTitles = records
+    .filter(record => record.source.type === "browser")
+    .map(record => record.content?.title)
+    .filter((value): value is string => Boolean(value))
+    .slice(0, 3);
+  if (browserTitles.length) return `Researching ${browserTitles.join(" / ")}`;
   return `Active project lane ${lane.label}`;
 }
 
@@ -210,15 +245,127 @@ function inferNextActions(input: {
   decisions: string[];
   openQuestions: string[];
   evidenceRecords: StoredContextRecord[];
+  interruptions: Array<Record<string, unknown>>;
+  webpages: Array<ProjectArtifact & { url: string }>;
 }): string[] {
   const actions: string[] = [];
+  if (input.interruptions.length) actions.push("Resume from the latest interruption before starting a new branch of work.");
   if (input.activeFiles.length) actions.push(`Review and continue changes around ${input.activeFiles.slice(0, 3).join(", ")}.`);
+  if (input.webpages.length) actions.push(`Use ${input.webpages[0].title ?? input.webpages[0].url} as supporting project research context.`);
   if (input.openQuestions.length) actions.push("Resolve the highest-priority open question before expanding scope.");
   if (input.decisions.length) actions.push("Preserve confirmed decisions in project memory or docs.");
   if (input.activeSessions.length) actions.push("Use the recent AI session as primary continuity context.");
   if (input.evidenceRecords.some(record => record.schema.name === "observation.local_project")) actions.push("Run typecheck/tests after local project changes.");
   if (!actions.length) actions.push("Collect more AI-session or local-project evidence before taking action.");
   return unique(actions).slice(0, 6);
+}
+
+function projectWebpages(records: StoredContextRecord[]): Array<ProjectArtifact & { url: string; domain?: string }> {
+  return records
+    .filter(record => record.source.type === "browser" || record.schema.name.startsWith("observation.browser_"))
+    .flatMap(record => {
+      const url = stringValue(record.content?.url) ?? stringValue(record.payload?.url) ?? stringValue(record.payload?.browser_url);
+      if (!url) return [];
+      const page: ProjectArtifact & { url: string; domain?: string } = {
+        id: record.id,
+        url,
+        domain: stringValue(record.scope?.domain) ?? domainFromUrl(url),
+        title: record.content?.title,
+        observed_at: record.time?.observed_at ?? record.created_at,
+        evidence: ["routed_by_work.focus_set", record.schema.name],
+      };
+      return [page];
+    })
+    .slice(0, 12);
+}
+
+function projectConversations(records: StoredContextRecord[]): Array<ProjectArtifact & { session?: string; tool?: string }> {
+  return records
+    .filter(isConversationRecord)
+    .map(record => ({
+      id: record.id,
+      session: stringValue(record.scope?.session) ?? stringValue(record.payload?.session_id) ?? stringValue(record.payload?.sessionId),
+      tool: conversationTool(record),
+      title: record.content?.title,
+      observed_at: record.time?.observed_at ?? record.created_at,
+      evidence: ["routed_by_work.focus_set", record.schema.name],
+    }))
+    .slice(0, 12);
+}
+
+function projectFiles(activeFiles: string[], records: StoredContextRecord[]): ProjectArtifact[] {
+  return activeFiles.map(path => {
+    const sourceIds = records
+      .filter(record => [
+        ...arrayStrings(record.payload?.files_touched),
+        ...arrayStrings(record.payload?.changed_files),
+        ...arrayStrings(record.payload?.file_paths),
+        stringValue(record.content?.path),
+      ].filter((value): value is string => Boolean(value)).includes(path))
+      .map(record => record.id);
+    return {
+      id: path,
+      title: path.split("/").at(-1) ?? path,
+      evidence: unique(["routed_by_work.focus_set", ...sourceIds]).slice(0, 8),
+    };
+  }).slice(0, 20);
+}
+
+function projectInterruptions(records: StoredContextRecord[]): Array<Record<string, unknown>> {
+  return records
+    .flatMap(record => {
+      const text = `${record.content?.title ?? ""}\n${record.content?.text ?? ""}\n${JSON.stringify(record.payload ?? {})}`;
+      if (!hasInterruptionSignal(text, record.payload)) return [];
+      return [{
+        id: record.id,
+        title: record.content?.title,
+        observed_at: record.time?.observed_at ?? record.created_at,
+        session: stringValue(record.scope?.session) ?? stringValue(record.payload?.session_id) ?? stringValue(record.payload?.sessionId),
+        reason: interruptionReason(text),
+      }];
+    })
+    .slice(0, 8);
+}
+
+function laneLastSeen(lane: ProjectLane, records: StoredContextRecord[]): string | undefined {
+  return records
+    .map(record => record.time?.observed_at ?? record.created_at)
+    .filter((value): value is string => Boolean(value))
+    .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? stringValue(lane.evidence.last_seen_at);
+}
+
+function isConversationRecord(record: StoredContextRecord): boolean {
+  return record.source.type === "ai_session"
+    || record.schema.name === "observation.ai_session_locator_result"
+    || record.schema.name === "observation.codex.message"
+    || record.schema.name === "observation.claude.message"
+    || /codex|claude/i.test([record.source.connector, record.content?.title, stringValue(record.payload?.tool)].filter(Boolean).join(" "));
+}
+
+function conversationTool(record: StoredContextRecord): string | undefined {
+  const raw = [record.source.connector, stringValue(record.payload?.tool), record.schema.name, record.content?.title].filter(Boolean).join(" ");
+  if (/claude/i.test(raw)) return "claude";
+  if (/codex/i.test(raw)) return "codex";
+  return stringValue(record.source.connector) ?? stringValue(record.payload?.tool);
+}
+
+function hasInterruptionSignal(text: string, payload: Record<string, unknown> | undefined): boolean {
+  return Boolean(payload?.interrupted)
+    || Boolean(payload?.interruption)
+    || /interrupted|interruption|context switch|paused|resume from|继续之前|打断|中断/i.test(text);
+}
+
+function interruptionReason(text: string): string {
+  return text.split(/\n+/).map(line => line.trim()).find(line => /interrupted|interruption|context switch|paused|resume from|继续之前|打断|中断/i.test(line))?.slice(0, 220)
+    ?? "Interruption signal found in project evidence.";
+}
+
+function domainFromUrl(url: string): string | undefined {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return undefined;
+  }
 }
 
 function stableKey(value: string): string {

@@ -12,7 +12,9 @@ import { buildLocalProjectSnapshotRecord } from "@info/sensors";
 import { buildThreadEvidenceMap } from "@info/views/threads/thread-evidence.js";
 import { buildCandidateRoutes, buildRouteCandidateRecord, extractRouteFeatures } from "@info/processor-runtime";
 import { processAmbientBackgroundTasks } from "./background-tasks.js";
+import type { AmbientBackgroundTaskMode } from "./background-tasks.js";
 import { processToolsmithSandboxArtifacts } from "./toolsmith-artifacts.js";
+import type { AutonomyProfile } from "@info/programs/types.js";
 
 const VIEW_WORKER_FUNCTIONS = {
   evidence: "view::evidence_compile",
@@ -68,6 +70,10 @@ export type RuntimeTickRequest = {
   project_timeline_minutes?: number;
   process_background_tasks?: boolean;
   background_task_limit?: number;
+  background_task_mode?: AmbientBackgroundTaskMode;
+  background_task_runtime?: string;
+  background_task_dry_run?: boolean;
+  background_task_autonomy?: AutonomyProfile;
   process_toolsmith_artifacts?: boolean;
   toolsmith_artifact_limit?: number;
   toolsmith_artifact_output_dir?: string;
@@ -504,6 +510,10 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
       limit: req.background_task_limit,
       write,
       iii,
+      mode: req.background_task_mode,
+      runtime: req.background_task_runtime,
+      dry_run: req.background_task_dry_run,
+      autonomy: req.background_task_autonomy,
     }, store);
     diagnostics.background_tasks = backgroundTasks;
     compiledViews.push({

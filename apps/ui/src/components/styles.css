@@ -1,3 +1,26 @@
+/* ── Proactive Agent Workbench Shared ── */
+.workbench-head{border:1px solid var(--line);border-radius:8px;background:#fff;margin:0 0 10px;padding:12px;display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.workbench-head>div:first-child{min-width:0}
+.workbench-head span{display:block;color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.04em;font-weight:700}
+.workbench-head h2{margin:3px 0 2px;font-size:18px;line-height:1.25;font-weight:720;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.workbench-head p{margin:0;color:var(--muted);font-size:12px}
+.workbench-head-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:280px;max-width:52%;flex-shrink:0}
+.workbench-head-actions button{height:30px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);padding:0 10px;font-size:12px;font-weight:650}
+.workbench-head-actions button:hover{background:var(--hover)}
+.workbench-head-actions button:disabled{opacity:.55;cursor:wait}
+.workbench-status{min-width:0;max-width:360px;height:30px;display:flex;align-items:center;border:1px solid var(--line);border-radius:6px;background:#fbfbfa;color:var(--muted);padding:0 8px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.workbench-status.error{border-color:#f0cbc6;background:#fff4f2;color:#a63328}
+.workbench-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0 0 10px}
+.workbench-metric{min-width:0;border:1px solid var(--line);border-radius:8px;background:#fbfbfa;padding:7px 9px}
+.workbench-metric span{display:block;color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:.04em;font-weight:700}
+.workbench-metric b{display:block;margin-top:1px;color:#3b3b3b;font-size:12px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.workbench-empty{border:1px dashed var(--line);border-radius:8px;background:#fff;padding:16px;color:var(--muted);display:grid;gap:3px}
+.workbench-empty b{color:#4a4a4a;font-size:13px}
+.workbench-empty span{font-size:12px}
+.workbench-row-main{display:block;width:100%;border:0;background:transparent;color:inherit;padding:0;text-align:left}
+.workbench-row-main:focus-visible{outline:2px solid rgba(47,118,81,.28);outline-offset:3px;border-radius:6px}
+@media(max-width:720px){.workbench-head{display:block}.workbench-head-actions{margin-top:10px;max-width:none;min-width:0;justify-content:flex-start;flex-wrap:wrap}.workbench-status{max-width:100%;flex:1}.workbench-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
 /* ── View Explorer ── */
 .vx-panel { max-width: none; margin: 0 auto; padding: 0 0 48px; }
 .vx-toolbar { display: flex; gap: 10px; margin: 0 0 12px; }
@@ -24,6 +47,7 @@
 .mri-row-confidence { font-family: var(--mono); font-size: 11px; color: #2f7651; }
 .mri-row h4 { margin: 0 0 4px; font-size: 14px; line-height: 1.35; font-weight: 680; }
 .mri-row-summary { margin: 0; color: #5c5c5c; font-size: 12px; line-height: 1.42; }
+.mri-row-meta { display: flex; gap: 10px; margin-top: 6px; color: var(--faint); font-size: 11px; flex-wrap: wrap; }
 .mri-actions { display: flex; gap: 6px; margin-top: 8px; }
 .mri-actions button { height: 28px; border: 1px solid var(--line); border-radius: 6px; background: #2f2f2f; color: #fff; padding: 0 9px; font-size: 12px; font-weight: 650; cursor: pointer; }
 .mri-actions .action-accept { background: #2f7651; border-color: #2f7651; }
@@ -41,10 +65,22 @@
 .pd-row-confidence { font-family: var(--mono); font-size: 11px; color: #2f7651; }
 .pd-row h4 { margin: 0 0 4px; font-size: 14px; line-height: 1.35; font-weight: 680; }
 .pd-row-summary { margin: 0; color: #5c5c5c; font-size: 12px; line-height: 1.42; }
+.pd-row-meta { display: flex; gap: 10px; margin-top: 6px; color: var(--faint); font-size: 11px; flex-wrap: wrap; }
 .pd-details { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
 .pd-section { margin-bottom: 8px; }
 .pd-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--faint); font-weight: 650; }
-.pd-focus-sets { border-top: 1px solid var(--line); padding-top: 12px; }
+.pd-details ul{margin:5px 0 0;padding-left:18px;color:#555;font-size:12px;line-height:1.45}
+.pd-focus-sets { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 12px; margin-top: 10px; }
+.pd-focus-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
+.pd-focus-head span { display: block; color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
+.pd-focus-head h4 { margin: 2px 0 0; font-size: 14px; line-height: 1.3; }
+.pd-focus-head>b { font-family: var(--mono); font-size: 11px; color: var(--faint); font-weight: 500; white-space: nowrap; }
+.pd-focus-sets ul { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; }
+.pd-focus-sets li { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid #eeeeec; border-radius: 7px; background: #fbfbfa; padding: 8px 9px; }
+.pd-focus-sets li div { min-width: 0; }
+.pd-focus-sets li b { display: block; color: #333; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-focus-sets li span { color: var(--faint); font-size: 11px; }
+.pd-focus-sets li strong { font-family: var(--mono); color: #2f7651; font-size: 12px; }
 
 /* ── Processor Traces ── */
 .pt-panel { max-width: none; margin: 0 auto; padding: 0 0 48px; }
@@ -74,6 +110,7 @@
 .pi-row-confidence { font-family: var(--mono); font-size: 11px; color: #2f7651; }
 .pi-row h4 { margin: 0 0 4px; font-size: 14px; line-height: 1.35; font-weight: 680; }
 .pi-row-summary { margin: 0; color: #5c5c5c; font-size: 12px; line-height: 1.42; }
+.pi-row-meta { display: flex; gap: 10px; margin-top: 6px; color: var(--faint); font-size: 11px; flex-wrap: wrap; }
 .pi-actions { display: flex; gap: 6px; margin-top: 8px; }
 .pi-actions button { height: 28px; border: 1px solid var(--line); border-radius: 6px; background: #2f2f2f; color: #fff; padding: 0 9px; font-size: 12px; font-weight: 650; cursor: pointer; }
 .pi-actions .action-accept { background: #2f7651; border-color: #2f7651; }

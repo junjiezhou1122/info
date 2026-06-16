@@ -248,6 +248,87 @@ test("two projects produce separate project views with distinct inbox/tasks/deci
   );
 }));
 
+// ---- Project continuity artifacts ----
+
+test("project.current answers current work decisions next actions and related artifacts from mixed signals", () => withStore((store) => {
+  const codex = sourceRecord("obs:system:codex", "observation.ai_session_locator_result", {
+    source: { type: "ai_session", connector: "codex" },
+    scope: { project: "info", project_path: "/Users/junjie/info", session: "codex-system-view" },
+    content: {
+      title: "Codex Project View implementation",
+      text: "Decision: project remains a view family.\nWhat should project.current surface first?",
+    },
+    payload: {
+      cwd: "/Users/junjie/info",
+      session_id: "codex-system-view",
+      tool: "codex",
+      files_touched: ["packages/views/project/current.ts"],
+    },
+  });
+  const claude = sourceRecord("obs:system:claude", "observation.ai_session_locator_result", {
+    source: { type: "ai_session", connector: "claude-code" },
+    scope: { project: "info", project_path: "/Users/junjie/info", session: "claude-system-view" },
+    content: {
+      title: "Claude interruption notes",
+      text: "Interrupted after writing tests. Resume from browser docs and project.current artifact assertions.",
+    },
+    payload: {
+      cwd: "/Users/junjie/info",
+      session_id: "claude-system-view",
+      tool: "claude-code",
+      interrupted: true,
+      files_touched: ["tests/project-system-views.test.ts"],
+    },
+  });
+  const docs = sourceRecord("obs:system:browser-docs", "observation.browser_page_snapshot", {
+    scope: { project: "info", project_path: "/Users/junjie/info", domain: "nodejs.org" },
+    content: {
+      title: "Node test runner docs",
+      url: "https://nodejs.org/api/test.html",
+      text: "Reference docs for deterministic node:test assertions.",
+    },
+    payload: { project_path: "/Users/junjie/info" },
+  });
+  const otherProject = sourceRecord("obs:system:paperclip", "observation.ai_session_locator_result", {
+    scope: { project: "paperclip", project_path: "/Users/junjie/paperclip", session: "codex-paperclip-system" },
+    content: { title: "Paperclip task work", text: "Decision: do not mix paperclip and info artifacts." },
+    payload: { cwd: "/Users/junjie/paperclip", session_id: "codex-paperclip-system", files_touched: ["src/tasks.ts"] },
+  });
+  const records = [codex, claude, docs, otherProject];
+  const routes = records.map(record => store.insertRecord(routeCandidateFor(record)));
+  const focus = compileWorkFocusSet({
+    records: [...records, ...routes],
+    write: true,
+    now: new Date("2026-06-16T10:05:00.000Z"),
+  }, store).view as any;
+
+  const result = compileProjectCurrent({ focusSetViews: [focus], records, write: false, now: new Date("2026-06-16T10:06:00.000Z") }, store);
+  const infoView = result.views.find(v => v.scope?.project_path === "/Users/junjie/info");
+  const paperclipView = result.views.find(v => v.scope?.project_path === "/Users/junjie/paperclip");
+  assert.ok(infoView, "info view should exist");
+  assert.ok(paperclipView, "paperclip view should exist");
+
+  assert.match(String(infoView?.content?.focus), /Codex Project View implementation|Claude interruption notes/);
+  assert.ok((infoView?.content?.decisions as string[]).some(d => d.includes("view family")));
+  assert.ok((infoView?.content?.open_questions as string[]).some(q => q.includes("surface first")));
+  assert.ok((infoView?.content?.next_actions as string[]).some(action => /Resume from the latest interruption/i.test(action)));
+  assert.deepEqual(infoView?.content?.active_webpages, ["https://nodejs.org/api/test.html"]);
+  assert.ok((infoView?.content?.active_conversations as string[]).includes("obs:system:codex"));
+  assert.ok((infoView?.content?.active_conversations as string[]).includes("obs:system:claude"));
+  assert.ok((infoView?.content?.active_files as string[]).includes("packages/views/project/current.ts"));
+  assert.ok((infoView?.content?.active_files as string[]).includes("tests/project-system-views.test.ts"));
+  assert.ok(((infoView?.content?.interruptions as any[]) ?? []).some(item => item.id === "obs:system:claude"));
+
+  const artifacts = infoView?.content?.project_artifacts as any;
+  assert.equal(artifacts.webpages[0].url, "https://nodejs.org/api/test.html");
+  assert.ok(artifacts.conversations.some((conversation: any) => conversation.tool === "codex"));
+  assert.ok(artifacts.conversations.some((conversation: any) => conversation.tool === "claude"));
+  assert.ok(artifacts.files.some((file: any) => file.id === "packages/views/project/current.ts"));
+
+  assert.equal(JSON.stringify(infoView?.content).includes("src/tasks.ts"), false);
+  assert.deepEqual((paperclipView?.content?.active_webpages as string[]) ?? [], []);
+}));
+
 // ---- Views are traceable ----
 
 test("project views have correct source_records and compiler metadata", () => withStore((store) => {

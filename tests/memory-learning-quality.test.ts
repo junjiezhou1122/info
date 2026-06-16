@@ -169,3 +169,139 @@ test("candidate with secret source is rejected at gate", () => withStore((store)
   const result = compileMemoryGate({ candidates: [candidate], write: false }, store);
   assert.ok(result.views.length === 0 || result.decisions[0].action === "reject", "Candidate with secret source should be rejected at gate");
 }));
+
+test("optional summarizer receives sanitized observations and can add preference candidates", () => withStore((store) => {
+  const record = store.insertRecord({
+    id: "obs:preference",
+    schema: { name: "observation.agent_session", version: 1 },
+    source: { type: "ai_session", connector: "codex" },
+    scope: { project: "info", project_path: "/Users/junjie/info", session: "s1" },
+    content: { text: "always keep provenance visible; api_key=SHOULD_NOT_COPY" },
+    payload: { original_text: "raw secret body should not be sent" },
+    privacy: { level: "private", retention: "normal", allow_llm_summary: true, allow_external_llm: false },
+  });
+  let observedText = "";
+
+  const result = compileMemoryCandidates({
+    records: [record],
+    write: false,
+    summarizer: ({ observations }) => {
+      observedText = observations[0]?.text ?? "";
+      assert.deepEqual(observations[0]?.payload_keys, ["original_text"]);
+      return [{
+        kind: "preference",
+        target: "memory.preferences",
+        claim: "Prefer memory suggestions that keep source provenance visible.",
+        confidence: 0.76,
+        evidenceCount: 1,
+        sourceRecords: [observations[0].id],
+        scope: observations[0].scope,
+        metadata: { extraction: "mock_summarizer" },
+      }];
+    },
+  }, store);
+
+  const claim = result.views.find(view => view.content?.claim === "Prefer memory suggestions that keep source provenance visible.")?.content?.claim;
+  assert.ok(claim);
+  assert.equal(observedText.includes("SHOULD_NOT_COPY"), false);
+  assert.equal(JSON.stringify(result.views).includes("SHOULD_NOT_COPY"), false);
+  assert.equal(result.diagnostics?.summarizer_candidates, 1);
+}));
+
+test("summarizer is skipped for sources that disallow local summarization", () => withStore((store) => {
+  const record = store.insertRecord({
+    id: "obs:no-summary",
+    schema: { name: "observation.agent_session", version: 1 },
+    source: { type: "ai_session", connector: "codex" },
+    content: { text: "prefer short answers" },
+    privacy: { level: "private", retention: "normal", allow_llm_summary: false },
+  });
+
+  const result = compileMemoryCandidates({
+    records: [record],
+    write: false,
+    summarizer: ({ observations }) => {
+      assert.equal(observations.length, 0);
+      return [];
+    },
+  }, store);
+
+  assert.equal(result.diagnostics?.summarizer_candidates, 0);
+}));
+
+test("candidate quality rules reject malformed or secret-like summarizer drafts", () => withStore((store) => {
+  const record = store.insertRecord({
+    id: "obs:quality",
+    schema: { name: "observation.browser_page_snapshot", version: 1 },
+    source: { type: "ai_session", connector: "codex" },
+    content: { text: "prefer concise implementation" },
+    privacy: { level: "private", retention: "normal", allow_llm_summary: true },
+  });
+
+  const result = compileMemoryCandidates({
+    records: [record],
+    write: false,
+    summarizer: ({ observations }) => [
+      {
+        kind: "preference",
+        target: "memory.preferences",
+        claim: "sk-test_SECRET_TOKEN_SHOULD_NOT_COPY",
+        confidence: 0.99,
+        evidenceCount: 1,
+        sourceRecords: [observations[0].id],
+      },
+      {
+        kind: "workflow_pattern",
+        target: "memory.preferences",
+        claim: "Wrong target should not survive quality filtering.",
+        confidence: 0.99,
+        evidenceCount: 1,
+        sourceRecords: [observations[0].id],
+      },
+      {
+        kind: "agent_collaboration_style",
+        target: "memory.agent_collaboration_style",
+        claim: "Prefer concise implementation plans before code edits.",
+        confidence: 0.8,
+        evidenceCount: 1,
+        sourceRecords: [observations[0].id],
+      },
+    ],
+  }, store);
+
+  assert.equal(result.views.length, 1);
+  assert.equal(result.views[0].content?.claim, "Prefer concise implementation plans before code edits.");
+  assert.equal(result.diagnostics?.quality_filtered, 2);
+}));
+
+test("repeated stuck signals produce skill gap candidates that gate holds until repeated", () => withStore((store) => {
+  const first = store.insertRecord({
+    id: "obs:stuck1",
+    schema: { name: "observation.agent_session", version: 1 },
+    source: { type: "ai_session", connector: "codex" },
+    scope: { project: "info", project_path: "/Users/junjie/info" },
+    content: { text: "The test command hung and the build was stuck until timeout." },
+    privacy: { level: "private", retention: "normal" },
+  });
+  const second = store.insertRecord({
+    id: "obs:stuck2",
+    schema: { name: "observation.agent_session", version: 1 },
+    source: { type: "ai_session", connector: "codex" },
+    scope: { project: "info", project_path: "/Users/junjie/info" },
+    content: { text: "Again blocked by a test command hang and needed timeout checks." },
+    privacy: { level: "private", retention: "normal" },
+  });
+
+  const one = compileMemoryCandidates({ records: [first], write: false }, store);
+  const repeated = compileMemoryCandidates({ records: [first, second], write: false }, store);
+  const oneSkill = one.views.find(view => view.content?.memory_kind === "skill_gap");
+  const repeatedSkill = repeated.views.find(view => view.content?.memory_kind === "skill_gap");
+
+  assert.ok(oneSkill);
+  assert.ok(repeatedSkill);
+  assert.ok((repeatedSkill.content?.confidence as number) > (oneSkill.content?.confidence as number));
+  assert.ok((repeatedSkill.metadata?.repeated_signals as number) >= 2);
+
+  const gate = compileMemoryGate({ candidates: [repeatedSkill], write: false }, store);
+  assert.equal(gate.decisions[0].action, "hold");
+}));

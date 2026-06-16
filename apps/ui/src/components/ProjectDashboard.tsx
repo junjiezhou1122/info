@@ -11,15 +11,19 @@ export default function ProjectDashboard({
   const [focusSets, setFocusSets] = useState<ContextViewSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   useEffect(() => { void refresh(); }, []);
 
   const selected = useMemo(() => projects.find(p => p.id === selectedId), [projects, selectedId]);
+  const latestFocusSet = focusSets[0];
+  const focusLanes = useMemo(() => activeFocusLanes(latestFocusSet), [latestFocusSet]);
 
   async function refresh() {
     setLoading(true);
-    setStatus("Loading project dashboard…");
+    setStatus("Loading project dashboard...");
+    setError("");
     try {
       const [p, w] = await Promise.all([
         fetchProjectCurrentViews(),
@@ -28,11 +32,14 @@ export default function ProjectDashboard({
       setProjects(p);
       setFocusSets(w);
       setStatus(`${p.length} projects · ${w.length} focus sets`);
-      if (!selectedId || !p.find(pr => pr.id === selectedId)) {
-        setSelectedId(p[0]?.id ?? null);
+      const nextSelectedId = !selectedId || !p.find(pr => pr.id === selectedId) ? p[0]?.id ?? null : selectedId;
+      setSelectedId(nextSelectedId);
+      const nextSelected = p.find(pr => pr.id === nextSelectedId);
+      if (nextSelected) {
+        onInspect?.({ view: nextSelected, loading: false });
       }
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -40,9 +47,21 @@ export default function ProjectDashboard({
 
   return (
     <section className="pd-panel">
-      <div className="pd-toolbar">
-        <button className="secondary" onClick={refresh} disabled={loading}>{loading ? "Loading…" : "Refresh"}</button>
-        <span className="pd-status">{status}</span>
+      <WorkbenchHeader
+        eyebrow="Project Workbench"
+        title={selected?.title || "Current Project"}
+        summary={`${projects.length} projects · ${focusLanes.length} active lanes`}
+        status={loading ? "Refreshing project and focus views..." : status || "Ready"}
+        error={error}
+        onRefresh={() => void refresh()}
+        refreshLabel={loading ? "Loading..." : "Refresh"}
+        refreshDisabled={loading}
+      />
+      <div className="workbench-metrics" aria-label="Project dashboard metrics">
+        <Metric label="Focus" value={projectFocus(selected)} />
+        <Metric label="Updated" value={relativeTime(selected?.updated_at)} />
+        <Metric label="Open Questions" value={projectList(selected, "open_questions").length} />
+        <Metric label="Next Actions" value={projectList(selected, "next_actions").length} />
       </div>
       <div className="pd-list">
         {projects.map(project => (
@@ -52,13 +71,18 @@ export default function ProjectDashboard({
               {typeof project.confidence === "number" && <b className="pd-row-confidence">{Math.round(project.confidence * 100)}%</b>}
             </div>
             <h4>{project.title || project.id}</h4>
-            <p className="pd-row-summary">{project.summary || "No summary."}</p>
+            <p className="pd-row-summary">{project.summary || projectFocus(project) || "No summary."}</p>
+            <div className="pd-row-meta">
+              <span>{relativeTime(project.updated_at)}</span>
+              <span>{projectList(project, "active_files").length} files</span>
+              <span>{projectList(project, "next_actions").length} actions</span>
+            </div>
             <ProjectDetails content={project.content} />
           </button>
         ))}
-        {projects.length === 0 && !loading && <div className="empty-inline">No project current views.</div>}
+        {projects.length === 0 && !loading && <EmptyState title="No current project" detail={error ? "Fix the request error, then refresh." : "Project views appear here after local project capture runs."} />}
       </div>
-      {focusSets.length > 0 && <FocusSetSection focusSets={focusSets} />}
+      <FocusSetSection focusSets={focusSets} />
     </section>
   );
 }
@@ -101,19 +125,112 @@ function ProjectDetails({ content }: { content: Record<string, unknown> | undefi
 
 function FocusSetSection({ focusSets }: { focusSets: ContextViewSummary[] }) {
   const latest = focusSets[0];
-  const lanes = Array.isArray(latest?.content?.active_lanes) ? (latest.content.active_lanes as unknown as WorkFocusLane[]) : [];
+  const lanes = activeFocusLanes(latest);
   return (
     <div className="pd-focus-sets">
-      <h4>Work Focus Set</h4>
+      <div className="pd-focus-head">
+        <div>
+          <span>Focus Set</span>
+          <h4>{latest?.title || "Work Focus"}</h4>
+        </div>
+        <b>{relativeTime(latest?.updated_at)}</b>
+      </div>
       {lanes.length > 0 ? (
         <ul>
           {lanes.map(lane => (
-            <li key={lane.lane_key}><b>{lane.label}</b> ({Math.round(lane.attention_share * 100)}%)</li>
+            <li key={lane.lane_key}>
+              <div>
+                <b>{lane.label}</b>
+                <span>{lane.lane_kind} · {formatConfidence(lane.confidence)} confidence</span>
+              </div>
+              <strong>{Math.round(lane.attention_share * 100)}%</strong>
+            </li>
           ))}
         </ul>
       ) : (
-        <p>No active lanes.</p>
+        <EmptyState title="No active focus lanes" detail={latest ? "The latest focus set did not include active lanes." : "Focus lanes appear after work focus compilation runs."} />
       )}
     </div>
   );
+}
+
+function WorkbenchHeader({
+  eyebrow,
+  title,
+  summary,
+  status,
+  error,
+  onRefresh,
+  refreshLabel,
+  refreshDisabled,
+}: {
+  eyebrow: string;
+  title: string;
+  summary: string;
+  status: string;
+  error?: string;
+  onRefresh: () => void;
+  refreshLabel: string;
+  refreshDisabled?: boolean;
+}) {
+  return (
+    <div className="workbench-head">
+      <div>
+        <span>{eyebrow}</span>
+        <h2>{title}</h2>
+        <p>{summary}</p>
+      </div>
+      <div className="workbench-head-actions">
+        <div className={`workbench-status ${error ? "error" : ""}`}>{error || status}</div>
+        <button className="secondary" onClick={onRefresh} disabled={refreshDisabled}>{refreshLabel}</button>
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="workbench-metric">
+      <span>{label}</span>
+      <b>{value}</b>
+    </div>
+  );
+}
+
+function EmptyState({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="workbench-empty">
+      <b>{title}</b>
+      <span>{detail}</span>
+    </div>
+  );
+}
+
+function activeFocusLanes(view?: ContextViewSummary) {
+  return Array.isArray(view?.content?.active_lanes) ? (view.content.active_lanes as unknown as WorkFocusLane[]) : [];
+}
+
+function projectFocus(view?: ContextViewSummary) {
+  const focus = view?.content?.focus;
+  return typeof focus === "string" && focus.trim() ? focus : "-";
+}
+
+function projectList(view: ContextViewSummary | undefined, key: "open_questions" | "next_actions" | "active_files") {
+  const value = view?.content?.[key];
+  return Array.isArray(value) ? value : [];
+}
+
+function formatConfidence(value?: number) {
+  return typeof value === "number" ? `${Math.round(value * 100)}%` : "-";
+}
+
+function relativeTime(iso?: string) {
+  if (!iso) return "-";
+  const delta = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(delta)) return "-";
+  const s = Math.max(1, Math.round(delta / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.round(m / 60)}h ago`;
 }

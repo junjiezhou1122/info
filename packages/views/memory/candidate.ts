@@ -17,6 +17,8 @@ import {
   type CandidateDraft,
   type FeedbackIndex,
   type CandidateConflict,
+  type MemoryCandidateSummarizer,
+  type SanitizedMemoryObservation,
 } from "./learning.js";
 
 export type CompileMemoryCandidatesOptions = {
@@ -26,6 +28,7 @@ export type CompileMemoryCandidatesOptions = {
   limit?: number;
   now?: Date;
   feedback_index?: FeedbackIndex;
+  summarizer?: MemoryCandidateSummarizer;
 };
 
 export type CompileMemoryCandidatesResult = {
@@ -46,7 +49,10 @@ export function compileMemoryCandidates(options: CompileMemoryCandidatesOptions 
   const blockedViewDrafts = (options.views ?? []).filter(view => !isAllowedView(view)).flatMap(view => candidatesFromView(view, { includeBlocked: true }));
   const recordDrafts = (options.records ?? []).filter(isAllowedRecord).flatMap(record => toCandidateDrafts(record, store));
   const viewDrafts = (options.views ?? []).filter(isAllowedView).flatMap(view => candidatesFromView(view));
-  const allDrafts = dedupeDrafts([...recordDrafts, ...viewDrafts]);
+  const summarizerDrafts = options.summarizer
+    ? options.summarizer({ observations: sanitizedObservations(options.records ?? [], options.views ?? []), now: generatedAt })
+    : [];
+  const allDrafts = dedupeDrafts([...recordDrafts, ...viewDrafts, ...summarizerDrafts]);
   const feedbackIndex = options.feedback_index ?? collectFeedbackIndex(store);
   const withFeedback = applyFeedbackToCandidates(allDrafts, feedbackIndex);
   const boosted = withFeedback.adjustedDrafts.map(draft => {
@@ -63,8 +69,9 @@ export function compileMemoryCandidates(options: CompileMemoryCandidatesOptions 
     };
   });
   const blockedDrafts = dedupeDrafts([...blockedRecordDrafts, ...blockedViewDrafts]);
-  const filtered = filterPrivacyViolatingCandidates(boosted, store);
-  const privacyFiltered = boosted.length - filtered.length + blockedDrafts.length;
+  const privacyFilteredDrafts = filterPrivacyViolatingCandidates(boosted, store);
+  const filtered = privacyFilteredDrafts.filter(isHighQualityDraft);
+  const privacyFiltered = boosted.length - privacyFilteredDrafts.length + blockedDrafts.length;
   const conflicts = detectConflicts(filtered);
   const candidateViews = filtered.map(draft => buildCandidateView(markDraftConflict(draft, conflicts), generatedAt));
   const stored = (options.write ?? true) ? candidateViews.map(view => store.upsertView(view)) : candidateViews;
@@ -97,6 +104,8 @@ export function compileMemoryCandidates(options: CompileMemoryCandidatesOptions 
       feedback_applied: withFeedback.applied.size > 0,
       feedback_adjusted: withFeedback.applied.size,
       privacy_filtered: privacyFiltered,
+      quality_filtered: privacyFilteredDrafts.length - filtered.length,
+      summarizer_candidates: summarizerDrafts.length,
     },
   };
 }
@@ -201,6 +210,20 @@ function candidatesFromAgentSignal(record: StoredContextRecord): CandidateDraft[
       sourceRecords: [record.id],
       scope: compactRecord({ project: record.scope?.project, project_path: record.scope?.project_path, session: record.scope?.session }),
       metadata: { source_schema: record.schema.name },
+      policy: { min_evidence_count: 2, allow_manual_promote: true },
+    });
+  }
+  const stuckPoint = repeatedStuckPointFromText(text);
+  if (stuckPoint) {
+    drafts.push({
+      kind: "skill_gap",
+      target: "memory.skill_gaps",
+      claim: stuckPoint,
+      confidence: 0.6,
+      evidenceCount: 1,
+      sourceRecords: [record.id],
+      scope: compactRecord({ project: record.scope?.project, project_path: record.scope?.project_path }),
+      metadata: { source_schema: record.schema.name, signal_type: "repeated_stuck_point" },
       policy: { min_evidence_count: 2, allow_manual_promote: true },
     });
   }
@@ -321,10 +344,89 @@ function buildCandidateView(draft: CandidateDraft, generatedAt: string): Context
   };
 }
 
+function sanitizedObservations(records: StoredContextRecord[], views: StoredContextView[]): SanitizedMemoryObservation[] {
+  const recordObservations = records
+    .filter(isAllowedRecord)
+    .filter(allowsLocalSummary)
+    .map((record): SanitizedMemoryObservation => ({
+      id: record.id,
+      source_type: "record",
+      signal_type: record.schema.name,
+      title: sanitizeObservationText(record.content?.title),
+      text: sanitizeObservationText(record.content?.text),
+      payload_keys: objectKeys(record.payload),
+      source_records: [record.id],
+      source_views: [],
+      scope: safeScope(record.scope),
+      privacy: {
+        level: record.privacy?.level,
+        retention: record.privacy?.retention,
+        allow_llm_summary: record.privacy?.allow_llm_summary,
+        allow_external_llm: record.privacy?.allow_external_llm,
+      },
+    }));
+  const viewObservations = views
+    .filter(isAllowedView)
+    .filter(allowsLocalSummary)
+    .map((view): SanitizedMemoryObservation => ({
+      id: view.id,
+      source_type: "view",
+      signal_type: view.view_type,
+      title: sanitizeObservationText(view.title),
+      text: sanitizeObservationText(firstString(view.summary, stringValue(view.content?.focus as string))),
+      payload_keys: objectKeys(view.content),
+      source_records: view.source_records ?? [],
+      source_views: [view.id, ...(view.source_views ?? [])],
+      scope: safeScope(view.scope),
+      privacy: {
+        level: view.privacy?.level,
+        retention: view.privacy?.retention,
+        allow_llm_summary: view.privacy?.allow_llm_summary,
+        allow_external_llm: view.privacy?.allow_external_llm,
+      },
+    }));
+  return [...recordObservations, ...viewObservations];
+}
+
+function allowsLocalSummary(source: StoredContextRecord | StoredContextView): boolean {
+  return source.privacy?.allow_llm_summary !== false && source.privacy?.allow_external_llm !== true;
+}
+
+function sanitizeObservationText(value: unknown): string | undefined {
+  const text = stringValue(value);
+  if (!text) return undefined;
+  return redactSensitiveText(truncate(text, 240));
+}
+
+function isHighQualityDraft(draft: CandidateDraft): boolean {
+  if (!isAllowedTarget(draft.kind, draft.target)) return false;
+  const claim = draft.claim.trim();
+  const minLength = /[\u3400-\u9fff]/.test(claim) ? 6 : 12;
+  if (claim.length < minLength || claim.length > 260) return false;
+  if (containsSecretLikeText(claim)) return false;
+  if (!((draft.sourceRecords?.length ?? 0) + (draft.sourceViews?.length ?? 0))) return false;
+  return true;
+}
+
+function isAllowedTarget(kind: MemoryCandidateKind, target: DurableMemoryViewType): boolean {
+  return (
+    (kind === "preference" && target === "memory.preferences") ||
+    (kind === "workflow_pattern" && target === "memory.workflow_patterns") ||
+    (kind === "skill_gap" && target === "memory.skill_gaps") ||
+    (kind === "agent_collaboration_style" && target === "memory.agent_collaboration_style") ||
+    (kind === "project_memory" && target === "project.memory") ||
+    (kind === "agent_case" && target === "agent.case_memory")
+  );
+}
+
 function markDraftConflict(draft: CandidateDraft, conflicts: CandidateConflict[]): CandidateDraft {
   const sourceRecordSet = new Set(draft.sourceRecords ?? []);
+  const sourceViewSet = new Set(draft.sourceViews ?? []);
   const draftConflicts = conflicts.filter(conflict =>
-    sourceRecordSet.has(conflict.candidate_id_a) || sourceRecordSet.has(conflict.candidate_id_b)
+    sourceRecordSet.has(conflict.candidate_id_a) ||
+    sourceRecordSet.has(conflict.candidate_id_b) ||
+    sourceViewSet.has(conflict.candidate_id_a) ||
+    sourceViewSet.has(conflict.candidate_id_b)
   );
   if (!draftConflicts.length) return draft;
   return {
@@ -386,6 +488,37 @@ function explicitPreferenceFromText(value: unknown): string | undefined {
   return undefined;
 }
 
+function repeatedStuckPointFromText(value: string): string | undefined {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!/(stuck|blocked|failed|error|hang|超时|卡住|失败|报错)/i.test(normalized)) return undefined;
+  if (/test|typecheck|build|command|terminal|compile|测试|构建/i.test(normalized)) {
+    return "Repeated stuck point: commands, tests, or builds need bounded verification and follow-up checks.";
+  }
+  return "Repeated stuck point: work is blocked often enough to remember the failure pattern.";
+}
+
+function safeScope(scope?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!scope) return undefined;
+  return compactRecord({
+    project: scope.project,
+    project_path: scope.project_path,
+    repo: scope.repo,
+    domain: scope.domain,
+    app: scope.app,
+    session: scope.session,
+  });
+}
+
+function containsSecretLikeText(value: string): boolean {
+  return /(secret|token|api[_-]?key|password|passwd|bearer\s+[a-z0-9._-]+|sk-[a-z0-9]{12,})/i.test(value);
+}
+
+function redactSensitiveText(value: string): string {
+  return value
+    .replace(/sk-[a-z0-9_-]{8,}/gi, "[redacted]")
+    .replace(/\b(?:secret|token|api[_-]?key|password|passwd)\b\s*[:=]\s*\S+/gi, "[redacted]");
+}
+
 function stableKey(value: string): string {
   return createHash("sha1").update(value).digest("hex").slice(0, 12);
 }
@@ -404,6 +537,11 @@ function arrayStrings(value: unknown): string[] {
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function objectKeys(value: unknown): string[] {
+  const record = recordValue(value);
+  return record ? Object.keys(record).sort() : [];
 }
 
 function compactRecord(value: Record<string, unknown>): Record<string, unknown> {

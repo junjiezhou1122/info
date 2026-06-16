@@ -152,7 +152,7 @@ function handleCaptionFragment(
   };
 
   return {
-    views: [buildFragmentView(fragment, now, observation.id, [observation.id])],
+    views: [buildFragmentView(fragment, now, undefined, [observation.id])],
     diagnostics: { event: "caption_fragment", video_id: videoId, fragment },
   };
 }

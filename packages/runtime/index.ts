@@ -7,3 +7,4 @@ export * from "./view-provenance.js";
 export * from "./triggers.js";
 export * from "./background-tasks.js";
 export * from "./toolsmith-artifacts.js";
+export * from "./scheduled-ai-batch.js";

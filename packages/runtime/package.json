@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@info/core": "workspace:*",
+    "@info/processor-runtime": "workspace:*",
     "@info/sensors": "workspace:*",
     "@info/views": "workspace:*",
     "@info/programs": "workspace:*"

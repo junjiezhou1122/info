@@ -2,6 +2,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert";
 import type { ContextViewSummary, MemoryCandidateContent, MemoryGateDecision, ProjectCurrentContent, ProcessorRun, WorkFocusLane, WorkFocusSetContent } from "../apps/ui/src/types.js";
 
+function readSource(path: string) {
+  return import("node:fs").then(fs => fs.readFileSync(path, "utf-8"));
+}
+
 describe("UI View, Memory, and Processor surfaces", () => {
   describe("types", () => {
     it("MemoryCandidateContent type exists", () => {
@@ -22,8 +26,8 @@ describe("UI View, Memory, and Processor surfaces", () => {
     });
 
     it("MemoryGateDecision type exists", () => {
-      const decision: MemoryGateDecision = { action: "accept", candidate_id: "x", target_view_type: "memory.preferences", confidence: 0.9 };
-      assert.strictEqual(decision.action, "accept");
+      const decision: MemoryGateDecision = { action: "promote", candidate_id: "x", target_view_type: "memory.preferences", confidence: 0.9 };
+      assert.strictEqual(decision.action, "promote");
     });
 
     it("ProjectCurrentContent type exists", () => {
@@ -64,8 +68,7 @@ describe("UI View, Memory, and Processor surfaces", () => {
     it("api module exports new helpers without crash", async () => {
       // The api module accesses import.meta.env on load, which will fail in Node.
       // We verify the module structure by reading the source.
-      const fs = await import("node:fs");
-      const source = fs.readFileSync("./apps/ui/src/api.ts", "utf-8");
+      const source = await readSource("./apps/ui/src/api.ts");
       assert.ok(source.includes("export async function fetchMemoryCandidates"));
       assert.ok(source.includes("export async function fetchMemoryGateViews"));
       assert.ok(source.includes("export async function fetchProjectCurrentViews"));
@@ -77,33 +80,57 @@ describe("UI View, Memory, and Processor surfaces", () => {
 
   describe("components import and export correctly", () => {
     it("ViewExplorer component exists", async () => {
-      const fs = await import("node:fs");
-      const source = fs.readFileSync("./apps/ui/src/components/ViewExplorer.tsx", "utf-8");
+      const source = await readSource("./apps/ui/src/components/ViewExplorer.tsx");
       assert.ok(source.includes("export default function ViewExplorer"));
     });
 
     it("MemoryReviewInbox component exists", async () => {
-      const fs = await import("node:fs");
-      const source = fs.readFileSync("./apps/ui/src/components/MemoryReviewInbox.tsx", "utf-8");
+      const source = await readSource("./apps/ui/src/components/MemoryReviewInbox.tsx");
       assert.ok(source.includes("export default function MemoryReviewInbox"));
     });
 
     it("ProjectDashboard component exists", async () => {
-      const fs = await import("node:fs");
-      const source = fs.readFileSync("./apps/ui/src/components/ProjectDashboard.tsx", "utf-8");
+      const source = await readSource("./apps/ui/src/components/ProjectDashboard.tsx");
       assert.ok(source.includes("export default function ProjectDashboard"));
     });
 
     it("ProcessorTracesPanel component exists", async () => {
-      const fs = await import("node:fs");
-      const source = fs.readFileSync("./apps/ui/src/components/ProcessorTracesPanel.tsx", "utf-8");
+      const source = await readSource("./apps/ui/src/components/ProcessorTracesPanel.tsx");
       assert.ok(source.includes("export default function ProcessorTracesPanel"));
     });
 
     it("ProactiveInbox component exists", async () => {
-      const fs = await import("node:fs");
-      const source = fs.readFileSync("./apps/ui/src/components/ProactiveInbox.tsx", "utf-8");
+      const source = await readSource("./apps/ui/src/components/ProactiveInbox.tsx");
       assert.ok(source.includes("export default function ProactiveInbox"));
+    });
+  });
+
+  describe("workbench affordances", () => {
+    it("proactive agent panels expose refresh, status, and empty-state UI", async () => {
+      const files = [
+        "./apps/ui/src/components/ViewExplorer.tsx",
+        "./apps/ui/src/components/ProjectDashboard.tsx",
+        "./apps/ui/src/components/MemoryReviewInbox.tsx",
+        "./apps/ui/src/components/ProcessorTracesPanel.tsx",
+        "./apps/ui/src/components/ProactiveInbox.tsx",
+      ];
+      for (const file of files) {
+        const source = await readSource(file);
+        assert.ok(source.includes("WorkbenchHeader"), `${file} should render a workbench header`);
+        assert.ok(source.includes("workbench-metrics"), `${file} should render dense summary metrics`);
+        assert.ok(source.includes("EmptyState"), `${file} should render an explicit empty state`);
+        assert.ok(source.includes("error"), `${file} should track request errors separately from status`);
+        assert.ok(source.includes("Refresh"), `${file} should expose refresh affordance`);
+      }
+    });
+
+    it("actionable inbox rows do not nest action buttons inside the inspect button", async () => {
+      const memorySource = await readSource("./apps/ui/src/components/MemoryReviewInbox.tsx");
+      const proactiveSource = await readSource("./apps/ui/src/components/ProactiveInbox.tsx");
+      assert.ok(memorySource.includes("<article"));
+      assert.ok(memorySource.includes("className=\"workbench-row-main\""));
+      assert.ok(proactiveSource.includes("<article"));
+      assert.ok(proactiveSource.includes("className=\"workbench-row-main\""));
     });
   });
 });

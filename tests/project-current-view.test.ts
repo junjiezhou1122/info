@@ -62,6 +62,105 @@ test("compileProjectCurrent supports multiple active projects", () => withStore(
   assert.deepEqual(result.views.map(view => view.scope?.project_path).sort(), ["/Users/junjie/info", "/Users/junjie/paperclip"]);
 }));
 
+test("compileProjectCurrent groups project webpages conversations files and interruptions without cross-project bleed", () => withStore((store) => {
+  const codexInfo = sourceRecord("obs:codex:info", "observation.ai_session_locator_result", {
+    source: { type: "ai_session", connector: "codex" },
+    scope: { project: "info", project_path: "/Users/junjie/info", session: "codex-info-current" },
+    content: {
+      title: "Codex info Project View session",
+      text: "Decision: keep project as a view family, not a core object.\nNext: add deterministic project artifact grouping.",
+    },
+    payload: {
+      cwd: "/Users/junjie/info",
+      session_id: "codex-info-current",
+      tool: "codex",
+      files_touched: ["packages/views/project/current.ts", "tests/project-current-view.test.ts"],
+    },
+  });
+  const claudeInfoInterrupted = sourceRecord("obs:claude:info", "observation.ai_session_locator_result", {
+    source: { type: "ai_session", connector: "claude-code" },
+    scope: { project: "info", project_path: "/Users/junjie/info", session: "claude-info-current" },
+    content: {
+      title: "Claude info follow-up",
+      text: "Interrupted while testing mixed project continuity. Resume from the project.current assertions.",
+    },
+    payload: {
+      cwd: "/Users/junjie/info",
+      session_id: "claude-info-current",
+      tool: "claude-code",
+      interrupted: true,
+      files_touched: ["criteria/project-system-views/criteria.md"],
+    },
+  });
+  const docsInfo = sourceRecord("obs:browser:info-docs", "observation.browser_page_snapshot", {
+    scope: { project: "info", project_path: "/Users/junjie/info", domain: "nodejs.org" },
+    content: {
+      title: "Node.js test runner docs",
+      url: "https://nodejs.org/api/test.html",
+      text: "Node test runner documentation for project-current tests.",
+    },
+    payload: { project_path: "/Users/junjie/info", url: "https://nodejs.org/api/test.html" },
+  });
+  const codexPaperclip = sourceRecord("obs:codex:paperclip", "observation.ai_session_locator_result", {
+    source: { type: "ai_session", connector: "codex" },
+    scope: { project: "paperclip", project_path: "/Users/junjie/paperclip", session: "codex-paperclip-current" },
+    content: {
+      title: "Codex paperclip queue work",
+      text: "Decision: keep queue retries local to paperclip.",
+    },
+    payload: {
+      cwd: "/Users/junjie/paperclip",
+      session_id: "codex-paperclip-current",
+      tool: "codex",
+      files_touched: ["src/queue.ts"],
+    },
+  });
+  const unrelatedDocs = sourceRecord("obs:browser:unrelated-docs", "observation.browser_page_snapshot", {
+    scope: { domain: "react.dev" },
+    content: {
+      title: "React unrelated docs",
+      url: "https://react.dev/reference/react/useMemo",
+      text: "Unrouted browser page that should not enter any project.current view.",
+    },
+    payload: { url: "https://react.dev/reference/react/useMemo" },
+  });
+  const records = [codexInfo, claudeInfoInterrupted, docsInfo, codexPaperclip, unrelatedDocs];
+  const routes = records.map(record => store.insertRecord(routeCandidateFor(record)));
+  const focus = compileWorkFocusSet({
+    records: [...records, ...routes],
+    write: true,
+    now: new Date("2026-06-16T10:05:00.000Z"),
+  }, store).view as any;
+
+  const result = compileProjectCurrent({ focusSetViews: [focus], records, write: false, now: new Date("2026-06-16T10:06:00.000Z") }, store);
+  assert.equal(result.views.length, 2);
+
+  const infoView = result.views.find(view => view.scope?.project_path === "/Users/junjie/info");
+  const paperclipView = result.views.find(view => view.scope?.project_path === "/Users/junjie/paperclip");
+  assert.ok(infoView, "info project view should exist");
+  assert.ok(paperclipView, "paperclip project view should exist");
+
+  assert.deepEqual((infoView?.content?.active_webpages as string[]), ["https://nodejs.org/api/test.html"]);
+  assert.ok((infoView?.content?.active_conversations as string[]).includes("obs:codex:info"));
+  assert.ok((infoView?.content?.active_conversations as string[]).includes("obs:claude:info"));
+  assert.ok((infoView?.content?.active_files as string[]).includes("packages/views/project/current.ts"));
+  assert.ok((infoView?.content?.active_files as string[]).includes("criteria/project-system-views/criteria.md"));
+  assert.ok(((infoView?.content?.interruptions as any[]) ?? []).some(item => item.id === "obs:claude:info"));
+  assert.ok((infoView?.content?.next_actions as string[]).some(action => /Resume from the latest interruption/i.test(action)));
+
+  const infoArtifacts = infoView?.content?.project_artifacts as any;
+  assert.equal(infoArtifacts.webpages[0].url, "https://nodejs.org/api/test.html");
+  assert.ok(infoArtifacts.conversations.some((conversation: any) => conversation.tool === "codex"));
+  assert.ok(infoArtifacts.conversations.some((conversation: any) => conversation.tool === "claude"));
+  assert.ok(infoArtifacts.files.some((file: any) => file.id === "packages/views/project/current.ts"));
+
+  assert.deepEqual((paperclipView?.content?.active_webpages as string[]) ?? [], []);
+  assert.deepEqual(paperclipView?.source_records, ["obs:codex:paperclip"]);
+  assert.equal(JSON.stringify(infoView?.content).includes("queue.ts"), false);
+  assert.equal(JSON.stringify(paperclipView?.content).includes("nodejs.org"), false);
+  assert.equal(JSON.stringify(result.views).includes("react.dev"), false);
+}));
+
 test("compileProjectCurrent excludes unrelated browser and communication records not in project lane", () => withStore((store) => {
   const project = sourceRecord("obs:ai:info", "observation.ai_session_locator_result", {
     scope: { project: "info", project_path: "/Users/junjie/info", session: "codex-info" },
