@@ -58,6 +58,21 @@ export type ActivityTimelineResponse = {
   };
 };
 
+export type ScreenpipeFrameContextResponse = {
+  ok: true;
+  frame_id: string | number;
+  context?: unknown;
+  record?: {
+    id?: string;
+    content?: {
+      text?: string;
+      title?: string;
+      url?: string;
+    };
+    payload?: Record<string, unknown>;
+  };
+};
+
 export type RuntimeTickResponse = {
   ok?: boolean;
   written_records?: string[];

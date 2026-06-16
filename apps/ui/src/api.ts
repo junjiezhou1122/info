@@ -1,10 +1,16 @@
-import type { ActivityTimelineResponse, ContextViewSummary, FeedbackResponse, MemoryCandidateContent, MemoryGateDecision, ProjectCurrentContent, ProcessorRun, RuntimeSettings, RuntimeSettingsResponse, RuntimeTickResponse, ViewCatalogResponse, ViewFamiliesResponse, ViewListResponse, WorkFocusSetContent } from "./types";
+import type { ActivityTimelineResponse, ContextViewSummary, FeedbackResponse, MemoryCandidateContent, MemoryGateDecision, ProjectCurrentContent, ProcessorRun, RuntimeSettings, RuntimeSettingsResponse, RuntimeTickResponse, ScreenpipeFrameContextResponse, ViewCatalogResponse, ViewFamiliesResponse, ViewListResponse, WorkFocusSetContent } from "./types";
 
 const API_BASE = import.meta.env.VITE_CONTEXT_API_BASE ?? "http://localhost:3111";
 const DEFAULT_TIMEOUT_MS = 8_000;
 
 export function screenpipeFrameUrl(frameId: string | number): string {
   return `${API_BASE}/screenpipe/frames/${encodeURIComponent(String(frameId))}`;
+}
+
+export async function fetchScreenpipeFrameContext(frameId: string | number): Promise<ScreenpipeFrameContextResponse> {
+  const res = await fetchWithTimeout(`${API_BASE}/screenpipe/frames/${encodeURIComponent(String(frameId))}/context`, undefined, 12_000);
+  if (!res.ok) throw new Error(`screenpipe frame context failed: ${res.status}`);
+  return res.json();
 }
 
 export async function syncScreenpipe(windowMinutes = 15): Promise<RuntimeTickResponse> {

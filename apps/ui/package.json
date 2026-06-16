@@ -9,11 +9,12 @@
     "preview": "vite preview --host 127.0.0.1 --port 5178"
   },
   "dependencies": {
+    "@paddleocr/paddleocr-js": "0.4.2",
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "^5.8.3",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "typescript": "^5.8.3",
+    "vite": "latest"
   },
   "devDependencies": {
     "@types/react": "latest",

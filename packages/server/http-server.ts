@@ -4,7 +4,7 @@ import { loadLocalEnv } from "./env.js";
 import { ContextStore } from "@info/core";
 import { ContextArtifactSchema, ContextConnectorSchema, ContextPackRequestSchema, ContextQuerySchema, ContextRecordSchema, ContextSchemaSchema, ContextViewSchema, FeedbackInputSchema, RuntimeEventSchema } from "@info/core";
 import { enrichWithJinaReader, shouldAutoEnrichBrowserRecord } from "@info/sensors";
-import { fetchScreenpipeFrameImage, fetchScreenpipeRecords } from "@info/sensors";
+import { fetchScreenpipeFrameContext, fetchScreenpipeFrameImage, fetchScreenpipeRecords } from "@info/sensors";
 import { aiSessionRefToRecord, locateAiSessions } from "@info/sensors";
 import { publicRuntimeSettings, runtimeSettings, runtimeStatus, saveRuntimeSettings } from "@info/runtime/runtime.js";
 import { activeThreadId, interpretThread } from "@info/views/threads/thread-interpreter.js";
@@ -60,6 +60,13 @@ export function createContextHttpHandler(store: ContextStore) {
 
     if (req.method === "GET" && url.pathname === "/health") {
       return send(res, 200, { ok: true });
+    }
+
+    const frameContextMatch = url.pathname.match(/^\/screenpipe\/frames\/([^/]+)\/context$/);
+    if (req.method === "GET" && frameContextMatch) {
+      const result = await fetchScreenpipeFrameContext(decodeURIComponent(frameContextMatch[1]));
+      if (!result.ok) return send(res, 502, { ok: false, error: result.error, frame_id: result.frame_id });
+      return send(res, 200, { ok: true, frame_id: result.frame_id, context: result.context, record: result.record });
     }
 
     const frameMatch = url.pathname.match(/^\/screenpipe\/frames\/([^/]+)$/);

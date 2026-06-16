@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { fetchActivityTimeline, fetchContextView, fetchRuntimeSettings, fetchViewFamilies, fetchViewsByType, fetchViewsByTypes, runRuntimeTick, saveRuntimeSettings, screenpipeFrameUrl, submitViewFeedback, syncScreenpipe } from "./api";
+import { fetchActivityTimeline, fetchContextView, fetchRuntimeSettings, fetchScreenpipeFrameContext, fetchViewFamilies, fetchViewsByType, fetchViewsByTypes, runRuntimeTick, saveRuntimeSettings, screenpipeFrameUrl, submitViewFeedback, syncScreenpipe } from "./api";
 import type { ActivityTimelineResponse, ContextViewSummary, RuntimeSettings, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewCatalogResponse, ViewFamiliesResponse, ViewFamilyDefinition, ViewFamilySummary } from "./types";
 import "./styles.css";
 
@@ -31,7 +31,7 @@ const VIEW_CATALOG_CACHE = new Map<string, ViewFamilyDefinition>();
 let VIEW_CATALOG_ORDER_CACHE: string[] = FALLBACK_VIEW_TYPE_ORDER;
 type SourceFilter = "screenpipe" | "browser" | "runtime" | "all";
 type DetailMode = "activity" | "debug";
-type ActiveTab = "timeline" | "ambient" | "views" | "settings";
+type ActiveTab = "timeline" | "ambient" | "views" | "ocr" | "settings";
 type FramePreview = { frameId: string | number; title?: string };
 
 function App() {
@@ -166,6 +166,7 @@ function App() {
           <button className={`nav-item ${activeTab === "timeline" ? "active" : ""}`} onClick={() => setActiveTab("timeline")}><span>◷</span>Timeline</button>
           <button className={`nav-item ${activeTab === "ambient" ? "active" : ""}`} onClick={() => setActiveTab("ambient")}><span>✦</span>Ambient</button>
           <button className={`nav-item ${activeTab === "views" ? "active" : ""}`} onClick={() => setActiveTab("views")}><span>◇</span>Views</button>
+          <button className={`nav-item ${activeTab === "ocr" ? "active" : ""}`} onClick={() => setActiveTab("ocr")}><span>◎</span>OCR Lab</button>
           <button className={`nav-item ${activeTab === "settings" ? "active" : ""}`} onClick={() => setActiveTab("settings")}><span>⚙</span>Settings</button>
         </nav>
         <div className="sidebar-foot">
@@ -178,8 +179,8 @@ function App() {
         <header className="page-header">
           <div>
             <div className="breadcrumb">Info / Screenpipe</div>
-            <h1>{activeTab === "timeline" ? "Timeline" : activeTab === "ambient" ? "Ambient" : activeTab === "views" ? "Runtime Views" : "Runtime Settings"}</h1>
-            <p>{activeTab === "timeline" ? "按时间整理最近 focus 的 app、网页和项目活动。" : activeTab === "ambient" ? "主动后台搜索、写作介入和小工具机会都会先沉淀成可检查的 Views。" : activeTab === "views" ? "查看 Observation 压缩和 ambient Programs 产出的 Evidence、Intent、Workflow、Advice、Task、Draft 和 Memory Views。" : "控制 VisionFrame、ActivityBlock、Intent 和 Workflow 压缩的模型与开关。"}</p>
+            <h1>{activeTab === "timeline" ? "Timeline" : activeTab === "ambient" ? "Ambient" : activeTab === "views" ? "Runtime Views" : activeTab === "ocr" ? "OCR Lab" : "Runtime Settings"}</h1>
+            <p>{activeTab === "timeline" ? "按时间整理最近 focus 的 app、网页和项目活动。" : activeTab === "ambient" ? "主动后台搜索、写作介入和小工具机会都会先沉淀成可检查的 Views。" : activeTab === "views" ? "查看 Observation 压缩和 ambient Programs 产出的 Evidence、Intent、Workflow、Advice、Task、Draft 和 Memory Views。" : activeTab === "ocr" ? "用 PP-OCRv6 tiny 在浏览器本地重跑 Screenpipe frame，先验证质量和延迟。" : "控制 VisionFrame、ActivityBlock、Intent 和 Workflow 压缩的模型与开关。"}</p>
           </div>
           <div className="header-actions">
             {activeTab === "timeline" ? (
@@ -211,6 +212,8 @@ function App() {
               </>
             ) : activeTab === "ambient" ? (
               <button onClick={() => setViewStatus("Ambient panel has local controls")}>Ambient Controls</button>
+            ) : activeTab === "ocr" ? (
+              <button className="secondary" onClick={() => setStatus("OCR Lab uses the current timeline frames")}>Local PP-OCRv6 Tiny</button>
             ) : (
               <button onClick={() => setSettingsStatus("Reload settings from panel")}>Runtime Controls</button>
             )}
@@ -238,6 +241,8 @@ function App() {
           <AmbientPanel onInspect={setViewInspector} />
         ) : activeTab === "views" ? (
           <MemoryViewsPanel response={viewFamilies} loading={viewsLoading && !viewFamilies} status={viewStatus} onInspect={setViewInspector} />
+        ) : activeTab === "ocr" ? (
+          <OcrLabPanel timeline={timeline} />
         ) : (
           <RuntimeSettingsPanel initialStatus={settingsStatus} onStatus={setSettingsStatus} onTick={setLastTick} />
         )}
@@ -246,9 +251,296 @@ function App() {
         ? <aside className="view-inspector"><ViewDetail view={viewInspector.view} loading={viewInspector.loading} /></aside>
         : activeTab === "settings"
           ? <aside className="inspector empty"><span>{settingsStatus}</span></aside>
+        : activeTab === "ocr"
+          ? <aside className="inspector empty"><span>PP-OCRv6 runs locally in this browser session.</span></aside>
         : <Inspector item={selectedItem} onClose={() => setSelectedItemId(null)} onOpenFrame={setPreviewFrame} />}
       <FrameLightbox preview={previewFrame} onClose={() => setPreviewFrame(null)} />
     </div>
+  );
+}
+
+type OcrLabCandidate = {
+  frameId: string | number;
+  title: string;
+  observedAt: string;
+  screenpipeText?: string;
+};
+
+type OcrLabResult = {
+  inputLabel: string;
+  modelTier: OcrModelTier;
+  text: string;
+  lineCount: number;
+  detectedBoxes?: number;
+  recognizedCount?: number;
+  predictMs?: number;
+  totalMs: number;
+  initMs?: number;
+  runtime?: string;
+  screenpipeText?: string;
+  contextText?: string;
+  overlap?: number;
+};
+
+type OcrModelTier = "tiny" | "small";
+
+function OcrLabPanel({ timeline }: { timeline: ActivityTimelineResponse | null }) {
+  const [labTimeline, setLabTimeline] = useState<ActivityTimelineResponse | null>(null);
+  const candidates = useMemo(() => recentFrameCandidates(labTimeline ?? timeline), [labTimeline, timeline]);
+  const [frameId, setFrameId] = useState("");
+  const [modelTier, setModelTier] = useState<OcrModelTier>("tiny");
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
+  const uploadedFile = uploadedFiles[0] ?? null;
+  const [uploadPreviewUrl, setUploadPreviewUrl] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const [loadingFrames, setLoadingFrames] = useState(false);
+  const [status, setStatus] = useState("Pick a recent frame or paste a frame_id.");
+  const [result, setResult] = useState<OcrLabResult | null>(null);
+  const [batchResults, setBatchResults] = useState<OcrLabResult[]>([]);
+
+  function loadImageFiles(files: File[], source: "pasted" | "uploaded") {
+    const images = files.filter(file => file.type.startsWith("image/")).slice(0, 10);
+    if (!images.length) return;
+    setUploadedFiles(images);
+    setResult(null);
+    setBatchResults([]);
+    setStatus(`${source === "pasted" ? "Pasted" : "Uploaded"} ${images.length} screenshot${images.length === 1 ? "" : "s"} loaded.`);
+  }
+
+  function handlePaste(event: ClipboardEvent | React.ClipboardEvent<HTMLElement>) {
+    const items = Array.from(event.clipboardData?.items ?? []);
+    const images = items
+      .filter(item => item.type.startsWith("image/"))
+      .map(item => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (!images.length) return;
+    event.preventDefault();
+    loadImageFiles(images.map((image, index) => {
+      const ext = image.type.split("/")[1] || "png";
+      return new File([image], `pasted-screenshot-${Date.now()}-${index + 1}.${ext}`, { type: image.type || "image/png" });
+    }), "pasted");
+  }
+
+  useEffect(() => {
+    const listener = (event: ClipboardEvent) => handlePaste(event);
+    window.addEventListener("paste", listener);
+    return () => window.removeEventListener("paste", listener);
+  }, []);
+
+  useEffect(() => {
+    if (!uploadedFile) {
+      setUploadPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(uploadedFile);
+    setUploadPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [uploadedFile]);
+
+  useEffect(() => {
+    if (!frameId && candidates[0]) setFrameId(String(candidates[0].frameId));
+  }, [candidates, frameId]);
+
+  const selectedCandidate = candidates.find(candidate => String(candidate.frameId) === frameId.trim());
+
+  async function loadRecentFrames() {
+    setLoadingFrames(true);
+    setStatus("Syncing recent Screenpipe frames...");
+    try {
+      await syncScreenpipe(30);
+      const next = await fetchActivityTimeline({
+        minutes: 60,
+        limit: 900,
+        bucketMinutes: 10,
+        includeLowLevelScreenpipe: true,
+        dedupe: false,
+        bucketItemLimit: false,
+        summarizeHeartbeats: false,
+        sourceFilter: "screenpipe",
+        mergeContinuous: true,
+        mergeGapMinutes: 3,
+      });
+      setLabTimeline(next);
+      const nextCandidates = recentFrameCandidates(next);
+      if (nextCandidates[0]) setFrameId(String(nextCandidates[0].frameId));
+      setStatus(`${nextCandidates.length} recent Screenpipe frames loaded.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingFrames(false);
+    }
+  }
+
+  async function runTinyOcr() {
+    const selectedFrameId = frameId.trim();
+    if (!uploadedFile && !selectedFrameId) {
+      setStatus("Upload a screenshot or enter a frame_id.");
+      return;
+    }
+    setRunning(true);
+    setStatus(uploadedFile ? "Loading PP-OCRv6 tiny and uploaded screenshot..." : "Loading PP-OCRv6 tiny and Screenpipe frame...");
+    try {
+      const contextPromise = uploadedFile ? Promise.resolve(undefined) : fetchScreenpipeFrameContext(selectedFrameId).catch(() => undefined);
+      const blobPromise = uploadedFile
+        ? Promise.resolve(uploadedFile)
+        : fetch(screenpipeFrameUrl(selectedFrameId), { cache: "no-store" }).then(async imageRes => {
+          if (!imageRes.ok) throw new Error(`frame image fetch failed: ${imageRes.status}`);
+          return imageRes.blob();
+        });
+      const [blob, context] = await Promise.all([blobPromise, contextPromise]);
+      setStatus("Running local OCR in browser...");
+      const contextText = extractFrameContextText(context);
+      const screenpipeText = selectedCandidate?.screenpipeText || contextText;
+      const next = await runPaddleOcrBlob(blob, {
+        inputLabel: uploadedFile ? uploadedFile.name : `frame:${selectedFrameId}`,
+        modelTier,
+        screenpipeText: uploadedFile ? undefined : screenpipeText,
+        contextText: uploadedFile ? undefined : contextText,
+      });
+      setResult(next);
+      setStatus(`PP-OCRv6 ${modelTier} finished in ${next.totalMs}ms`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function runBatchOcr() {
+    const inputs: Array<{ label: string; blob: Blob; screenpipeText?: string } | { label: string; frameId: string | number; screenpipeText?: string }> = uploadedFiles.length
+      ? uploadedFiles.slice(0, 10).map(file => ({ label: file.name, blob: file }))
+      : candidates.slice(0, 10).map(candidate => ({ label: `frame:${candidate.frameId}`, frameId: candidate.frameId, screenpipeText: candidate.screenpipeText }));
+    if (!inputs.length) {
+      setStatus("Need pasted/uploaded screenshots or recent Screenpipe frames.");
+      return;
+    }
+    setRunning(true);
+    setBatchResults([]);
+    setStatus(`Running PP-OCRv6 ${modelTier} on ${inputs.length} sample${inputs.length === 1 ? "" : "s"}...`);
+    try {
+      const results: OcrLabResult[] = [];
+      for (const [index, input] of inputs.entries()) {
+        setStatus(`Running PP-OCRv6 ${modelTier} ${index + 1}/${inputs.length}: ${input.label}`);
+        const blob = "blob" in input
+          ? input.blob
+          : await fetch(screenpipeFrameUrl(input.frameId), { cache: "no-store" }).then(async res => {
+            if (!res.ok) throw new Error(`sample fetch failed: ${res.status}`);
+            return res.blob();
+          });
+        const next = await runPaddleOcrBlob(blob, {
+          inputLabel: input.label,
+          modelTier,
+          screenpipeText: input.screenpipeText,
+        });
+        results.push(next);
+        setBatchResults([...results]);
+      }
+      const avg = Math.round(results.reduce((sum, item) => sum + (item.predictMs ?? item.totalMs), 0) / Math.max(1, results.length));
+      setStatus(`PP-OCRv6 ${modelTier} batch finished: ${results.length} samples, avg predict ${avg}ms`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <section className="ocr-lab" aria-label="PP-OCRv6 Tiny OCR Lab" tabIndex={0} onPaste={handlePaste}>
+      <section className="status-row ocr-status">
+        <Stat label="Frames" value={candidates.length} />
+        <Stat label="Model" value={`PP-OCRv6 ${modelTier}`} />
+        <Stat label="Mode" value="browser local" />
+        <div className="status-text ocr-status-text">
+          <span>{status}</span>
+          <button className="secondary" onClick={loadRecentFrames} disabled={loadingFrames || running}>{loadingFrames ? "Loading..." : "Load Recent Frames"}</button>
+        </div>
+      </section>
+
+      <div className="ocr-layout">
+        <section className="ocr-controls">
+          <div className="ocr-field">
+            <label htmlFor="ocr-model-tier">model</label>
+            <div>
+              <select id="ocr-model-tier" value={modelTier} onChange={event => setModelTier(event.target.value as OcrModelTier)} disabled={running}>
+                <option value="tiny">PP-OCRv6 tiny</option>
+                <option value="small">PP-OCRv6 small</option>
+              </select>
+              <button className="secondary" onClick={runBatchOcr} disabled={running}>{running ? "Running..." : "Run 10-sample Batch"}</button>
+            </div>
+          </div>
+          <div className="ocr-field">
+            <label htmlFor="ocr-upload">screenshot</label>
+            <div>
+              <input id="ocr-upload" className="ocr-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" multiple onChange={event => loadImageFiles(Array.from(event.currentTarget.files ?? []), "uploaded")} />
+              {uploadedFile && <button className="secondary" onClick={() => setUploadedFiles([])} disabled={running}>Clear</button>}
+            </div>
+          </div>
+          <div className="ocr-field">
+            <label htmlFor="ocr-frame-id">frame_id</label>
+            <div>
+              <input id="ocr-frame-id" value={frameId} onChange={event => setFrameId(event.target.value)} placeholder="Screenpipe frame id" />
+              <button onClick={runTinyOcr} disabled={running}>{running ? "Running..." : uploadedFile ? "Run Upload OCR" : "Run Frame OCR"}</button>
+            </div>
+          </div>
+          <div className="ocr-frame-list">
+            {candidates.length ? candidates.slice(0, 18).map(candidate => (
+              <button key={String(candidate.frameId)} className={String(candidate.frameId) === frameId ? "selected" : ""} onClick={() => setFrameId(String(candidate.frameId))}>
+                <b>{candidate.frameId}</b>
+                <span>{candidate.title}</span>
+                <em>{relativeTime(candidate.observedAt) || "recent"}</em>
+              </button>
+            )) : <div className="empty-inline">No Screenpipe frame ids in the loaded timeline. Sync Screenpipe or paste a frame_id.</div>}
+          </div>
+        </section>
+
+        <section className="ocr-preview">
+          {uploadPreviewUrl ? <img src={uploadPreviewUrl} alt={uploadedFile?.name ?? "Uploaded screenshot"} /> : frameId ? <img src={screenpipeFrameUrl(frameId)} alt={`Screenpipe frame ${frameId}`} /> : <div className="empty-inline">Press Cmd+V to paste a screenshot, upload an image, or select a frame.</div>}
+        </section>
+      </div>
+
+      {result && (
+        <section className="ocr-results">
+          <div className="ocr-metrics">
+            <Stat label="Total" value={`${result.totalMs}ms`} />
+            <Stat label="Predict" value={result.predictMs !== undefined ? `${Math.round(result.predictMs)}ms` : "n/a"} />
+            <Stat label="Lines" value={result.lineCount} />
+            <Stat label="Overlap" value={result.overlap !== undefined ? `${Math.round(result.overlap * 100)}%` : "n/a"} />
+          </div>
+          <div className="ocr-columns">
+            <section>
+              <h2>PP-OCRv6 {result.modelTier}</h2>
+              <pre>{result.text || "(no text recognized)"}</pre>
+            </section>
+            <section>
+              <h2>{result.screenpipeText ? "Screenpipe current text" : "Input"}</h2>
+              <pre>{result.screenpipeText || result.inputLabel}</pre>
+            </section>
+          </div>
+          <div className="ocr-runtime">
+            input: {result.inputLabel} · init: {result.initMs !== undefined ? `${result.initMs}ms` : "cached"} · runtime: {result.runtime || "unknown"} · boxes: {result.detectedBoxes ?? "n/a"} · recognized: {result.recognizedCount ?? "n/a"}
+          </div>
+        </section>
+      )}
+
+      {batchResults.length > 0 && (
+        <section className="ocr-results">
+          <div className="ocr-runtime">
+            batch: {batchResults.length}/10 · model: PP-OCRv6 {modelTier} · avg predict: {Math.round(batchResults.reduce((sum, item) => sum + (item.predictMs ?? item.totalMs), 0) / Math.max(1, batchResults.length))}ms
+          </div>
+          <div className="ocr-batch-table">
+            {batchResults.map((item, index) => (
+              <article key={`${item.inputLabel}-${index}`}>
+                <div>
+                  <b>{index + 1}. {item.inputLabel}</b>
+                  <span>{item.lineCount} lines · {item.predictMs !== undefined ? `${Math.round(item.predictMs)}ms` : `${item.totalMs}ms`} · overlap {item.overlap !== undefined ? `${Math.round(item.overlap * 100)}%` : "n/a"}</span>
+                </div>
+                <pre>{item.text || "(no text recognized)"}</pre>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+    </section>
   );
 }
 
@@ -1482,6 +1774,119 @@ function frameIdsOf(item: TimelineItem): Array<string | number> {
 function stringStat(item: TimelineItem, key: string): string | undefined {
   const value = item.stats?.[key];
   return typeof value === "string" && value ? value : undefined;
+}
+
+const paddleOcrPromises = new Map<OcrModelTier, Promise<{ ocr: any; initMs?: number }>>();
+
+async function getPaddleOcr(tier: OcrModelTier): Promise<{ ocr: any; initMs?: number }> {
+  const cached = paddleOcrPromises.get(tier);
+  if (cached) return cached;
+  const promise = (async () => {
+      const startedAt = performance.now();
+      const { PaddleOCR } = await import("@paddleocr/paddleocr-js");
+      const ocr = await PaddleOCR.create({
+        textDetectionModelName: `PP-OCRv6_${tier}_det`,
+        textRecognitionModelName: `PP-OCRv6_${tier}_rec`,
+        worker: false,
+        ortOptions: {
+          backend: "wasm",
+          numThreads: 1,
+          simd: true,
+        },
+      });
+      return { ocr, initMs: Math.round(performance.now() - startedAt) };
+  })();
+  paddleOcrPromises.set(tier, promise);
+  return promise;
+}
+
+async function runPaddleOcrBlob(blob: Blob, options: { inputLabel: string; modelTier: OcrModelTier; screenpipeText?: string; contextText?: string }): Promise<OcrLabResult> {
+  const startedAt = performance.now();
+  const { ocr, initMs } = await getPaddleOcr(options.modelTier);
+  const [ocrResult] = await ocr.predict(blob, {
+    textDetLimitSideLen: 960,
+    textDetLimitType: "max",
+  });
+  const items = Array.isArray(ocrResult?.items) ? ocrResult.items : [];
+  const text = items.map((item: any) => item?.text).filter((value: unknown) => typeof value === "string" && value.trim()).join("\n");
+  return {
+    inputLabel: options.inputLabel,
+    modelTier: options.modelTier,
+    text,
+    lineCount: items.length,
+    detectedBoxes: numberValue(ocrResult?.metrics?.detectedBoxes),
+    recognizedCount: numberValue(ocrResult?.metrics?.recognizedCount),
+    predictMs: numberValue(ocrResult?.metrics?.totalMs),
+    totalMs: Math.round(performance.now() - startedAt),
+    initMs,
+    runtime: [ocrResult?.runtime?.requestedBackend, ocrResult?.runtime?.detProvider, ocrResult?.runtime?.recProvider].filter(Boolean).join(" / "),
+    screenpipeText: options.screenpipeText,
+    contextText: options.contextText,
+    overlap: text && options.screenpipeText ? textOverlap(text, options.screenpipeText) : undefined,
+  };
+}
+
+function recentFrameCandidates(timeline: ActivityTimelineResponse | null): OcrLabCandidate[] {
+  const candidates: OcrLabCandidate[] = [];
+  const seen = new Set<string>();
+  for (const bucket of timeline?.buckets ?? []) {
+    for (const item of bucket.items) {
+      for (const frameId of frameIdsOf(item)) {
+        const key = String(frameId);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({
+          frameId,
+          title: item.title || sourceLabel(item) || "Screenpipe frame",
+          observedAt: item.observed_at,
+          screenpipeText: item.text,
+        });
+      }
+    }
+  }
+  return candidates.sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt)).slice(0, 40);
+}
+
+function extractFrameContextText(response: unknown): string | undefined {
+  const body = response && typeof response === "object" ? response as any : undefined;
+  const context = body?.context;
+  const recordText = body?.record?.content?.text;
+  const direct = typeof context?.text === "string" ? context.text : undefined;
+  if (direct?.trim()) return direct.trim();
+  if (typeof recordText === "string" && recordText.trim()) return recordText.trim();
+  const nodes = Array.isArray(context?.nodes) ? context.nodes : [];
+  const nodeText = nodes
+    .map((node: any) => node?.text ?? node?.label ?? node?.name ?? node?.value)
+    .filter((value: unknown) => typeof value === "string" && value.trim())
+    .slice(0, 120)
+    .join("\n");
+  return nodeText.trim() || undefined;
+}
+
+function textOverlap(a: string, b: string): number {
+  const left = charCounts(normalizeCompareText(a));
+  const right = charCounts(normalizeCompareText(b));
+  let hit = 0;
+  let total = 0;
+  for (const [char, count] of left) {
+    total += count;
+    hit += Math.min(count, right.get(char) ?? 0);
+  }
+  return total > 0 ? hit / total : 0;
+}
+
+function normalizeCompareText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, "");
+}
+
+function charCounts(text: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const char of text) counts.set(char, (counts.get(char) ?? 0) + 1);
+  return counts;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function formatRange(start: string, end: string) {
