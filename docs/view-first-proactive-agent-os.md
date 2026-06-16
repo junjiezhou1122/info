@@ -31,6 +31,42 @@ changing the ContextView storage schema
 adding runtime switch-cases for a domain category
 ```
 
+## Hybrid Work Routing
+
+Proactive context uses a hybrid router instead of sending every observation to
+an LLM.
+
+```text
+Raw observations
+  |
+  +--> processor.surface_state          // realtime, no LLM
+  |       -> state.surface
+  |
+  +--> processor.route_candidate        // realtime rules, no LLM
+  |       -> observation.route_candidate
+  |
+  +--> processor.work_router_batch      // scheduled batch / idle / on demand
+          -> work.focus_set
+          -> processor.project_current
+              -> project.current
+```
+
+`state.surface` answers what is in front of the user right now. It fuses
+browser, editor, media, and screen observations and must not wait for scheduled
+AI consolidation.
+
+`observation.route_candidate` is a machine intermediate. It stores extracted
+features, candidate routes, rule hits, evidence fields, and numeric scores. It
+does not store natural-language rationales.
+
+`work.focus_set` groups recent route candidates into multiple active lanes such
+as `project:/Users/junjie/info`, `topic:midscene`, and
+`communication:messages`.
+
+`project.current` is downstream from `work.focus_set`. It updates only from
+high-confidence project lanes so unrelated browser pages and message
+interruptions do not pollute project state.
+
 ## Core Objects
 
 ### Observation
@@ -90,6 +126,7 @@ Views remain open by namespace:
 
 ```text
 state.surface
+work.focus_set
 project.current
 writing.advice
 learning.youtube_fragment
@@ -191,6 +228,34 @@ processors. It should not directly mutate old observations.
 Memory is not a separate storage primitive. Memory is a retained view whose
 purpose is to change future behavior.
 
+The durable path is candidate-first:
+
+```text
+Observations / existing Views
+        |
+        v
+memory.candidate
+        |
+        v
+processor.memory_gate
+        |
+        +--> memory.preferences
+        +--> memory.workflow_patterns
+        +--> memory.skill_gaps
+        +--> memory.agent_collaboration_style
+        +--> project.memory
+        +--> agent.case_memory
+```
+
+`memory.candidate` is a session View. It stores a compact claim, target memory
+type, confidence, promotion policy, and source provenance. It should not copy
+large source text or secret payloads. `processor.memory_gate` is the only
+built-in path that promotes candidates into durable memory. The gate can
+promote, merge, hold, or reject candidates.
+
+EverOS-style memory backends can be attached behind an adapter boundary, but
+Info remains the source of truth for Views, provenance, and privacy policy.
+
 Examples:
 
 ```text
@@ -199,6 +264,7 @@ memory.workflow_patterns
 memory.skill_gaps
 memory.agent_collaboration_style
 project.memory
+agent.case_memory
 ```
 
 Long-term memory needs higher standards than ordinary views: provenance,
@@ -221,6 +287,7 @@ memory.preferences
 memory.workflow_patterns
 memory.skill_gaps
 memory.agent_collaboration_style
+agent.case_memory
 ```
 
 This leaves room for non-programmer domains without changing the kernel:

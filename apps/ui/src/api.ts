@@ -1,4 +1,4 @@
-import type { ActivityTimelineResponse, ContextViewSummary, FeedbackResponse, RuntimeSettings, RuntimeSettingsResponse, RuntimeTickResponse, ViewCatalogResponse, ViewFamiliesResponse, ViewListResponse } from "./types";
+import type { ActivityTimelineResponse, ContextViewSummary, FeedbackResponse, MemoryCandidateContent, MemoryGateDecision, ProjectCurrentContent, ProcessorRun, RuntimeSettings, RuntimeSettingsResponse, RuntimeTickResponse, ViewCatalogResponse, ViewFamiliesResponse, ViewListResponse, WorkFocusSetContent } from "./types";
 
 const API_BASE = import.meta.env.VITE_CONTEXT_API_BASE ?? "http://localhost:3111";
 const DEFAULT_TIMEOUT_MS = 8_000;
@@ -150,6 +150,80 @@ export async function submitViewFeedback(input: { view_id: string; type: "analys
   }, 12_000);
   if (!res.ok) throw new Error(`feedback failed: ${res.status}`);
   return res.json();
+}
+
+export async function fetchMemoryCandidates(): Promise<ContextViewSummary[]> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=memory.candidate&active_only=true&limit=160`, undefined, 8_000);
+  if (!res.ok) throw new Error(`memory candidates fetch failed: ${res.status}`);
+  const body = await res.json();
+  return (body.views ?? []) as ContextViewSummary[];
+}
+
+export async function fetchMemoryGateViews(): Promise<ContextViewSummary[]> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=memory.gate&active_only=true&limit=80`, undefined, 8_000);
+  if (!res.ok) throw new Error(`memory gate fetch failed: ${res.status}`);
+  const body = await res.json();
+  return (body.views ?? []) as ContextViewSummary[];
+}
+
+export async function fetchProjectCurrentViews(): Promise<ContextViewSummary[]> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=project.current&active_only=true&limit=20`, undefined, 8_000);
+  if (!res.ok) throw new Error(`project.current fetch failed: ${res.status}`);
+  const body = await res.json();
+  return (body.views ?? []) as ContextViewSummary[];
+}
+
+export async function fetchWorkFocusSetViews(): Promise<ContextViewSummary[]> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=work.focus_set&active_only=true&limit=20`, undefined, 8_000);
+  if (!res.ok) throw new Error(`work.focus_set fetch failed: ${res.status}`);
+  const body = await res.json();
+  return (body.views ?? []) as ContextViewSummary[];
+}
+
+export async function fetchProcessorTraces(): Promise<Array<{
+  id: string;
+  event_type: string;
+  actor: string;
+  status: string;
+  subject_type: string;
+  subject_id: string;
+  payload?: Record<string, unknown>;
+  created_at: string;
+}>> {
+  const res = await fetchWithTimeout(`${API_BASE}/runtime/events?types=processor.run.started,processor.run.completed,processor.run.failed&limit=120`, undefined, 8_000);
+  if (!res.ok) throw new Error(`processor traces fetch failed: ${res.status}`);
+  const body = await res.json();
+  return (body.events ?? []) as Array<{
+    id: string;
+    event_type: string;
+    actor: string;
+    status: string;
+    subject_type: string;
+    subject_id: string;
+    payload?: Record<string, unknown>;
+    created_at: string;
+  }>;
+}
+
+export async function fetchProactiveSuggestions(): Promise<ContextViewSummary[]> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=advice.research,draft.writing_continuation,opportunity.tool,draft.tool_prototype&active_only=true&limit=80`, undefined, 8_000);
+  if (!res.ok) throw new Error(`proactive suggestions fetch failed: ${res.status}`);
+  const body = await res.json();
+  return (body.views ?? []) as ContextViewSummary[];
+}
+
+export async function patchViewStatus(
+  viewId: string,
+  status: "active" | "candidate" | "archived" | "rejected",
+): Promise<ContextViewSummary> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/views/${encodeURIComponent(viewId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  }, 8_000);
+  if (!res.ok) throw new Error(`view patch failed: ${res.status}`);
+  const body = await res.json();
+  return body.view as ContextViewSummary;
 }
 
 async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS) {

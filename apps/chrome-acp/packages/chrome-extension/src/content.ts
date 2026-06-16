@@ -33,7 +33,8 @@ const startedAt = Date.now();
 const WRITING_VIEW_TYPES = ["draft.writing_continuation", "advice.writing_assist"];
 const WRITING_ASSIST_POLL_ATTEMPTS = 45;
 const WRITING_ASSIST_POLL_INTERVAL_MS = 2000;
-const DEFAULT_SELECTION_ACTIONS = [
+
+const DEFAULT_SELECTION_ACTIONS: Array<{ id: string; label: string; prompt: string }> = [
   {
     id: "explain",
     label: "Explain",
@@ -45,6 +46,17 @@ const DEFAULT_SELECTION_ACTIONS = [
     prompt: "Translate this selected text into natural Simplified Chinese. Preserve names, technical terms, and the original meaning.",
   },
 ];
+
+function selectionActionFromConfig(action: unknown): { id: string; label: string; prompt: string } | null {
+  if (!action || typeof action !== "object") return null;
+  const a = action as Record<string, unknown>;
+  if (a.enabled === false) return null;
+  const id = String(a.id || "").trim();
+  const label = String(a.label || "").trim();
+  const prompt = String(a.prompt || "").trim();
+  if (!id || !label || !prompt) return null;
+  return { id, label, prompt };
+}
 
 function visibleText() {
   const clone = document.body?.cloneNode(true) as HTMLElement | undefined;
@@ -443,8 +455,10 @@ function removePendingAssist(requestSeq: number) {
 function showWritingAssist(result: any, element: Element) {
   const view = writingViewFromResult(result);
   const draft = draftTextFromView(view);
-  const suggestions = suggestionsFromView(view);
+  let suggestions: string[] = suggestionsFromView(view);
   if (!view || (!draft && !suggestions.length)) return false;
+  // Normalize suggestions to a single "draft" for the insert flow if no draft.
+  if (!draft && suggestions.length) suggestions = [suggestions[0]];
   removeAssistBubble();
   assistElement = element;
   assistBubble = document.createElement("div");
@@ -496,6 +510,42 @@ function showWritingAssist(result: any, element: Element) {
       removeAssistBubble();
     });
     actions.append(insert);
+  } else if (suggestions.length) {
+    // "Insert" for suggestion text treats the first suggestion as a draft.
+    const insert = document.createElement("button");
+    insert.type = "button";
+    insert.textContent = "Insert";
+    insert.addEventListener("click", () => {
+      const beforeText = editableText(element);
+      const suggestionText = suggestions[0];
+      insertDraft(element, suggestionText);
+      const afterText = editableText(element);
+      rememberInsertedDraftForEdit(element, view, suggestionText, beforeText, afterText);
+      submitWritingFeedback(view, {
+        feedbackType: "analysis.useful",
+        value: "inserted",
+        reason: "Inserted inline writing suggestion.",
+        payload: { action: "insert", surface: "writing_inline", draft_text: suggestionText, original_text: beforeText, edited_text: afterText },
+      });
+      removeAssistBubble();
+    });
+    actions.append(insert);
+  }
+  // Route-to-inbox when a view exists but has no draft or suggestion.
+  if (!draft && !suggestions.length && view?.id) {
+    const inbox = document.createElement("button");
+    inbox.type = "button";
+    inbox.textContent = "Inbox";
+    inbox.addEventListener("click", () => {
+      submitWritingFeedback(view, {
+        feedbackType: "analysis.useful",
+        value: "routed_to_inbox",
+        reason: "Routed writing output to inbox.",
+        payload: { action: "route_inbox", surface: "writing_inline", view_id: view.id, view_type: view.view_type },
+      });
+      removeAssistBubble();
+    });
+    actions.append(inbox);
   }
   panel.append(title, body, actions);
   assistBubble.append(trigger, panel);
@@ -683,12 +733,9 @@ async function selectionActions() {
     const stored = await chrome.storage?.local?.get?.("selectionActions");
     const custom = Array.isArray(stored?.selectionActions) ? stored.selectionActions : [];
     const normalized = custom
-      .filter((action: any) => action && action.enabled !== false && action.id && action.label && action.prompt)
-      .map((action: any) => ({
-        id: String(action.id),
-        label: String(action.label).slice(0, 24),
-        prompt: String(action.prompt),
-      }));
+      .map(selectionActionFromConfig)
+      .filter((action): action is { id: string; label: string; prompt: string } => action !== null)
+      .map((action) => ({ ...action, label: action.label.slice(0, 24) }));
     return normalized.length ? normalized : DEFAULT_SELECTION_ACTIONS;
   } catch {
     return DEFAULT_SELECTION_ACTIONS;
@@ -703,6 +750,8 @@ function showSelectionToolbar(payload: any) {
   selectionToolbar = document.createElement("div");
   selectionToolbar.id = "info-selection-toolbar";
   selectionToolbar.className = "is-ready";
+  selectionToolbar.setAttribute("role", "toolbar");
+  selectionToolbar.setAttribute("aria-label", "Info selection toolbar");
   document.documentElement.append(selectionToolbar);
   renderSelectionButtons(payload, DEFAULT_SELECTION_ACTIONS);
   positionSelectionToolbar(rect);
@@ -718,12 +767,16 @@ function renderSelectionButtons(payload: any, actions: Array<{ id: string; label
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = action.label;
+    button.setAttribute("role", "button");
+    button.setAttribute("aria-label", `${action.label} selected text`);
     button.addEventListener("click", () => runSelectionAction(action, payload));
     selectionToolbar.append(button);
   }
   const save = document.createElement("button");
   save.type = "button";
   save.textContent = "Save";
+  save.setAttribute("role", "button");
+  save.setAttribute("aria-label", "Save selected text to Info");
   save.addEventListener("click", () => saveSelection(payload));
   selectionToolbar.append(save);
   const rect = selectionRect();
@@ -780,6 +833,9 @@ function showSelectionAnswer(answer: string) {
   if (!selectionToolbar) return;
   selectionToolbar.className = "is-answer";
   selectionToolbar.textContent = "";
+  selectionToolbar.setAttribute("role", "dialog");
+  selectionToolbar.setAttribute("aria-modal", "true");
+  selectionToolbar.setAttribute("aria-label", "Info explanation");
   const title = document.createElement("div");
   title.className = "info-selection-title";
   title.textContent = "Info explain";
@@ -791,6 +847,7 @@ function showSelectionAnswer(answer: string) {
   const close = document.createElement("button");
   close.type = "button";
   close.textContent = "Dismiss";
+  close.setAttribute("aria-label", "Dismiss explanation");
   close.addEventListener("click", () => removeSelectionToolbar());
   actions.append(close);
   selectionToolbar.append(title, body, actions);
@@ -823,8 +880,7 @@ function removeSelectionToolbar() {
   activeSelectionPayload = null;
 }
 
-const style = document.createElement("style");
-style.textContent = `
+const TOOLBAR_STYLE = `
   #info-selection-toolbar {
     position: absolute;
     z-index: 2147483647;
@@ -860,11 +916,21 @@ style.textContent = `
     font: inherit;
     font-size: 12px;
     cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #info-selection-toolbar button:focus {
+    outline: 2px solid rgba(47, 47, 47, 0.35);
+    outline-offset: 1px;
   }
   #info-selection-toolbar button:first-child {
     background: #2f2f2f;
     color: #fff;
     border-color: #2f2f2f;
+  }
+  #info-selection-toolbar button:first-child:focus {
+    outline-color: rgba(255,255,255,0.5);
   }
   #info-selection-toolbar .info-selection-title {
     color: #6f6f6f;
@@ -878,6 +944,8 @@ style.textContent = `
     max-height: 180px;
     overflow: auto;
     white-space: pre-wrap;
+    word-break: break-word;
+    hyphens: auto;
   }
   #info-selection-toolbar .info-selection-actions {
     display: flex;
@@ -932,6 +1000,8 @@ style.textContent = `
     color: #2f2f2f;
     box-shadow: 0 12px 32px rgba(20, 20, 20, 0.14);
     padding: 10px;
+    width: 318px;
+    max-width: calc(100vw - 24px);
   }
   #info-writing-assist.is-collapsed .info-writing-panel {
     display: none;
@@ -948,6 +1018,9 @@ style.textContent = `
     max-height: 96px;
     overflow: auto;
     white-space: pre-wrap;
+    word-break: break-word;
+    hyphens: auto;
+    min-width: 0;
   }
   #info-writing-assist .info-writing-actions {
     display: flex;
@@ -964,13 +1037,26 @@ style.textContent = `
     padding: 0 9px;
     font: inherit;
     font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  #info-writing-assist button:focus {
+    outline: 2px solid rgba(47, 47, 47, 0.35);
+    outline-offset: 1px;
   }
   #info-writing-assist button:last-child {
     background: #2f2f2f;
     color: #fff;
     border-color: #2f2f2f;
   }
+  #info-writing-assist button:last-child:focus {
+    outline-color: rgba(255,255,255,0.5);
+  }
 `;
+const style = document.createElement("style");
+style.textContent = TOOLBAR_STYLE;
 document.documentElement.append(style);
 
 // ---------------------------------------------------------------------------

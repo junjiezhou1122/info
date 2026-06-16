@@ -10,6 +10,7 @@ import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "@inf
 import { buildCandidateThreads, type CandidateThread } from "@info/views/timeline/correlation.js";
 import { buildLocalProjectSnapshotRecord } from "@info/sensors";
 import { buildThreadEvidenceMap } from "@info/views/threads/thread-evidence.js";
+import { buildCandidateRoutes, buildRouteCandidateRecord, extractRouteFeatures } from "@info/processor-runtime";
 import { processAmbientBackgroundTasks } from "./background-tasks.js";
 import { processToolsmithSandboxArtifacts } from "./toolsmith-artifacts.js";
 
@@ -24,7 +25,11 @@ const VIEW_WORKER_FUNCTIONS = {
   intent: "view::intent_compile",
   workflow: "view::workflow_compile",
   memory: "view::memory_compile",
+  memoryCandidate: "view::memory_candidate_compile",
+  memoryGate: "view::memory_gate_compile",
   workThread: "view::work_thread_compile",
+  workFocusSet: "view::work_focus_set_compile",
+  projectCurrent: "view::project_current_compile",
   observationTimeline: "view::timeline_observations_compile",
   activityTimeline: "view::timeline_activity_compile",
   projectTimeline: "view::project_timeline_compile",
@@ -375,6 +380,7 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
   }
 
   const records = dedupeRecords([...baseRecords, ...screenpipeRecords, ...localProjectRecords, ...aiSessionRecords]);
+  const routeCandidateRecords = buildRuntimeRouteCandidates(records, store, write);
   const { records: threadRecords, filtered } = selectThreadRecords(records, activeWorkspace);
   diagnostics.thread_input = {
     total_records: records.length,
@@ -475,6 +481,7 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
       iii,
       write,
       records,
+      routeCandidateRecords,
       activeWorkspace,
       windowMinutes,
       aiViewCompression: effectiveAiCompression,
@@ -574,6 +581,7 @@ async function compileRuntimeViews(input: {
   iii?: RuntimeIiiClient;
   write: boolean;
   records?: StoredContextRecord[];
+  routeCandidateRecords?: StoredContextRecord[];
   activeWorkspace?: WorkspaceCandidate;
   windowMinutes: number;
   aiViewCompression?: boolean;
@@ -686,6 +694,57 @@ async function compileRuntimeViews(input: {
     });
   } catch (error) {
     out.push({ view_type: "work_thread", skipped: error instanceof Error ? error.message : String(error) });
+  }
+
+  try {
+    const compiled = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.workFocusSet, {
+      minutes: Math.max(input.windowMinutes, 90),
+      limit: 200,
+      write: input.write,
+      source_record_ids: [...(input.records?.map(record => record.id) ?? []), ...(input.routeCandidateRecords?.map(record => record.id) ?? [])],
+    });
+    out.push({
+      view_type: "work.focus_set",
+      view_id: compiled.views[0]?.id,
+      title: compiled.views[0]?.title,
+      records_used: numberValue(compiled.diagnostics.route_candidates_used),
+      view_count: compiled.views.length,
+    });
+
+    const projectCurrent = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.projectCurrent, {
+      write: input.write,
+      source_view_ids: compiled.views_written,
+      source_record_ids: input.records?.map(record => record.id),
+    });
+    out.push({
+      view_type: "project.current",
+      view_id: projectCurrent.views[0]?.id,
+      title: projectCurrent.views[0]?.title,
+      view_count: projectCurrent.views.length,
+    });
+
+    const memoryCandidates = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.memoryCandidate, {
+      write: input.write,
+      source_record_ids: input.records?.map(record => record.id),
+      source_view_ids: [...compiled.views_written, ...projectCurrent.views_written],
+    });
+    out.push({
+      view_type: "memory.candidate",
+      view_count: memoryCandidates.views.length,
+      title: "Memory Candidate Views",
+    });
+
+    const gatedMemory = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.memoryGate, {
+      write: input.write,
+      source_view_ids: memoryCandidates.views_written,
+    });
+    out.push({
+      view_type: "memory.gate",
+      view_count: gatedMemory.views.length,
+      title: "Memory Gate",
+    });
+  } catch (error) {
+    out.push({ view_type: "work.focus_set/project.current", skipped: error instanceof Error ? error.message : String(error) });
   }
 
   try {
@@ -1111,6 +1170,21 @@ function dedupeRecords(records: StoredContextRecord[]): StoredContextRecord[] {
   const byId = new Map<string, StoredContextRecord>();
   for (const record of records) byId.set(record.id, record);
   return [...byId.values()];
+}
+
+function buildRuntimeRouteCandidates(records: StoredContextRecord[], store: ContextStore, write: boolean): StoredContextRecord[] {
+  const out: StoredContextRecord[] = [];
+  for (const record of records) {
+    if (record.schema.name === "observation.route_candidate") continue;
+    if (record.privacy?.retention === "do_not_store" || record.privacy?.level === "secret") continue;
+    const features = extractRouteFeatures(record);
+    const routes = buildCandidateRoutes(features, out);
+    if (!routes.length) continue;
+    const draft = buildRouteCandidateRecord(record, features, routes);
+    const stored = write ? store.insertRecord(draft) : transientRecord(draft);
+    out.push(stored);
+  }
+  return out;
 }
 
 function transientRecord(record: ContextRecord): StoredContextRecord {

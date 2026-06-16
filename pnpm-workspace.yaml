@@ -10,6 +10,7 @@ packages:
   - "packages/programs"
   - "packages/runtime"
   - "packages/processor-runtime"
+  - "packages/ambient-layer"
   - "packages/iii-runtime"
   - "packages/server"
   - "apps/ui"

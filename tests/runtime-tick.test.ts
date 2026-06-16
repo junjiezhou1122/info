@@ -65,7 +65,75 @@ test("runtimeTick writes WorkThread state and Views without episode candidate Re
   assert.equal(result.evidence.written_records.some(id => id.startsWith("runtime:")), false);
   assert.equal(store.recent(20).filter(record => record.schema.name === "episode.candidate_thread").length, 0);
   assert.ok(store.listViews({ view_types: ["work_thread"], limit: 5 })[0]);
+  assert.ok(store.recent(20).some(record => record.schema.name === "observation.route_candidate"));
+  assert.ok(store.listViews({ view_types: ["work.focus_set"], limit: 5 })[0]);
+  assert.ok(store.listViews({ view_types: ["project.current"], limit: 5 })[0]);
+  assert.ok(result.compiled_views.some(view => view.view_type === "work.focus_set"));
+  assert.ok(result.compiled_views.some(view => view.view_type === "project.current"));
   assert.equal(store.getRuntimeState("active_thread")?.value?.thread_id, result.written_threads[0]);
+}));
+
+test("runtimeTick dry run does not persist memory candidates or durable memories", async () => withStore(async (store) => {
+  store.insertRecord({
+    id: "record:runtime-tick-dry-memory",
+    schema: { name: "observation.ai_session_locator_result", version: 1 },
+    source: { type: "ai_session", connector: "codex" },
+    scope: { project: "info", project_path: "/Users/junjie/info", session: "dry-memory" },
+    content: { title: "Codex memory work", text: "用户说：不要只讲架构，直接实现。" },
+    payload: { cwd: "/Users/junjie/info", session_id: "dry-memory", commands_run: ["pnpm typecheck"] },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const result = await runtimeTickViaIii({
+    include_screenpipe: false,
+    include_ai_sessions: false,
+    include_git: false,
+    compile_views: true,
+    write: false,
+    force: true,
+    window_minutes: 60,
+    min_score: 0.2,
+  }, store);
+
+  assert.equal(result.ok, true);
+  assert.equal(store.recent(20).some(record => record.schema.name === "observation.route_candidate"), false);
+  assert.equal(store.listViews({ view_types: ["memory.candidate"], limit: 5 }).length, 0);
+  assert.equal(store.listViews({ view_types: ["memory.agent_collaboration_style", "memory.workflow_patterns", "project.memory"], limit: 5 }).length, 0);
+  assert.ok(result.compiled_views.some(view => view.view_type === "memory.candidate"));
+}));
+
+test("runtimeTick repeated runs do not duplicate durable project memories", async () => withStore(async (store) => {
+  store.insertRecord({
+    id: "record:runtime-tick-memory-idempotent",
+    schema: { name: "observation.local_project", version: 1 },
+    source: { type: "local_project", connector: "runtime-snapshot" },
+    scope: { project: "info", project_path: "/Users/junjie/info", app: "terminal" },
+    content: {
+      title: "Local project snapshot: info memory",
+      path: "/Users/junjie/info",
+      text: "Project current should become a durable project memory without duplicates.",
+    },
+    payload: { root: "/Users/junjie/info", files_touched: ["packages/views/memory/gate.ts"] },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  const req: RuntimeTickRequest = {
+    include_screenpipe: false,
+    include_ai_sessions: false,
+    include_git: false,
+    compile_views: true,
+    write: true,
+    force: true,
+    window_minutes: 60,
+    min_score: 0.2,
+  };
+
+  await runtimeTickViaIii(req, store);
+  await runtimeTickViaIii(req, store);
+
+  const memories = store.listViews({ view_types: ["project.memory"], limit: 20 })
+    .filter(view => String(view.content?.claim ?? "").includes("Local project snapshot: info memory"));
+  assert.equal(memories.length, 1);
+  assert.ok((memories[0]?.content?.evidence_count as number) >= 1);
 }));
 
 test("runtimeTick persists Screenpipe observations so activity timeline can display them", async () => withStore(async (store) => {

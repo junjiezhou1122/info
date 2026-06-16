@@ -6,3 +6,7 @@ export * from "./view-writer.js";
 export * from "./view-system-report.js";
 export * from "./runtimes/local.js";
 export * from "./builtins/surface-state.js";
+export * from "./builtins/route-candidate.js";
+export * from "./builtins/current-page-router.js";
+export * from "./builtins/screenpipe-surface.js";
+export * from "./builtins/screenpipe-surface-processor.js";

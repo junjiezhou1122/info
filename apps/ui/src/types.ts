@@ -206,3 +206,119 @@ export type ViewListResponse = {
   next_cursor?: string;
   subscription?: { returned_count?: number };
 };
+
+export type MemoryCandidateContent = {
+  memory_kind: "preference" | "workflow_pattern" | "skill_gap" | "agent_collaboration_style" | "project_memory" | "agent_case";
+  target_view_type: string;
+  claim: string;
+  confidence: number;
+  evidence_count: number;
+  proposed_scope?: Record<string, unknown>;
+  promotion_policy: {
+    min_confidence: number;
+    min_evidence_count: number;
+    allow_manual_promote: boolean;
+    require_privacy_check: boolean;
+  };
+  gate_status?: "candidate" | "promoted" | "held" | "rejected";
+  durable_view_id?: string;
+  rejection_reason?: string;
+};
+
+export type MemoryGateDecision =
+  | { action: "promote"; candidate_id: string; target_view_type: string; confidence: number }
+  | { action: "merge"; candidate_id: string; target_view_id: string; confidence: number }
+  | { action: "hold"; candidate_id: string; reason: string }
+  | { action: "reject"; candidate_id: string; reason: string };
+
+export type ProjectCurrentContent = {
+  focus?: string;
+  recent_context?: Record<string, unknown>[];
+  decisions?: string[];
+  open_questions?: string[];
+  next_actions?: string[];
+  active_files?: string[];
+  active_sessions?: string[];
+  supporting_sources?: Record<string, unknown>[];
+  lane?: Record<string, unknown>;
+  generated_at?: string;
+};
+
+export type ProjectCurrentView = ContextViewSummary & {
+  content?: ProjectCurrentContent;
+};
+
+export type WorkFocusLane = {
+  lane_key: string;
+  lane_kind: string;
+  label: string;
+  attention_share: number;
+  confidence: number;
+  source_records: string[];
+  candidate_route_ids: string[];
+  route_scores: Array<{ route_key: string; score: number; rule_hits: string[] }>;
+  evidence: Record<string, unknown>;
+  last_seen_at?: string;
+};
+
+export type WorkFocusSetContent = {
+  active_lanes?: WorkFocusLane[];
+  lane_count?: number;
+  route_candidate_count?: number;
+  generated_at?: string;
+  consolidation?: string;
+};
+
+export type ProcessorRun = {
+  processor_id: string;
+  runtime: "local" | "llm" | "agent_task" | "http" | "cli";
+  ok: boolean;
+  source: {
+    kind: "observation" | "view";
+    id?: string;
+    type?: string;
+  };
+  view_drafts: number;
+  views_written: string[];
+  observation_drafts?: number;
+  observations_written?: string[];
+  diagnostics: Record<string, unknown>;
+  error?: string;
+};
+
+export type ProcessorTracesResponse = {
+  ok: true;
+  events: Array<{
+    id: string;
+    event_type: string;
+    actor: string;
+    status: string;
+    subject_type: string;
+    subject_id: string;
+    payload?: Record<string, unknown>;
+    created_at: string;
+  }>;
+};
+
+export type MemoryInboxResponse = {
+  ok: true;
+  candidates: ContextViewSummary[];
+  promoted: ContextViewSummary[];
+  rejected: ContextViewSummary[];
+};
+
+export type ProactiveSuggestion = {
+  id: string;
+  view_type: string;
+  title: string;
+  summary?: string;
+  confidence?: number;
+  priority?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type ProactiveInboxResponse = {
+  ok: true;
+  suggestions: ProactiveSuggestion[];
+};

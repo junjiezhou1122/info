@@ -30,6 +30,22 @@ Short version:
 Observe facts. Derive Views. Let Views circulate. Learn from feedback.
 ```
 
+Memory is one View family inside this loop, not a replacement runtime. The
+Info-native memory path is:
+
+```text
+Observation / View evidence
+  -> processor.memory_candidate
+  -> memory.candidate
+  -> processor.memory_gate
+  -> durable memory Views
+```
+
+The gate is deliberately conservative. It promotes only candidates with allowed
+privacy, provenance, confidence, and evidence count; otherwise it holds or
+rejects them. Optional EverOS-style storage belongs behind a `MemoryBackend`
+adapter so local Info Views remain the canonical traceable state.
+
 Info is not primarily:
 
 - a chatbot;
@@ -798,3 +814,30 @@ Daily Summary should prove timeline compression.
 ```
 
 All of them must remain instances of the same simple runtime.
+
+## 15. Hybrid Work Router Update
+
+The proactive runtime now separates realtime state from scheduled
+consolidation:
+
+```text
+observation.browser_page_snapshot
+observation.ai_session_locator_result
+observation.local_project
+observation.screenpipe_*
+        |
+        +--> processor.surface_state
+        |       -> state.surface
+        |
+        +--> processor.route_candidate
+        |       -> observation.route_candidate
+        |
+        +--> processor.work_router_batch
+                -> work.focus_set
+                -> processor.project_current
+                    -> project.current
+```
+
+Realtime processors are deterministic and do not require external LLM
+credentials. Batch routing is LLM-ready, but the default implementation remains
+deterministic and testable.

@@ -48,6 +48,7 @@
     "@info/capabilities": "workspace:*",
     "@info/core": "workspace:*",
     "@info/iii-runtime": "workspace:*",
+    "@info/ambient-layer": "workspace:*",
     "@info/programs": "workspace:*",
     "@info/processor-runtime": "workspace:*",
     "@info/runtime": "workspace:*",

@@ -1,5 +1,5 @@
 import { defaultCapabilityDefinitions, defaultProgramDefinitions } from "@info/programs/registry.js";
-import { createSurfaceStateProcessor } from "@info/processor-runtime";
+import { createRouteCandidateProcessor, createSurfaceStateProcessor } from "@info/processor-runtime";
 import type { Capability, Program } from "@info/programs/types.js";
 import { createContextFunctionDefinitions } from "./context-functions.js";
 import { createRuntimeWorkerDefinitions, III_RUNTIME_FUNCTIONS } from "./runtime-workers.js";
@@ -50,7 +50,7 @@ export function createInfoWorkerCatalog(store?: ContextStore, iii?: IiiRuntimeCl
 }
 
 function processorRuntimeWorkers(): InfoWorkerDefinition[] {
-  return [createSurfaceStateProcessor()].map(processor => ({
+  return [createSurfaceStateProcessor(), createRouteCandidateProcessor()].map(processor => ({
     id: processorFunctionId(processor.id),
     title: processor.title ?? titleFromId(processor.id),
     kind: "processor",

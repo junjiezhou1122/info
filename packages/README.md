@@ -32,7 +32,10 @@ apps/{ui,browser-extension}   Application surfaces — HTTP only, no code import
 - `sensors/` — Observation sources: Screenpipe, browser enrichment, local
   project snapshots, AI session location. Depends on `@info/core`.
 - `views/` — View compilers and shared helpers, plus the `timeline/`,
-  `threads/`, and `pipeline/` compiler clusters. Depends on `@info/core`
+  `threads/`, `work-router/`, `project/`, and `pipeline/` compiler clusters.
+  Includes `work.focus_set`, `project.current`, and the Info-native memory
+  framework (`memory.candidate`, candidate extraction, memory gate, durable
+  memory helpers, and the backend adapter boundary). Depends on `@info/core`
   (and `@info/sensors` for the visual-frame compiler).
 - `view-system/` — the open ViewSpec registry/query layer used by CLI and
   processor diagnostics. It describes view families without adding closed core
@@ -40,8 +43,9 @@ apps/{ui,browser-extension}   Application surfaces — HTTP only, no code import
 - `capabilities/` — `agent-runtime`: the generic AgentTask execution boundary
   (ACP stdio, Claude-Code CLI-JSON, mock, MCP providers). Zero runtime coupling.
 - `processor-runtime/` — the open ProcessorDefinition runtime, including
-  consumes/produces declarations and view-system diagnostics. Depends on
-  `@info/core` and `@info/view-system`.
+  consumes/produces declarations, view-system diagnostics, and realtime
+  processors such as `state.surface` and `observation.route_candidate`.
+  Depends on `@info/core` and `@info/view-system`.
 - `programs/` — the ProgramRuntime engine, program/capability registry, signal
   builders, and built-in programs. Depends on `@info/core`, `@info/capabilities`.
 - `runtime/` — the periodic tick: pulls sensors, runs view compilers, processes

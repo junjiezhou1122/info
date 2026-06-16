@@ -9,11 +9,13 @@ import { compileProposalViews } from "./proposal/index.js";
 import { compileResourceViews } from "./resource/index.js";
 import { compileIntentViews, compileIntentViewsWithLlm } from "./intent/index.js";
 import { compileWorkflowViews, compileWorkflowViewsWithLlm } from "./workflow/index.js";
-import { compileMemoryViews, compileMemoryViewsWithLlm } from "./memory/index.js";
+import { compileMemoryCandidates, compileMemoryGate, compileMemoryViews, compileMemoryViewsWithLlm } from "./memory/index.js";
 import { compileObservationTimeline } from "./timeline/timeline.js";
 import { compileWorkThreadView } from "./timeline/work-thread-view.js";
 import { compileActivityTimeline } from "./timeline/activity-timeline.js";
 import { compileProjectTimeline } from "./timeline/project-timeline.js";
+import { compileWorkFocusSet } from "./work-router/index.js";
+import { compileProjectCurrent } from "./project/index.js";
 
 export const VIEW_PROCESSOR_FUNCTIONS = {
   evidence: "view::evidence_compile",
@@ -26,7 +28,11 @@ export const VIEW_PROCESSOR_FUNCTIONS = {
   intent: "view::intent_compile",
   workflow: "view::workflow_compile",
   memory: "view::memory_compile",
+  memoryCandidate: "view::memory_candidate_compile",
+  memoryGate: "view::memory_gate_compile",
   workThread: "view::work_thread_compile",
+  workFocusSet: "view::work_focus_set_compile",
+  projectCurrent: "view::project_current_compile",
   observationTimeline: "view::timeline_observations_compile",
   activityTimeline: "view::timeline_activity_compile",
   projectTimeline: "view::project_timeline_compile",
@@ -101,7 +107,11 @@ export function createViewProcessorDefinitions(): ViewProcessorDefinition[] {
     processor(VIEW_PROCESSOR_FUNCTIONS.intent, "intent", ["info.view.proposal.written", "info.view.activity_block.written", "info.view.requested"], compileIntentProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.workflow, "workflow", ["info.view.intent.written", "info.view.resource.written", "info.view.activity_block.written", "info.view.requested"], compileWorkflowProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.memory, "memory", ["info.view.workflow.written", "info.view.requested"], compileMemoryProcessor),
+    processor(VIEW_PROCESSOR_FUNCTIONS.memoryCandidate, "memory.candidate", ["info.observation.feedback.written", "info.view.project.current.written", "info.view.work.focus_set.written", "info.schedule.tick", "info.view.requested"], compileMemoryCandidateProcessor),
+    processor(VIEW_PROCESSOR_FUNCTIONS.memoryGate, "memory.gate", ["info.view.memory.candidate.written", "info.schedule.tick", "info.view.requested"], compileMemoryGateProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.workThread, "work_thread", ["info.observation.ingested", "info.schedule.tick", "info.view.requested"], compileWorkThreadProcessor),
+    processor(VIEW_PROCESSOR_FUNCTIONS.workFocusSet, "work.focus_set", ["info.observation.route_candidate.written", "info.schedule.tick", "info.view.requested"], compileWorkFocusSetProcessor),
+    processor(VIEW_PROCESSOR_FUNCTIONS.projectCurrent, "project.current", ["info.view.work.focus_set.written", "info.schedule.tick", "info.view.requested"], compileProjectCurrentProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.observationTimeline, "timeline.observations", ["info.observation.ingested", "info.schedule.tick", "info.view.requested"], compileObservationTimelineProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.activityTimeline, "timeline.activity", ["info.observation.ingested", "info.runtime.event.written", "info.schedule.tick", "info.view.requested"], compileActivityTimelineProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.projectTimeline, "project_timeline", ["info.view.work_thread.written", "info.schedule.tick", "info.view.requested"], compileProjectTimelineProcessor),
@@ -282,6 +292,31 @@ async function compileMemoryProcessor(input: ViewProcessorInput, context: ViewPr
   });
 }
 
+async function compileMemoryCandidateProcessor(input: ViewProcessorInput, context: ViewProcessorContext) {
+  const result = compileMemoryCandidates({
+    write: input.write ?? true,
+    limit: input.limit,
+    records: input.records ?? (input.source_record_ids?.length ? recordsById(context.store, input.source_record_ids) : undefined),
+    views: input.source_views ?? (input.source_view_ids?.length ? viewsById(context.store, input.source_view_ids) : undefined),
+  }, context.store);
+  return viewResult(VIEW_PROCESSOR_FUNCTIONS.memoryCandidate, "memory.candidate", result.generated_at, storedViews(result.views), {
+    ...result.diagnostics,
+  });
+}
+
+async function compileMemoryGateProcessor(input: ViewProcessorInput, context: ViewProcessorContext) {
+  const sourceViews = input.source_views ?? viewsByIdOrType(context.store, input.source_view_ids, ["memory.candidate"], input.limit);
+  const result = compileMemoryGate({
+    write: input.write ?? true,
+    limit: input.limit,
+    candidates: sourceViews.filter(view => view.view_type === "memory.candidate"),
+  }, context.store);
+  return viewResult(VIEW_PROCESSOR_FUNCTIONS.memoryGate, "memory.gate", result.generated_at, storedViews(result.views), {
+    ...result.diagnostics,
+    decisions: result.decisions.map(decision => decision.action),
+  });
+}
+
 async function compileWorkThreadProcessor(input: ViewProcessorInput, context: ViewProcessorContext) {
   const result = compileWorkThreadView({
     minutes: input.work_thread_minutes ?? input.minutes ?? 180,
@@ -294,6 +329,35 @@ async function compileWorkThreadProcessor(input: ViewProcessorInput, context: Vi
     records_used: result.records_used,
     candidate_threads: result.candidate_threads.length,
     active_thread_id: result.active_thread?.thread_id,
+  });
+}
+
+async function compileWorkFocusSetProcessor(input: ViewProcessorInput, context: ViewProcessorContext) {
+  const result = compileWorkFocusSet({
+    minutes: input.minutes ?? 90,
+    limit: input.limit ?? 160,
+    write: input.write ?? true,
+    records: input.records ?? (input.source_record_ids?.length ? recordsById(context.store, input.source_record_ids) : undefined),
+    llm: input.llm,
+  }, context.store);
+  return viewResult(VIEW_PROCESSOR_FUNCTIONS.workFocusSet, "work.focus_set", result.generated_at, storedViews([result.view]), {
+    records_scanned: result.records_scanned,
+    route_candidates_used: result.route_candidates_used,
+    lane_count: result.active_lanes.length,
+  });
+}
+
+async function compileProjectCurrentProcessor(input: ViewProcessorInput, context: ViewProcessorContext) {
+  const sourceViews = viewsById(context.store, input.source_view_ids);
+  const result = compileProjectCurrent({
+    write: input.write ?? true,
+    limit: input.limit,
+    focusSetViews: pickViewList(sourceViews, "work.focus_set").length ? pickViewList(sourceViews, "work.focus_set") : undefined,
+    records: input.records ?? (input.source_record_ids?.length ? recordsById(context.store, input.source_record_ids) : undefined),
+  }, context.store);
+  return viewResult(VIEW_PROCESSOR_FUNCTIONS.projectCurrent, "project.current", result.generated_at, storedViews(result.views), {
+    project_count: result.views.length,
+    ...result.diagnostics,
   });
 }
 

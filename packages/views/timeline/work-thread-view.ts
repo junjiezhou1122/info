@@ -142,6 +142,7 @@ export function compileWorkThreadView(options: CompileWorkThreadViewOptions = {}
 
 function selectCodingRecords(records: StoredContextRecord[]): StoredContextRecord[] {
   return records
+    .filter(record => record.schema.name !== "observation.route_candidate")
     .filter(record => record.schema.name !== "observation.browser_page_heartbeat")
     .filter(record => !record.schema.name.startsWith("derived."))
     .filter(record => !record.schema.name.startsWith("episode."))

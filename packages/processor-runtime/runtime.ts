@@ -71,6 +71,8 @@ export class ProcessorRuntime {
         const result = await executeProcessor(processor, input, this.store);
         const sourceRecordIds = input.observation ? [input.observation.id] : [];
         const sourceViewIds = input.view ? [input.view.id] : [];
+        const observationDrafts = result.observations ?? [];
+        const observationsWritten = observationDrafts.map(observation => this.store.insertRecord(observation));
         const written = writeViewDrafts(this.store, result.views ?? [], {
           processor,
           source_record_ids: sourceRecordIds,
@@ -84,6 +86,8 @@ export class ProcessorRuntime {
           source,
           view_drafts: result.views?.length ?? 0,
           views_written: written.map(view => view.id),
+          observation_drafts: observationDrafts.length,
+          observations_written: observationsWritten.map(record => record.id),
           diagnostics,
         };
         runs.push(run);
@@ -101,6 +105,7 @@ export class ProcessorRuntime {
             runtime: processor.runtime.kind,
             started_event_id: started.id,
             views_written: written.map(view => view.id),
+            observations_written: observationsWritten.map(record => record.id),
             diagnostics,
           },
         });
@@ -113,6 +118,8 @@ export class ProcessorRuntime {
           source,
           view_drafts: 0,
           views_written: [],
+          observation_drafts: 0,
+          observations_written: [],
           diagnostics: {},
           error: message,
         });
@@ -142,6 +149,7 @@ export class ProcessorRuntime {
       processors_matched: processors.map(processor => processor.id),
       runs,
       views_written: runs.flatMap(run => run.views_written),
+      observations_written: runs.flatMap(run => run.observations_written ?? []),
     };
   }
 }
