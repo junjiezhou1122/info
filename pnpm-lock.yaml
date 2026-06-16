@@ -38,6 +38,9 @@ importers:
       '@info/server':
         specifier: workspace:*
         version: link:packages/server
+      '@info/view-system':
+        specifier: workspace:*
+        version: link:packages/view-system
       '@info/views':
         specifier: workspace:*
         version: link:packages/views
@@ -400,6 +403,15 @@ importers:
         version: 0.19.2
 
   packages/processor-runtime:
+    dependencies:
+      '@info/core':
+        specifier: workspace:*
+        version: link:../core
+      '@info/view-system':
+        specifier: workspace:*
+        version: link:../view-system
+
+  packages/view-system:
     dependencies:
       '@info/core':
         specifier: workspace:*

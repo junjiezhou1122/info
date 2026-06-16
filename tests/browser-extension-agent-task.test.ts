@@ -266,7 +266,7 @@ test("Chrome ACP exposes optional gated Browser Debugger tools", () => {
 
   assert.match(manifest, /"debugger"/);
   assert.match(sharedTypes, /BrowserDebuggerCommand/);
-  assert.match(sharedTypes, /action:\s*"tabs" \| "read" \| "execute" \| "language_recent" \| "debugger"/);
+  assert.match(sharedTypes, /action:\s*[\s\S]*\|\s*"tabs"[\s\S]*\|\s*"read"[\s\S]*\|\s*"execute"[\s\S]*\|\s*"language_recent"[\s\S]*\|\s*"debugger"/);
   assert.match(proxyTypes, /BROWSER_DEBUGGER_TOOL/);
   assert.match(proxyTypes, /browser_debugger/);
   assert.match(proxyTypes, /capture_full_page/);

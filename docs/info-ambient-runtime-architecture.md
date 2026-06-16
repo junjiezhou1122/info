@@ -1,6 +1,11 @@
 # Info Ambient Runtime Architecture
 
 > Highest-level design baseline for Info. Local demos such as Browser Ambient, Language Learning, or external agent runtimes must follow this architecture rather than redefine it.
+>
+> Current doctrine: see `docs/view-first-proactive-agent-os.md`. Ambient runtime
+> work should treat Project, Personal Memory, Learning, Writing, and Research as
+> registered view families over the open View/Processor protocol, not as core
+> domain enums.
 
 ## 0. North Star
 

@@ -9,6 +9,7 @@
     "./runtimes/*.js": "./runtimes/*.ts"
   },
   "dependencies": {
-    "@info/core": "workspace:*"
+    "@info/core": "workspace:*",
+    "@info/view-system": "workspace:*"
   }
 }

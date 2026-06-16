@@ -361,7 +361,7 @@ test("Context source mode uses scope/source filters instead of semantic goal sea
   assert.deepEqual(new Set(pack.records.map(record => record.id)), new Set(["obs-source-mode-browser", "obs-source-mode-git"]));
 }));
 
-test("Context pack expands direct source_views so derived View chains stay inspectable", async () => withStore(async (store) => {
+test("Context pack expands direct source_views so derived View chains stay inspectable", { concurrency: false }, async () => withStore(async (store) => {
   store.insertRecord({
     id: "obs-browser-chain",
     schema: { name: "observation.browser_ambient_requested", version: 1 },
@@ -408,7 +408,7 @@ test("Context pack expands direct source_views so derived View chains stay inspe
   assert.match(pack.markdown, /Browser page analysis in the middle of the provenance chain/);
 }));
 
-test("Context pack expands nested source_views within a bounded provenance chain", async () => withStore(async (store) => {
+test("Context pack expands nested source_views within a bounded provenance chain", { concurrency: false }, async () => withStore(async (store) => {
   store.insertRecord({
     id: "obs-nested-chain",
     schema: { name: "observation.browser_ambient_requested", version: 1 },
@@ -511,7 +511,7 @@ test("Context pack ignores inactive or expired Views", async () => withStore(asy
   assert.doesNotMatch(pack.markdown, /Stale view should not be included/);
 }));
 
-test("Context pack does not expand inactive source_views", async () => withStore(async (store) => {
+test("Context pack does not expand inactive source_views", { concurrency: false }, async () => withStore(async (store) => {
   store.insertRecord({
     id: "obs-behind-inactive-source-view",
     schema: { name: "observation.browser_ambient_requested", version: 1 },
@@ -600,7 +600,7 @@ test("Context pack can be explicitly scoped for external LLM use", async () => w
   assert.equal(pack.diagnostics.allow_external_llm, true);
 }));
 
-test("Context pack does not leak records from source_views denied by plugin permissions", async () => {
+test("Context pack does not leak records from source_views denied by plugin permissions", { concurrency: false }, async () => {
   const cwd = process.cwd();
   const dir = mkdtempSync(join(tmpdir(), "info-broker-permission-test-"));
   process.chdir(dir);

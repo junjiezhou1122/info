@@ -43,10 +43,13 @@ export function buildContextPack(query: ContextQuery, store = new ContextStore()
     allowExternalLlm,
   );
   const events = filterEventsForPlugin(rawEvents, store, plugin);
+  const explicitViewQuery = Boolean(effectiveQuery.view_types?.length || effectiveQuery.view_type_prefix);
   const viewBudget = includeViews
-    ? includeRecords
-      ? Math.min(5, Math.max(1, Math.ceil(limit * 0.25)))
-      : limit
+    ? explicitViewQuery
+      ? Math.min(limit, views.length)
+      : includeRecords
+        ? Math.min(5, Math.max(1, Math.ceil(limit * 0.25)))
+        : limit
     : 0;
   const clippedViews = views.slice(0, viewBudget);
   const remainingAfterViews = Math.max(0, limit - clippedViews.length);

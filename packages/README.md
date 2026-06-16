@@ -17,6 +17,8 @@ apps/{ui,browser-extension}   Application surfaces — HTTP only, no code import
         |              |
 @info/views   ---> @info/sensors      view compilers / Observation sources
 @info/capabilities                    reusable agent-execution power (zero coupling)
+@info/processor-runtime                open ProcessorDefinition runtime + diagnostics
+@info/view-system                      open ViewSpec registry/query layer
         |
 @info/core        kernel: types, schema, store (Context Graph), llm, env,
                   view lifecycle/query/surfacing, policy-aware broker, plugins
@@ -32,8 +34,14 @@ apps/{ui,browser-extension}   Application surfaces — HTTP only, no code import
 - `views/` — View compilers and shared helpers, plus the `timeline/`,
   `threads/`, and `pipeline/` compiler clusters. Depends on `@info/core`
   (and `@info/sensors` for the visual-frame compiler).
+- `view-system/` — the open ViewSpec registry/query layer used by CLI and
+  processor diagnostics. It describes view families without adding closed core
+  domain enums. Depends on `@info/core`.
 - `capabilities/` — `agent-runtime`: the generic AgentTask execution boundary
   (ACP stdio, Claude-Code CLI-JSON, mock, MCP providers). Zero runtime coupling.
+- `processor-runtime/` — the open ProcessorDefinition runtime, including
+  consumes/produces declarations and view-system diagnostics. Depends on
+  `@info/core` and `@info/view-system`.
 - `programs/` — the ProgramRuntime engine, program/capability registry, signal
   builders, and built-in programs. Depends on `@info/core`, `@info/capabilities`.
 - `runtime/` — the periodic tick: pulls sensors, runs view compilers, processes

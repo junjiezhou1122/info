@@ -993,6 +993,7 @@ function scopeCompatible(target?: ContextRecord["scope"], source?: ContextRecord
 
 function normalizeTimeWindow(timeWindow?: ContextPackRequest["time_window"]): ContextPackRequest["time_window"] | undefined {
   if (!timeWindow) return undefined;
+  if (!timeWindow.start_time && !timeWindow.end_time && !timeWindow.minutes) return undefined;
   const end = timeWindow.end_time ?? new Date().toISOString();
   const start = timeWindow.start_time ?? (timeWindow.minutes ? new Date(Date.parse(end) - timeWindow.minutes * 60_000).toISOString() : undefined);
   return { start_time: start, end_time: end, minutes: timeWindow.minutes };

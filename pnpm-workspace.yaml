@@ -5,6 +5,7 @@ packages:
   - "packages/core"
   - "packages/sensors"
   - "packages/views"
+  - "packages/view-system"
   - "packages/capabilities"
   - "packages/programs"
   - "packages/runtime"

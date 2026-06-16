@@ -50,10 +50,11 @@ export function createSurfaceStateProcessor(options: SurfaceStateOptions = {}): 
 
 export function surfaceStateHandler(options: SurfaceStateOptions = {}): ProcessorHandler {
   return (input, context) => {
+    const now = options.now ?? new Date();
     const view = buildSurfaceStateView({
       seed: input.observation,
-      records: collectSurfaceRecords(context.store.recent(options.recordLimit ?? 80, undefined, { minutes: options.windowMinutes ?? 10 }), input.observation),
-      now: options.now ?? new Date(),
+      records: collectSurfaceRecords(context.store.recent(options.recordLimit ?? 80, undefined, surfaceTimeWindow(now, options.windowMinutes ?? 10)), input.observation),
+      now,
     });
     return {
       views: [view],
@@ -63,6 +64,14 @@ export function surfaceStateHandler(options: SurfaceStateOptions = {}): Processo
         source_priority: view.content?.source_priority,
       },
     };
+  };
+}
+
+function surfaceTimeWindow(now: Date, minutes: number): { start_time: string; end_time: string; minutes: number } {
+  return {
+    start_time: new Date(now.getTime() - minutes * 60_000).toISOString(),
+    end_time: now.toISOString(),
+    minutes,
   };
 }
 

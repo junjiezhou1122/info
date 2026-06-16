@@ -5,6 +5,11 @@
 > This document captures the product and architecture principles behind the
 > current implementation. It should guide code decisions before we optimize any
 > single demo such as Browser Ambient, Language Learning, or Project Ambient.
+>
+> Current doctrine: see `docs/view-first-proactive-agent-os.md`. When this
+> document's older Program-centric language conflicts with that doctrine, the
+> View-first / Processor-first protocol wins: core owns protocols, not
+> categories.
 
 ## 1. One sentence
 
