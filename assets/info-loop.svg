@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="1560" viewBox="0 0 1120 1560" role="img" aria-labelledby="title desc">
+  <title id="title">Info loop architecture</title>
+  <desc id="desc">Sources become observations. Processors turn observations and views into views. Agent and UI consume views and create new observations, continuing the loop.</desc>
+  <defs>
+    <style>
+      .bg { fill: #fbfbf8; }
+      .box { fill: #fff; stroke-width: 2; rx: 12; }
+      .blue { stroke: #3b73d9; fill: #f7fbff; }
+      .purple { stroke: #7b61b8; fill: #fbf8ff; }
+      .green { stroke: #35a857; fill: #f7fff8; }
+      .orange { stroke: #d99818; fill: #fffaf0; }
+      .pink { stroke: #c7639f; fill: #fff8fc; }
+      .gray { stroke: #8b8b8b; fill: #f8f8f8; stroke-dasharray: 3 3; }
+      .title { font: 700 28px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #111827; }
+      .sub { font: 400 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #374151; }
+      .label { font: 700 19px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #111827; }
+      .small { font: 400 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #374151; }
+      .mono { font: 500 15px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #111827; }
+      .chip { fill: #eaf2ff; stroke: #c9dbff; rx: 8; }
+      .view { fill: #fcfffc; stroke: #cde8d2; rx: 8; }
+      .arrow { stroke: #9ca3af; stroke-width: 4; fill: none; marker-end: url(#arrowhead); }
+      .loop { stroke: #8b8b8b; stroke-width: 4; fill: none; marker-end: url(#arrowhead); }
+      .icon { font: 34px -apple-system, BlinkMacSystemFont, "Segoe UI Emoji", sans-serif; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#9ca3af"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1120" height="1560"/>
+
+  <rect class="box blue" x="70" y="40" width="840" height="260" rx="12"/>
+  <text class="title" x="490" y="82" text-anchor="middle">1. Sources</text>
+  <text class="sub" x="490" y="116" text-anchor="middle">quietly observe the digital environment</text>
+  <g text-anchor="middle">
+    <text class="icon" x="150" y="180">▣</text>
+    <text class="label" x="150" y="222">Screen</text>
+    <text class="small" x="150" y="252">seen content</text>
+    <text class="icon" x="280" y="180">⌨</text>
+    <text class="label" x="280" y="222">Keyboard</text>
+    <text class="small" x="280" y="252">typed keys</text>
+    <text class="icon" x="410" y="180">◉</text>
+    <text class="label" x="410" y="222">Mouse</text>
+    <text class="small" x="410" y="252">clicks / scrolls</text>
+    <text class="icon" x="540" y="180">◎</text>
+    <text class="label" x="540" y="222">Audio</text>
+    <text class="small" x="540" y="252">heard speech</text>
+    <text class="icon" x="670" y="180">□</text>
+    <text class="label" x="670" y="222">Files</text>
+    <text class="small" x="670" y="252">changed files</text>
+    <text class="icon" x="800" y="180">▻</text>
+    <text class="label" x="800" y="222">Apps</text>
+    <text class="small" x="800" y="252">opened / ran</text>
+  </g>
+
+  <rect class="box gray" x="940" y="160" width="120" height="150" rx="10"/>
+  <text class="label" x="1000" y="205" text-anchor="middle">Privacy</text>
+  <text class="small" x="1000" y="238" text-anchor="middle">local first</text>
+  <text class="small" x="1000" y="268" text-anchor="middle">controlled</text>
+  <text class="small" x="1000" y="298" text-anchor="middle">private data</text>
+
+  <path class="arrow" d="M490 300 L490 345"/>
+  <rect class="box blue" x="70" y="345" width="840" height="150" rx="12"/>
+  <text class="title" x="490" y="390" text-anchor="middle">2. Observations</text>
+  <text class="sub" x="490" y="423" text-anchor="middle">raw signals become structured facts</text>
+  <g>
+    <rect class="chip" x="115" y="452" width="105" height="34"/>
+    <text class="small" x="167" y="474" text-anchor="middle">seen</text>
+    <rect class="chip" x="240" y="452" width="115" height="34"/>
+    <text class="small" x="297" y="474" text-anchor="middle">typed</text>
+    <rect class="chip" x="375" y="452" width="115" height="34"/>
+    <text class="small" x="432" y="474" text-anchor="middle">clicked</text>
+    <rect class="chip" x="510" y="452" width="115" height="34"/>
+    <text class="small" x="567" y="474" text-anchor="middle">heard</text>
+    <rect class="chip" x="645" y="452" width="115" height="34"/>
+    <text class="small" x="702" y="474" text-anchor="middle">opened</text>
+    <rect class="chip" x="780" y="452" width="95" height="34"/>
+    <text class="small" x="827" y="474" text-anchor="middle">changed</text>
+  </g>
+
+  <path class="arrow" d="M490 495 L490 540"/>
+  <rect class="box purple" x="70" y="540" width="840" height="150" rx="12"/>
+  <text class="title" x="490" y="585" text-anchor="middle">3. Processors</text>
+  <text class="sub" x="490" y="618" text-anchor="middle">rules, models, agents, and CLIs turn observations or views into new views</text>
+  <g>
+    <rect class="chip" x="140" y="645" width="130" height="36"/>
+    <text class="small" x="205" y="669" text-anchor="middle">rules</text>
+    <rect class="chip" x="315" y="645" width="130" height="36"/>
+    <text class="small" x="380" y="669" text-anchor="middle">LLM</text>
+    <rect class="chip" x="490" y="645" width="130" height="36"/>
+    <text class="small" x="555" y="669" text-anchor="middle">agent</text>
+    <rect class="chip" x="665" y="645" width="130" height="36"/>
+    <text class="small" x="730" y="669" text-anchor="middle">CLI</text>
+  </g>
+
+  <path class="arrow" d="M490 690 L490 735"/>
+  <rect class="box green" x="70" y="735" width="840" height="390" rx="12"/>
+  <text class="title" x="490" y="780" text-anchor="middle">4. Views</text>
+  <text class="sub" x="490" y="813" text-anchor="middle">the shared state that agents and UI both consume</text>
+
+  <g>
+    <rect class="view" x="110" y="850" width="365" height="54"/>
+    <text class="mono" x="140" y="873">state.surface</text>
+    <text class="small" x="140" y="894">what is in front of you</text>
+    <rect class="view" x="110" y="915" width="365" height="54"/>
+    <text class="mono" x="140" y="938">work.focus_set</text>
+    <text class="small" x="140" y="959">active project / topic lanes</text>
+    <rect class="view" x="110" y="980" width="365" height="54"/>
+    <text class="mono" x="140" y="1003">project.current</text>
+    <text class="small" x="140" y="1024">current project state</text>
+    <rect class="view" x="110" y="1045" width="365" height="54"/>
+    <text class="mono" x="140" y="1068">task.* / suggestion.*</text>
+    <text class="small" x="140" y="1089">work to do / advice to show</text>
+
+    <rect class="view" x="525" y="850" width="345" height="54"/>
+    <text class="mono" x="555" y="873">result.*</text>
+    <text class="small" x="555" y="894">outputs from tasks and agents</text>
+    <rect class="view" x="525" y="915" width="345" height="54"/>
+    <text class="mono" x="555" y="938">feedback.*</text>
+    <text class="small" x="555" y="959">signals about what worked</text>
+    <rect class="view" x="525" y="980" width="345" height="54"/>
+    <text class="mono" x="555" y="1003">memory.daily</text>
+    <text class="small" x="555" y="1024">today's memory view</text>
+    <rect class="view" x="525" y="1045" width="345" height="54"/>
+    <text class="mono" x="555" y="1068">memory.profile</text>
+    <text class="small" x="555" y="1089">long-term preference view</text>
+  </g>
+
+  <path class="arrow" d="M300 1125 L300 1180"/>
+  <path class="arrow" d="M680 1125 L680 1180"/>
+
+  <rect class="box orange" x="70" y="1180" width="390" height="210" rx="12"/>
+  <text class="title" x="265" y="1225" text-anchor="middle">5A. Agent</text>
+  <text class="sub" x="265" y="1255" text-anchor="middle">acts on your behalf</text>
+  <text class="small" x="130" y="1298">read views</text>
+  <text class="small" x="130" y="1330">write views / tasks</text>
+  <text class="small" x="130" y="1362">operate browser / terminal / CLI</text>
+
+  <rect class="box blue" x="530" y="1180" width="380" height="210" rx="12"/>
+  <text class="title" x="720" y="1225" text-anchor="middle">5B. UI</text>
+  <text class="sub" x="720" y="1255" text-anchor="middle">shows, edits, and controls views</text>
+  <text class="small" x="590" y="1298">browse all views</text>
+  <text class="small" x="590" y="1330">edit / correct / adjust</text>
+  <text class="small" x="590" y="1362">accept / reject suggestions</text>
+
+  <path class="arrow" d="M300 1390 L490 1430"/>
+  <path class="arrow" d="M720 1390 L490 1430"/>
+
+  <rect class="box pink" x="70" y="1430" width="840" height="90" rx="12"/>
+  <text class="title" x="490" y="1468" text-anchor="middle">6. New Observations</text>
+  <text class="sub" x="490" y="1498" text-anchor="middle">use / dismiss, edits, agent results, browser success or failure</text>
+
+  <path class="loop" d="M910 1475 C1040 1475 1050 160 910 170"/>
+
+  <rect class="box gray" x="70" y="1530" width="840" height="22" rx="8"/>
+  <text class="small" x="490" y="1547" text-anchor="middle">Core loop: quiet observation -> shared Views -> useful action -> new observations -> better Views</text>
+</svg>

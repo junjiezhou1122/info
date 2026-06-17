@@ -14,8 +14,13 @@ course/person/document as TypeScript enums. Domains emerge as registered view
 families and processors. The stable loop is:
 
 ```text
-Observation -> Processor -> View -> Processor/Agent/UI -> Feedback -> Memory
+Observation -> Processor -> View -> Action -> Observation
 ```
+
+`feedback.*` and `memory.*` are not outside this loop. They are View families.
+A user click, conversation correction, browser action result, or agent result
+first appears as a new Observation. Processors can then turn that evidence into
+`feedback.*`, `memory.candidate`, `memory.daily`, or `memory.profile` Views.
 
 The practical rule is:
 
@@ -128,6 +133,9 @@ Views remain open by namespace:
 state.surface
 work.focus_set
 project.current
+task.background_research
+result.browser_action
+feedback.analysis.useful
 writing.advice
 learning.youtube_fragment
 research.brief
@@ -207,8 +215,9 @@ Observation A
   -> View X
   -> View Y
   -> Agent output Z
-  -> Feedback
-  -> Memory View M
+  -> Observation B
+  -> feedback.* View
+  -> memory.* View
 ```
 
 Each view should preserve enough `source_records`, `source_views`, compiler

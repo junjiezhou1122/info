@@ -6,20 +6,27 @@ It turns raw observations into reusable Views, exposes them through CLI and HTTP
 The short version:
 
 ```text
-Observe -> Compile Views -> Route work -> Act -> Learn
+Sources -> Observations -> Processors -> Views -> Agent/UI actions -> New Observations -> ...
 ```
 
-## Why it exists
+![Info loop architecture](assets/info-loop.svg)
 
-This project is not a notes app and not a single agent wrapper.
-It is the substrate for:
+## Core Loop
 
-- current surface awareness
-- work focus routing
-- project state
-- daily memory
-- long-term user preference memory
-- browser / Screenpipe / project / agent task integration
+Info has one loop:
+
+```text
+Observation -> Processor -> View -> Action -> Observation
+```
+
+Everything useful becomes a View:
+
+- current state is a View
+- a suggestion is a View
+- a task is a View
+- a result is a View
+- feedback is a View family
+- memory is a View family
 
 The point is simple: what a human can inspect, an agent should be able to inspect too. What a human can operate, an agent should be able to operate too.
 
@@ -32,6 +39,9 @@ These are the main top-level View families today:
 - `project.current`
 - `memory.daily`
 - `memory.profile`
+- `task.*`
+- `result.*`
+- `feedback.*`
 
 Use `pnpm mf --json state` and `pnpm mf --json view latest <view_type>` to inspect them.
 
