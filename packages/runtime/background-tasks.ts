@@ -3,6 +3,7 @@ import { ContextStore } from "@info/core";
 import type { ContextView, StoredContextRecord, StoredContextView } from "@info/core";
 import { signalFromObject } from "@info/programs/signals.js";
 import type { AutonomyProfile } from "@info/programs/types.js";
+import { buildAgentTaskList } from "./agent-tasks.js";
 
 const BACKGROUND_TASK_TYPES = ["task.background_research", "task.toolsmith_prototype"] as const;
 const BACKGROUND_TASK_SOURCE_TYPES = ["project.current", "work.focus_set"] as const;
@@ -72,6 +73,7 @@ export async function processAmbientBackgroundTasks(options: {
     }
   }
 
+  if (write && !dryRun) buildAgentTaskList({ write: true }, store);
   if (mode === "queue") return result(generatedAt, mode, tasks, writtenViews, 0);
 
   const candidates = store.listViews({ view_types: [...BACKGROUND_TASK_TYPES], active_only: true, limit })
@@ -136,6 +138,7 @@ export async function processAmbientBackgroundTasks(options: {
     if (write && !dryRun) markTaskProcessed(store, view, entry, generatedAt);
   }
 
+  if (write && !dryRun) buildAgentTaskList({ write: true }, store);
   return result(generatedAt, mode, tasks, writtenViews);
 }
 
@@ -310,6 +313,7 @@ function markTaskProcessed(store: ContextStore, view: StoredContextView, task: A
     related_records: view.source_records,
     payload: task,
   });
+  buildAgentTaskList({ write: true }, store);
 }
 
 function runtimeForTask(view: StoredContextView, override?: string): string | undefined {
@@ -326,7 +330,7 @@ function requiredAutonomyForTask(view: StoredContextView): AutonomyProfile {
 
 function taskAlreadyFinished(view: StoredContextView): boolean {
   const status = isRecord(view.content?.background_task) ? view.content.background_task.status : undefined;
-  return status === "completed" || status === "failed";
+  return status === "completed" || status === "failed" || status === "cancelled";
 }
 
 function queuedTaskExistsForSource(store: ContextStore, source: StoredContextView): boolean {

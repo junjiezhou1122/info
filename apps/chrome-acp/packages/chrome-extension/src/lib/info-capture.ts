@@ -118,6 +118,7 @@ export async function handleInfoCaptureMessage(message: any, sender: chrome.runt
     return pollContextViews(message);
   }
   if (message?.type === "list-ambient-tasks") {
+    if (shouldUseAgentTasksEndpoint(message)) return pollAgentTasks(message);
     // Browser-side shorthand: list views that look like ambient task outputs.
     // We filter on view type prefixes produced by program.browser_ambient
     // (analysis.*) and the proactive ambient programs (advice.* / task.*).
@@ -130,6 +131,12 @@ export async function handleInfoCaptureMessage(message: any, sender: chrome.runt
       limit: message.limit ?? 30,
       activeOnly: message.activeOnly ?? false,
     });
+  }
+  if (message?.type === "agent-tasks") {
+    return runAgentTasksAction(message);
+  }
+  if (message?.type === "agent-task-action") {
+    return updateAgentTask(message);
   }
   if (message?.type === "trigger-ambient") {
     // Fire-and-forget ambient request for the current tab. Used by both
@@ -570,6 +577,80 @@ async function pollContextViews(message: any) {
   }
 }
 
+function shouldUseAgentTasksEndpoint(message: any) {
+  const prefix = typeof message.viewTypePrefix === "string" ? message.viewTypePrefix : undefined;
+  const types = Array.isArray(message.viewTypes) ? message.viewTypes : [];
+  if (prefix === "agent." || prefix === "task.") return true;
+  return types.some((type: unknown) => type === "agent.task_list" || type === "task.background_research" || type === "task.toolsmith_prototype");
+}
+
+async function pollAgentTasks(message: any) {
+  const settings = await getSettings();
+  const endpoint = agentTasksEndpoint(settings, { limit: message.limit ?? 8, refresh: message.refresh !== false });
+  try {
+    const response = await fetch(endpoint);
+    const body = await response.json().catch(() => ({}));
+    const taskList = body?.task_list ?? {};
+    const taskViews = Array.isArray(taskList.items) ? taskList.items : [];
+    return {
+      ok: response.ok && Boolean(body.ok),
+      status: response.status,
+      endpoint,
+      ...body,
+      views: Array.isArray(body.views) ? body.views : [body.view, ...taskViews].filter(Boolean),
+    };
+  } catch (error) {
+    return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error), endpoint };
+  }
+}
+
+async function runAgentTasksAction(message: any) {
+  const settings = await getSettings();
+  const endpoint = agentTasksEndpoint(settings);
+  const request: Record<string, unknown> = {
+    mode: message.mode === "process" || message.mode === "queue_and_process" ? message.mode : "queue",
+  };
+  if (typeof message.runtime === "string" && message.runtime.trim()) request.runtime = message.runtime.trim();
+  if (typeof message.limit === "number" && Number.isFinite(message.limit)) request.limit = message.limit;
+  if (typeof message.dryRun === "boolean") request.dry_run = message.dryRun;
+  if (typeof message.write === "boolean") request.write = message.write;
+  if (typeof message.autonomy === "string" && message.autonomy.trim()) request.autonomy = message.autonomy.trim();
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const body = await response.json().catch(() => ({}));
+    return { ok: response.ok && Boolean(body.ok), status: response.status, endpoint, request, ...body };
+  } catch (error) {
+    return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error), endpoint, request };
+  }
+}
+
+async function updateAgentTask(message: any) {
+  if (typeof message.taskId !== "string" || !message.taskId.trim()) return { ok: false, error: "taskId is required" };
+  const settings = await getSettings();
+  const endpoint = agentTaskActionEndpoint(settings, message.taskId);
+  const request: Record<string, unknown> = {
+    action: message.action === "retry" ? "retry" : message.action === "cancel" ? "cancel" : undefined,
+  };
+  if (!request.action) return { ok: false, error: "action must be cancel or retry" };
+  if (typeof message.reason === "string" && message.reason.trim()) request.reason = message.reason.trim();
+  request.actor = "chrome_acp";
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const body = await response.json().catch(() => ({}));
+    return { ok: response.ok && Boolean(body.ok), status: response.status, endpoint, request, ...body };
+  } catch (error) {
+    return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error), endpoint, request };
+  }
+}
+
 async function postViewFeedback(message: any) {
   if (!message.viewId || !message.feedbackType) return { ok: false, error: "viewId and feedbackType are required" };
   const settings = await getSettings();
@@ -733,6 +814,22 @@ function contextViewsEndpoint(settings: InfoSettings, options: any = {}) {
   if (options.cursor) url.searchParams.set("cursor", options.cursor);
   if (options.query) url.searchParams.set("query", options.query);
   if (options.sourceRecordId) url.searchParams.set("source_record_id", options.sourceRecordId);
+  return url.toString();
+}
+
+function agentTasksEndpoint(settings: InfoSettings, options: any = {}) {
+  const url = new URL(settings.endpoint || DEFAULT_SETTINGS.endpoint);
+  url.pathname = "/agent/tasks";
+  url.search = "";
+  if (options.limit) url.searchParams.set("limit", String(options.limit));
+  if (options.refresh) url.searchParams.set("refresh", "true");
+  return url.toString();
+}
+
+function agentTaskActionEndpoint(settings: InfoSettings, taskId: string) {
+  const url = new URL(settings.endpoint || DEFAULT_SETTINGS.endpoint);
+  url.pathname = `/agent/tasks/${encodeURIComponent(taskId)}`;
+  url.search = "";
   return url.toString();
 }
 

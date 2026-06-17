@@ -50,7 +50,7 @@ pnpm run dev
 
 `pnpm run http` 是同一个 standalone HTTP runtime 的显式别名。
 
-Runtime UI lives in `packages/ui` and uses its own Vite build boundary:
+Runtime UI lives in `apps/ui` and uses its own Vite build boundary:
 
 ```bash
 pnpm run ui:dev
@@ -89,7 +89,7 @@ pnpm run episode:summary -- <thread_id>
 
 ## Chrome ACP Extension
 
-`apps/chrome-acp/packages/chrome-extension/` 是当前 Chrome MV3 插件入口：采集当前页面 title/url/正文/选中文本/scroll depth/dwell time，并把 selection explain/translate、writing ambient、YouTube caption state、当前页 automation 工具都接到 Chrome ACP side panel。普通采集写入 `/context/ingest`；Save & Analyze 写入 `/context/ingest?process=true&cascade_views=true`，由 Program runtime 触发 AgentTask 并产出 Views。Ask Claude Code 会把当前页写成 Observation 后调用 `/agent-tasks?cascade_views=true`，默认 runtime 是 `claude_code`。side panel 可以实时检索所有 active Views、按当前页面搜索 Views，并对选中的 View 写 feedback。
+`apps/chrome-acp/packages/chrome-extension/` 是当前 Chrome MV3 插件入口：采集当前页面 title/url/正文/选中文本/scroll depth/dwell time，并把 selection explain/translate、writing ambient、YouTube caption state、当前页 automation 工具都接到 Chrome ACP side panel。普通采集写入 `/context/ingest`；Save & Analyze 写入 `/context/ingest?process=true&cascade_views=true`，由 Program runtime 触发 AgentTask 并产出 Views。Ask Claude Code 会把当前页写成 Observation 后调用 `/agent/tasks?refresh=true`，默认 runtime 是 `claude_code`。side panel 可以实时检索所有 active Views、按当前页面搜索 Views，并对选中的 View 写 feedback。
 
 旧的独立插件已经归档到 `archive/browser-extension-legacy/`，只作为迁移参考和兼容测试 fixture，不再是 active workspace package。
 

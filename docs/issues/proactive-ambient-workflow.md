@@ -182,12 +182,28 @@ task.toolsmith_prototype
   -> brief.background_research / draft.tool_prototype
 ```
 
+Realtime vs queued policy:
+
+```text
+reflex / glance / think  -> direct processor or realtime LLM path
+work / background        -> task View + agent.task_list queue surface
+```
+
+`agent.task_list` is the canonical queue View for slow AgentTask work. It
+summarizes `task.background_research` and `task.toolsmith_prototype` Views with
+status, runtime, output type, provenance counts, and the realtime/queued policy.
+Chrome ACP, the Info UI, HTTP clients, and other agents should read this View or
+the `/agent/tasks` HTTP endpoint instead of each inventing a task list.
+
 Entry points:
 
 ```text
 pnpm run background-tasks
 pnpm run runtime:tick -- --background-tasks
 pnpm run daemon -- --background-tasks
+pnpm mf --json task list --refresh
+pnpm mf --json task queue --limit 8
+pnpm mf --json task process --runtime local_mock --limit 8
 ```
 
 Environment controls:
@@ -220,9 +236,18 @@ draft.tool_prototype
 The Ambient tab groups the same family by workflow:
 
 ```text
+Queue: agent.task_list
 Research: advice.research, task.background_research, brief.background_research
 Writing: advice.writing_assist, draft.writing_continuation
 Toolsmith: opportunity.tool, task.toolsmith_prototype, draft.tool_prototype, tool.prototype_artifact
+```
+
+HTTP clients can use:
+
+```text
+GET  /agent/tasks?refresh=true
+POST /agent/tasks { "mode": "queue" }
+POST /agent/tasks { "mode": "process", "runtime": "local_mock" }
 ```
 
 Feedback is available from both the runtime UI and the browser writing bubble. Runtime UI actions post as `runtime.ui.ambient`; inline browser writing actions post as `editor.inline_assist`.

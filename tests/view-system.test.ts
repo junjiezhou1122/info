@@ -36,9 +36,10 @@ test("view registry supports dynamic arbitrary view families", () => {
   assert.equal(registry.get("youtube.caption_fragment")?.title, "YouTube Caption Fragment");
   assert.deepEqual(registry.list({ namespace: "youtube" }).map(spec => spec.view_type), ["youtube.caption_fragment"]);
   assert.equal(registry.has("state.surface"), true);
-  assert.equal(registry.get("memory.candidate")?.lifecycle, "session");
+  assert.equal(registry.get("memory.daily")?.lifecycle, "long_term");
+  assert.equal(registry.get("memory.daily")?.producers?.some(producer => producer.kind === "manual"), true);
+  assert.equal(registry.get("memory.profile")?.producers?.some(producer => producer.kind === "agent"), true);
   assert.equal(registry.get("agent.case_memory")?.lifecycle, "long_term");
-  assert.equal(registry.get("memory.candidate")?.producers?.[0]?.id, "processor.memory_candidate");
 });
 
 test("registry can merge legacy catalog-shaped definitions", () => {

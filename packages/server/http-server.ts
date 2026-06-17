@@ -4,9 +4,10 @@ import { loadLocalEnv } from "./env.js";
 import { ContextStore } from "@info/core";
 import { ContextArtifactSchema, ContextConnectorSchema, ContextPackRequestSchema, ContextQuerySchema, ContextRecordSchema, ContextSchemaSchema, ContextViewSchema, FeedbackInputSchema, RuntimeEventSchema } from "@info/core";
 import { enrichWithJinaReader, shouldAutoEnrichBrowserRecord } from "@info/sensors";
-import { fetchScreenpipeFrameContext, fetchScreenpipeFrameImage, fetchScreenpipeRecords } from "@info/sensors";
+import { fetchScreenpipeFrameImage, fetchScreenpipeRecords } from "@info/sensors";
 import { aiSessionRefToRecord, locateAiSessions } from "@info/sensors";
 import { publicRuntimeSettings, runtimeSettings, runtimeStatus, saveRuntimeSettings } from "@info/runtime/runtime.js";
+import { buildAgentTaskList, queueOrProcessAgentTasks, updateAgentTaskLifecycle } from "@info/runtime/agent-tasks.js";
 import { activeThreadId, interpretThread } from "@info/views/threads/thread-interpreter.js";
 import { persistThreadEvidenceMap } from "@info/views/threads/thread-evidence.js";
 import { mergeThreads, splitThread } from "@info/views/threads/thread-ops.js";
@@ -60,13 +61,6 @@ export function createContextHttpHandler(store: ContextStore) {
 
     if (req.method === "GET" && url.pathname === "/health") {
       return send(res, 200, { ok: true });
-    }
-
-    const frameContextMatch = url.pathname.match(/^\/screenpipe\/frames\/([^/]+)\/context$/);
-    if (req.method === "GET" && frameContextMatch) {
-      const result = await fetchScreenpipeFrameContext(decodeURIComponent(frameContextMatch[1]));
-      if (!result.ok) return send(res, 502, { ok: false, error: result.error, frame_id: result.frame_id });
-      return send(res, 200, { ok: true, frame_id: result.frame_id, context: result.context, record: result.record });
     }
 
     const frameMatch = url.pathname.match(/^\/screenpipe\/frames\/([^/]+)$/);
@@ -301,6 +295,58 @@ export function createContextHttpHandler(store: ContextStore) {
         families: VIEW_FAMILY_DEFINITIONS,
         manual_create: manualViewFamilies(),
       });
+    }
+
+    if (req.method === "GET" && url.pathname === "/agent/tasks") {
+      const pluginParam = url.searchParams.get("plugin_id");
+      const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
+      if (pluginParam && !plugin) return send(res, 404, pluginNotFoundBody(pluginParam));
+      const refresh = url.searchParams.get("refresh") === "true" && !pluginParam;
+      const taskList = buildAgentTaskList({ write: refresh, limit: Number(url.searchParams.get("limit") ?? 100) }, store);
+      const views = filterViewsForPlugin(taskList.items.map(item => store.getView(item.id)).filter((view): view is NonNullable<typeof view> => Boolean(view)), store, plugin);
+      return send(res, 200, {
+        ok: true,
+        task_list: { ...taskList, items: taskList.items.filter(item => views.some(view => view.id === item.id)) },
+        view: taskList.latest_view,
+        plugin_id: pluginParam ?? undefined,
+        plugin_loaded: pluginParam ? Boolean(plugin) : undefined,
+      });
+    }
+
+    if (req.method === "POST" && url.pathname === "/agent/tasks") {
+      const body = await readJson(req);
+      const pluginParam = url.searchParams.get("plugin_id") ?? (typeof body.plugin_id === "string" ? body.plugin_id : undefined);
+      const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
+      if (pluginParam) return send(res, 403, { ok: false, error: "plugins cannot queue or process agent tasks", plugin_id: pluginParam, plugin_loaded: Boolean(plugin) });
+      const mode = body.mode === "process" || body.mode === "queue" || body.mode === "queue_and_process" ? body.mode : "queue";
+      const iii = mode === "queue" ? undefined : await createLocalInfoIiiRuntime(store);
+      const result = await queueOrProcessAgentTasks({
+        mode,
+        iii,
+        runtime: typeof body.runtime === "string" ? body.runtime : undefined,
+        dry_run: body.dry_run === true,
+        limit: Number(body.limit ?? 8),
+        autonomy: body.autonomy,
+        write: body.write !== false,
+      }, store);
+      return send(res, 200, result);
+    }
+
+    if (req.method === "POST" && url.pathname.startsWith("/agent/tasks/")) {
+      const taskId = decodeURIComponent(url.pathname.slice("/agent/tasks/".length));
+      const body = await readJson(req);
+      const pluginParam = url.searchParams.get("plugin_id") ?? (typeof body.plugin_id === "string" ? body.plugin_id : undefined);
+      const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
+      if (pluginParam) return send(res, 403, { ok: false, error: "plugins cannot update agent tasks", plugin_id: pluginParam, plugin_loaded: Boolean(plugin) });
+      const action = body.action === "retry" ? "retry" : body.action === "cancel" ? "cancel" : undefined;
+      if (!action) return send(res, 400, { ok: false, error: "agent task action must be cancel or retry" });
+      const actor = body.actor === "user" || body.actor === "connector" || body.actor === "system" || body.actor === "plugin" ? body.actor : "agent";
+      const result = updateAgentTaskLifecycle(taskId, action, {
+        actor,
+        reason: typeof body.reason === "string" ? body.reason : undefined,
+        write: body.write !== false,
+      }, store);
+      return send(res, result.ok ? 200 : 404, result);
     }
 
     if (req.method === "GET" && url.pathname === "/context/views/families") {

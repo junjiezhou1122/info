@@ -1,16 +1,10 @@
-import type { ActivityTimelineResponse, ContextViewSummary, FeedbackResponse, MemoryCandidateContent, MemoryGateDecision, ProjectCurrentContent, ProcessorRun, RuntimeSettings, RuntimeSettingsResponse, RuntimeTickResponse, ScreenpipeFrameContextResponse, ViewCatalogResponse, ViewFamiliesResponse, ViewListResponse, WorkFocusSetContent } from "./types";
+import type { ActivityTimelineResponse, ContextViewSummary, FeedbackResponse, MemoryCandidateContent, MemoryGateDecision, ProjectCurrentContent, ProcessorRun, RuntimeSettings, RuntimeSettingsResponse, RuntimeTickResponse, ViewCatalogResponse, ViewFamiliesResponse, ViewListResponse, WorkFocusSetContent } from "./types";
 
 const API_BASE = import.meta.env.VITE_CONTEXT_API_BASE ?? "http://localhost:3111";
 const DEFAULT_TIMEOUT_MS = 8_000;
 
 export function screenpipeFrameUrl(frameId: string | number): string {
   return `${API_BASE}/screenpipe/frames/${encodeURIComponent(String(frameId))}`;
-}
-
-export async function fetchScreenpipeFrameContext(frameId: string | number): Promise<ScreenpipeFrameContextResponse> {
-  const res = await fetchWithTimeout(`${API_BASE}/screenpipe/frames/${encodeURIComponent(String(frameId))}/context`, undefined, 12_000);
-  if (!res.ok) throw new Error(`screenpipe frame context failed: ${res.status}`);
-  return res.json();
 }
 
 export async function syncScreenpipe(windowMinutes = 15): Promise<RuntimeTickResponse> {
@@ -173,10 +167,15 @@ export async function fetchMemoryGateViews(): Promise<ContextViewSummary[]> {
 }
 
 export async function fetchProjectCurrentViews(): Promise<ContextViewSummary[]> {
-  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=project.current&active_only=true&limit=20`, undefined, 8_000);
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=project.current,project.current_context&active_only=true&limit=40`, undefined, 8_000);
   if (!res.ok) throw new Error(`project.current fetch failed: ${res.status}`);
   const body = await res.json();
-  return (body.views ?? []) as ContextViewSummary[];
+  return ((body.views ?? []) as ContextViewSummary[]).sort((a, b) => {
+    if (a.view_type === b.view_type) return Date.parse(b.updated_at ?? "") - Date.parse(a.updated_at ?? "");
+    if (a.view_type === "project.current") return -1;
+    if (b.view_type === "project.current") return 1;
+    return a.view_type.localeCompare(b.view_type);
+  });
 }
 
 export async function fetchWorkFocusSetViews(): Promise<ContextViewSummary[]> {

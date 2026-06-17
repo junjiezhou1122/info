@@ -1,7 +1,13 @@
-import { ContextStore, filterViewsByQuery, type StoredContextView } from "@info/core";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { ContextStore, ContextViewSchema, filterViewsByQuery, type ContextView, type StoredContextRecord, type StoredContextView } from "@info/core";
 import { builtinViewSpecs, createViewRegistry, searchViewSpecs, type ViewSpec } from "@info/view-system";
+import { normalizeScreenpipeResult } from "@info/sensors";
+import { buildAgentTaskList, queueOrProcessAgentTasks } from "@info/runtime/agent-tasks.js";
 import {
   buildProcessorViewReport,
+  ProcessorRuntime,
   createCurrentPageRouterProcessor,
   createRouteCandidateProcessor,
   createScreenpipeSurfaceProcessor,
@@ -12,9 +18,57 @@ import { compileMemoryGate as compileMemoryGateView } from "@info/views";
 
 const registry = createViewRegistry(builtinViewSpecs());
 const store = new ContextStore();
+const CANONICAL_AGENT_SURFACE_VIEW_TYPES = [
+  "state.surface",
+  "work.focus_set",
+  "project.current",
+  "memory.daily",
+  "memory.profile",
+] as const;
+let jsonOutput = false;
+let currentCommand = "mf";
+
+type CliEnvelope<T> = {
+  ok: true;
+  command: string;
+  data: T;
+};
+
+type CliErrorEnvelope = {
+  ok: false;
+  command: string;
+  error: {
+    code: string;
+    message: string;
+  };
+};
 
 async function main(argv: string[]): Promise<void> {
+  const parsed = parseGlobalArgs(argv);
+  jsonOutput = parsed.json;
+  argv = parsed.argv;
+  currentCommand = ["mf", ...argv].join(" ");
   const [area, command, ...rest] = argv;
+  if (!area || area === "help" || area === "--help" || area === "-h") {
+    printHelp();
+    return;
+  }
+  if (area === "state") {
+    if (!command || command === "surface") {
+      printAgentSurfaceState();
+      return;
+    }
+    fail("unknown command", "UNKNOWN_COMMAND");
+    return;
+  }
+  if (area === "sensor") {
+    if (command === "screenpipe") {
+      await handleScreenpipeCommand(rest);
+      return;
+    }
+    fail("unknown command", "UNKNOWN_COMMAND");
+    return;
+  }
   if (area !== "view") {
     if (area === "processor") {
       if (command === "list") {
@@ -25,8 +79,20 @@ async function main(argv: string[]): Promise<void> {
         printProcessorReport();
         return;
       }
+      if (command === "run") {
+        await runProcessor(rest);
+        return;
+      }
     }
     if (area === "memory") {
+      if (command === "daily") {
+        handleMarkdownMemoryCommand("daily", rest);
+        return;
+      }
+      if (command === "profile") {
+        handleMarkdownMemoryCommand("profile", rest);
+        return;
+      }
       if (command === "list") {
         printMemoryList();
         return;
@@ -51,8 +117,21 @@ async function main(argv: string[]): Promise<void> {
         return;
       }
     }
-    printHelp();
-    process.exitCode = 1;
+    if (area === "task") {
+      if (command === "list") {
+        printAgentTaskList(rest);
+        return;
+      }
+      if (command === "queue") {
+        await runAgentTaskQueue("queue", rest);
+        return;
+      }
+      if (command === "process") {
+        await runAgentTaskQueue("process", rest);
+        return;
+      }
+    }
+    fail("unknown command", "UNKNOWN_COMMAND");
     return;
   }
 
@@ -91,7 +170,12 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  printHelp();
+  if (command === "upsert") {
+    upsertViewFromCli(rest);
+    return;
+  }
+
+  fail("unknown command", "UNKNOWN_COMMAND");
 }
 
 function builtInProcessors(): ProcessorDefinition[] {
@@ -115,11 +199,19 @@ function printProcessorList(): void {
       ...(processor.produces.events ?? []),
     ].join(",") || "-",
   }));
+  if (jsonOutput) {
+    emitJson({ processors: rows });
+    return;
+  }
   printTable(rows, ["processor_id", "runtime", "speed", "autonomy", "produces"]);
 }
 
 function printProcessorReport(): void {
   const report = buildProcessorViewReport(builtInProcessors(), registry);
+  if (jsonOutput) {
+    emitJson({ report });
+    return;
+  }
   for (const processor of report.processors) {
     out(`${processor.id}`);
     out(`  runtime: ${processor.runtime}`);
@@ -132,6 +224,125 @@ function printProcessorReport(): void {
   out(`warnings: ${report.warnings.length ? report.warnings.join("; ") : "none"}`);
 }
 
+async function runProcessor(args: string[]): Promise<void> {
+  const processorId = required(args[0], "processor_id");
+  const processor = builtInProcessors().find(item => item.id === processorId);
+  if (!processor) {
+    fail(`Processor not found or not runnable from mf: ${processorId}`, "PROCESSOR_NOT_FOUND");
+    return;
+  }
+  const recordId = valueAfter(args, "--record");
+  const viewId = valueAfter(args, "--view");
+  if (recordId && viewId) {
+    fail("processor run accepts either --record or --view, not both", "INVALID_ARGUMENT");
+    return;
+  }
+  const runtime = new ProcessorRuntime({ store, processors: [processor] });
+  if (recordId) {
+    const record = store.getRecord(recordId);
+    if (!record) {
+      fail(`Record not found: ${recordId}`, "RECORD_NOT_FOUND");
+      return;
+    }
+    const result = await runtime.processObservation(record);
+    emitProcessorRunResult(result);
+    return;
+  }
+  if (viewId) {
+    const view = store.getView(viewId);
+    if (!view) {
+      fail(`View not found: ${viewId}`, "VIEW_NOT_FOUND");
+      return;
+    }
+    const result = await runtime.processView(view);
+    emitProcessorRunResult(result);
+    return;
+  }
+  fail("processor run requires --record <id> or --view <id>", "INVALID_ARGUMENT");
+}
+
+function emitProcessorRunResult(result: Awaited<ReturnType<ProcessorRuntime["processObservation"]>>): void {
+  if (jsonOutput) {
+    emitJson({ result });
+    return;
+  }
+  out(`processors_matched: ${result.processors_matched.join(", ") || "-"}`);
+  out(`views_written: ${result.views_written.join(", ") || "-"}`);
+  out(`observations_written: ${(result.observations_written ?? []).join(", ") || "-"}`);
+  for (const run of result.runs) {
+    out(`${run.ok ? "ok" : "failed"} ${run.processor_id}`);
+    if (run.error) out(`  error: ${run.error}`);
+  }
+}
+
+function printAgentSurfaceState(): void {
+  const items = CANONICAL_AGENT_SURFACE_VIEW_TYPES.map(viewType => {
+    const latest = store.listViews({ view_types: [viewType], active_only: true, limit: 1 })[0];
+    return {
+      view_type: viewType,
+      spec: registry.get(viewType) ?? null,
+      latest: latest ? viewSummary(latest) : null,
+      provenance: latest ? provenanceSummary(latest) : null,
+    };
+  });
+  if (jsonOutput) {
+    emitJson({ views: items });
+    return;
+  }
+  printTable(items.map(item => ({
+    view_type: item.view_type,
+    latest: item.latest ? String(item.latest.id) : "-",
+    status: item.latest ? String(item.latest.status ?? "-") : "-",
+    updated_at: item.latest ? String(item.latest.updated_at ?? "-") : "-",
+  })), ["view_type", "latest", "status", "updated_at"]);
+}
+
+function printAgentTaskList(args: string[]): void {
+  const refresh = args.includes("--refresh");
+  const list = buildAgentTaskList({ write: refresh, limit: numberAfter(args, "--limit") ?? 100 }, store);
+  if (jsonOutput) {
+    emitJson({ task_list: list, view: list.latest_view ? viewSummary(list.latest_view) : null });
+    return;
+  }
+  out(`agent tasks: ${list.items.length}`);
+  out(`queued=${list.counts.queued} candidate=${list.counts.candidate} completed=${list.counts.completed} failed=${list.counts.failed} skipped=${list.counts.skipped}`);
+  printTable(list.items.map(item => ({
+    status: item.status,
+    view_type: item.view_type,
+    id: item.id,
+    runtime: item.runtime ?? "-",
+    title: (item.title ?? item.summary ?? "").slice(0, 100),
+  })), ["status", "view_type", "id", "runtime", "title"]);
+}
+
+async function runAgentTaskQueue(mode: "queue" | "process", args: string[]): Promise<void> {
+  const runtime = valueAfter(args, "--runtime");
+  const dryRun = args.includes("--dry-run");
+  const limit = numberAfter(args, "--limit");
+  const autonomy = valueAfter(args, "--autonomy") as any;
+  const result = await queueOrProcessAgentTasks({
+    mode,
+    runtime,
+    dry_run: dryRun,
+    limit,
+    autonomy,
+    write: !dryRun,
+  }, store);
+  if (jsonOutput) {
+    emitJson({ result });
+    return;
+  }
+  out(`mode=${result.mode} queued=${result.queued} processed=${result.processed} skipped=${result.skipped}`);
+  for (const task of result.tasks) out(`${task.status} ${task.task_view_type} ${task.task_view_id}${task.reason ? ` ${task.reason}` : ""}`);
+}
+
+function numberAfter(args: string[], flag: string): number | undefined {
+  const value = valueAfter(args, flag);
+  if (!value) return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
 function printViewList(specs: ViewSpec[]): void {
   const rows = specs.map(spec => ({
     view_type: spec.view_type,
@@ -139,6 +350,10 @@ function printViewList(specs: ViewSpec[]): void {
     producers: (spec.producers ?? []).map(producer => producer.id).join(",") || "-",
     purpose: spec.purpose,
   }));
+  if (jsonOutput) {
+    emitJson({ specs, rows });
+    return;
+  }
   printTable(rows, ["view_type", "lifecycle", "producers", "purpose"]);
 }
 
@@ -147,8 +362,16 @@ function printViewShow(viewType: string): void {
   const latest = store.listViews({ view_types: [viewType], active_only: true, limit: 5 });
 
   if (!spec) {
+    if (jsonOutput) {
+      emitJson({ spec: null, latest: latest.map(viewSummary) });
+      return;
+    }
     out(`View spec not found: ${viewType}`);
   } else {
+    if (jsonOutput) {
+      emitJson({ spec, latest: latest.map(viewSummary) });
+      return;
+    }
     out(`${spec.view_type}`);
     out(`  title: ${spec.title}`);
     out(`  lifecycle: ${spec.lifecycle}`);
@@ -172,6 +395,10 @@ function printViewShow(viewType: string): void {
 
 function printViewLatest(viewType: string): void {
   const latest = store.listViews({ view_types: [viewType], active_only: true, limit: 10 });
+  if (jsonOutput) {
+    emitJson({ view_type: viewType, views: latest.map(viewSummary) });
+    return;
+  }
   if (!latest.length) {
     out(`No active views found for ${viewType}`);
     return;
@@ -182,20 +409,57 @@ function printViewLatest(viewType: string): void {
 function printViewJson(viewType: string): void {
   const spec = registry.get(viewType);
   const latest = store.listViews({ view_types: [viewType], active_only: true, limit: 5 });
+  if (jsonOutput) {
+    emitJson({ spec, latest: latest.map(viewSummary) });
+    return;
+  }
   out(JSON.stringify({ spec, latest }, null, 2));
 }
 
 function printViewTrace(viewId: string): void {
   const view = store.getView(viewId);
   if (!view) {
-    err(`View not found: ${viewId}`);
-    process.exitCode = 1;
+    fail(`View not found: ${viewId}`, "VIEW_NOT_FOUND");
+    return;
+  }
+  const sourceRecords = (view.source_records ?? []).map(id => {
+    const record = store.getRecord(id);
+    return {
+      id,
+      schema: record?.schema.name ?? "missing",
+      title: record?.content?.title,
+      url: record?.content?.url,
+    };
+  });
+  const sourceViews = (view.source_views ?? []).map(id => {
+    const sourceView = store.getView(id);
+    return {
+      id,
+      view_type: sourceView?.view_type ?? "missing",
+      title: sourceView?.title,
+    };
+  });
+  if (jsonOutput) {
+    emitJson({
+      view: viewSummary(view),
+      provenance: {
+        producer: view.compiler?.id,
+        source_record_count: sourceRecords.length,
+        source_view_count: sourceViews.length,
+        source_records: sourceRecords,
+        source_views: sourceViews,
+        freshness: { updated_at: view.updated_at, created_at: view.created_at },
+        status: view.status,
+        confidence: view.confidence,
+        scope: view.scope ?? {},
+      },
+    });
     return;
   }
   out(`${view.view_type} ${view.id}`);
   out(`  title: ${view.title ?? "-"}`);
   out(`  compiler: ${view.compiler?.id ?? "-"} ${view.compiler?.mode ?? ""}`.trimEnd());
-  out(`  confidence: ${view.confidence ?? "-"}`);
+  out(`  status: ${view.status ?? "-"}`);
   out(`  source_records: ${(view.source_records ?? []).join(", ") || "-"}`);
   for (const id of view.source_records ?? []) {
     const record = store.getRecord(id);
@@ -212,6 +476,10 @@ function printViewTrace(viewId: string): void {
 function printViewSearch(query: string): void {
   const specs = searchViewSpecs(registry.list(), query);
   const views = filterViewsByQuery(store.listViews({ active_only: true, limit: 100 }), query).slice(0, 20);
+  if (jsonOutput) {
+    emitJson({ query, specs, views: views.map(viewSummary) });
+    return;
+  }
   out("Specs");
   printViewList(specs);
   out("");
@@ -223,7 +491,260 @@ function printViewSearch(query: string): void {
   for (const view of views) printStoredViewLine(view);
 }
 
+function upsertViewFromCli(args: string[]): void {
+  const inputPath = required(args[0], "json_file_or_stdin");
+  const actor = actorFromArgs(args);
+  const raw = inputPath === "-" ? readFileSync(0, "utf8") : readFileSync(inputPath, "utf8");
+  const parsedJson = parseJson(raw, inputPath);
+  if (!parsedJson.ok) {
+    fail(parsedJson.error, "INVALID_JSON");
+    return;
+  }
+  const parsed = ContextViewSchema.safeParse(parsedJson.value);
+  if (!parsed.success) {
+    fail(`Invalid ContextView: ${JSON.stringify(parsed.error.flatten())}`, "INVALID_VIEW");
+    return;
+  }
+  const view = normalizeCliUpsertView(parsed.data, actor);
+  const stored = store.upsertView(view);
+  store.appendRuntimeEvent({
+    event_type: "agent_surface.view_upserted",
+    actor,
+    status: "completed",
+    subject_type: "view",
+    subject_id: stored.id,
+    related_records: stored.source_records,
+    related_views: stored.source_views,
+    plugin_id: stored.scope?.plugin_id,
+    payload: {
+      view_type: stored.view_type,
+      command: currentCommand,
+      created_or_updated_by: actor,
+    },
+  });
+  if (jsonOutput) {
+    emitJson({ view: viewSummary(stored), provenance: provenanceSummary(stored) });
+    return;
+  }
+  out(`upserted ${stored.view_type} ${stored.id}`);
+}
+
+async function handleScreenpipeCommand(args: string[]): Promise<void> {
+  const subcommand = required(args[0], "screenpipe_command");
+  const rest = args.slice(1);
+  if (subcommand === "status") {
+    printScreenpipeStatus(rest);
+    return;
+  }
+  if (subcommand === "search") {
+    printScreenpipeSearch(rest);
+    return;
+  }
+  fail("unknown command", "UNKNOWN_COMMAND");
+}
+
+function printScreenpipeStatus(args: string[]): void {
+  const screenpipeArgs = ["status", "--json", ...passthroughScreenpipeArgs(args, new Set(["--port", "--data-dir"]))];
+  const result = runScreenpipeJson(screenpipeArgs);
+  if (!result.ok) {
+    fail(result.error, "SCREENPIPE_FAILED");
+    return;
+  }
+  if (jsonOutput) {
+    emitJson({ status: result.value, screenpipe_args: screenpipeArgs });
+    return;
+  }
+  out(JSON.stringify(result.value, null, 2));
+}
+
+function printScreenpipeSearch(args: string[]): void {
+  const write = args.includes("--write");
+  const query = positionalArgs(args)[0];
+  const allowedFlags = new Set([
+    "--content-type",
+    "--limit",
+    "-n",
+    "--offset",
+    "--start",
+    "--end",
+    "--app",
+    "--window",
+    "--browser-url",
+    "--frame-name",
+    "--speaker",
+    "--device-name",
+    "--machine-id",
+    "--min-length",
+    "--max-length",
+    "--max-content-length",
+    "--data-dir",
+  ]);
+  const booleanFlags = new Set(["--focused", "--on-screen"]);
+  const screenpipeArgs = [
+    "search",
+    ...passthroughScreenpipeArgs(args.filter(arg => arg !== "--write"), allowedFlags, booleanFlags),
+    "--json",
+    ...(query ? [query] : []),
+  ];
+  const result = runScreenpipeJsonLines(screenpipeArgs);
+  if (!result.ok) {
+    fail(result.error, "SCREENPIPE_FAILED");
+    return;
+  }
+  const records = result.items.map((item, index) => normalizeScreenpipeResult(item, index, "screenpipe-cli", query));
+  const written = write ? records.map(record => store.insertRecord(record)).map(record => record.id) : [];
+  if (write) {
+    store.appendRuntimeEvent({
+      event_type: "agent_surface.screenpipe_search",
+      actor: "agent",
+      status: "completed",
+      subject_type: "query",
+      subject_id: `screenpipe:search:${Date.now()}`,
+      related_records: written,
+      payload: {
+        command: currentCommand,
+        screenpipe_args: screenpipeArgs,
+        result_count: records.length,
+        written_count: written.length,
+        raw_media_stays_in_screenpipe: true,
+      },
+    });
+  }
+  if (jsonOutput) {
+    emitJson({
+      query,
+      screenpipe_args: screenpipeArgs,
+      count: records.length,
+      written_records: written,
+      records: records.map(recordSummary),
+      raw_items: result.items,
+    });
+    return;
+  }
+  out(`screenpipe records: ${records.length}`);
+  if (write) out(`written_records: ${written.join(", ") || "-"}`);
+  for (const record of records.slice(0, 10)) {
+    out(`  ${record.schema.name} ${record.id} ${record.content?.title ?? ""}`.trim());
+  }
+}
+
+function handleMarkdownMemoryCommand(kind: "daily" | "profile", args: string[]): void {
+  const subcommand = required(args[0], `memory_${kind}_command`);
+  const rest = args.slice(1);
+  if (subcommand === "show") {
+    showMarkdownMemory(kind, rest);
+    return;
+  }
+  if (subcommand === "write") {
+    writeMarkdownMemory(kind, rest);
+    return;
+  }
+  if (subcommand === "sync") {
+    syncMarkdownMemory(kind, rest);
+    return;
+  }
+  fail("unknown command", "UNKNOWN_COMMAND");
+}
+
+function showMarkdownMemory(kind: "daily" | "profile", args: string[]): void {
+  const target = markdownMemoryTarget(kind, args);
+  const markdown = existsSync(target.path) ? readFileSync(target.path, "utf8") : "";
+  const latest = store.listViews({ view_types: [target.view_type], active_only: true, limit: 20 })
+    .find(view => view.content?.markdown_path === target.relative_path || view.id === target.view_id);
+  if (jsonOutput) {
+    emitJson({ ...target, exists: existsSync(target.path), markdown, view: latest ? viewSummary(latest) : null });
+    return;
+  }
+  out(target.path);
+  out(markdown || "(empty)");
+}
+
+function writeMarkdownMemory(kind: "daily" | "profile", args: string[]): void {
+  const target = markdownMemoryTarget(kind, args);
+  const from = valueAfter(args, "--from");
+  const actor = actorFromArgs(args);
+  const markdown = from ? readFileSync(from, "utf8") : readFileSync(0, "utf8");
+  mkdirSync(dirname(target.path), { recursive: true });
+  writeFileSync(target.path, markdown);
+  const view = syncMarkdownMemoryView(target, markdown, actor);
+  if (jsonOutput) {
+    emitJson({ ...target, view: viewSummary(view), provenance: provenanceSummary(view) });
+    return;
+  }
+  out(`wrote ${target.path}`);
+  out(`synced ${view.view_type} ${view.id}`);
+}
+
+function syncMarkdownMemory(kind: "daily" | "profile", args: string[]): void {
+  const target = markdownMemoryTarget(kind, args);
+  if (!existsSync(target.path)) {
+    fail(`Markdown memory file not found: ${target.path}`, "MEMORY_MARKDOWN_NOT_FOUND");
+    return;
+  }
+  const view = syncMarkdownMemoryView(target, readFileSync(target.path, "utf8"), actorFromArgs(args));
+  if (jsonOutput) {
+    emitJson({ ...target, view: viewSummary(view), provenance: provenanceSummary(view) });
+    return;
+  }
+  out(`synced ${view.view_type} ${view.id}`);
+}
+
+function syncMarkdownMemoryView(target: MarkdownMemoryTarget, markdown: string, actor: "user" | "agent"): StoredContextView {
+  const view = store.upsertView({
+    id: target.view_id,
+    view_type: target.view_type,
+    title: target.title,
+    summary: firstNonHeadingLine(markdown),
+    status: "accepted",
+    compiler: {
+      id: actor === "agent" ? `agent.${target.kind}_memory_markdown` : `manual.${target.kind}_memory_markdown`,
+      version: "1",
+      mode: "deterministic",
+    },
+    content: {
+      date: target.date,
+      markdown_path: target.relative_path,
+      markdown,
+      summary: firstNonHeadingLine(markdown),
+    },
+    stability: "long_term",
+    privacy: { level: "private", retention: "normal", allow_external_llm: false, allow_external_reader: false },
+    metadata: {
+      markdown_backed: true,
+      editable: true,
+      actor,
+      updated_via: "agent_surface_cli",
+    },
+  });
+  store.appendRuntimeEvent({
+    event_type: "agent_surface.memory_markdown_synced",
+    actor,
+    status: "completed",
+    subject_type: "view",
+    subject_id: view.id,
+    related_views: [view.id],
+    payload: {
+      view_type: view.view_type,
+      markdown_path: target.relative_path,
+      command: currentCommand,
+    },
+  });
+  return view;
+}
+
+type MarkdownMemoryTarget = {
+  kind: "daily" | "profile";
+  view_type: "memory.daily" | "memory.profile";
+  view_id: string;
+  title: string;
+  relative_path: string;
+  path: string;
+  date: string;
+};
+
 const DURABLE_MEMORY_VIEW_TYPES = [
+  "memory.daily",
+  "memory.profile",
   "memory.preferences",
   "memory.workflow_patterns",
   "memory.skill_gaps",
@@ -239,6 +760,10 @@ const DURABLE_MEMORY_VIEW_TYPES = [
 
 function printMemoryList(): void {
   const views = store.listViews({ view_types: DURABLE_MEMORY_VIEW_TYPES, active_only: true, limit: 100 });
+  if (jsonOutput) {
+    emitJson({ memories: views.map(viewSummary) });
+    return;
+  }
   if (!views.length) {
     out("No durable memories found");
     return;
@@ -246,13 +771,17 @@ function printMemoryList(): void {
   printTable(views.map(view => ({
     view_type: view.view_type,
     id: view.id,
-    confidence: String(view.confidence ?? "-"),
-    claim: String(view.content?.claim ?? view.summary ?? view.title ?? "").slice(0, 120),
-  })), ["view_type", "id", "confidence", "claim"]);
+    status: String(view.status ?? "-"),
+    summary: String(view.content?.summary ?? view.content?.claim ?? view.summary ?? view.title ?? "").slice(0, 120),
+  })), ["view_type", "id", "status", "summary"]);
 }
 
 function printMemoryCandidates(): void {
   const views = store.listViews({ view_types: ["memory.candidate"], active_only: true, limit: 100 });
+  if (jsonOutput) {
+    emitJson({ candidates: views.map(viewSummary) });
+    return;
+  }
   if (!views.length) {
     out("No active memory candidates found");
     return;
@@ -260,17 +789,26 @@ function printMemoryCandidates(): void {
   printTable(views.map(view => ({
     id: view.id,
     target: String(view.content?.target_view_type ?? "-"),
-    confidence: String(view.content?.confidence ?? view.confidence ?? "-"),
     status: String(view.content?.gate_status ?? view.status ?? "-"),
     claim: String(view.content?.claim ?? view.summary ?? "").slice(0, 120),
-  })), ["id", "target", "confidence", "status", "claim"]);
+  })), ["id", "target", "status", "claim"]);
 }
 
 function printMemoryTrace(id: string): void {
   const view = store.getView(id);
   if (!view) {
-    err(`Memory view not found: ${id}`);
-    process.exitCode = 1;
+    fail(`Memory view not found: ${id}`, "MEMORY_NOT_FOUND");
+    return;
+  }
+  if (jsonOutput) {
+    emitJson({
+      memory: viewSummary(view),
+      memory_kind: view.content?.memory_kind,
+      target_view_type: view.content?.target_view_type ?? view.view_type,
+      gate_status: view.content?.gate_status ?? view.status,
+      durable_view_id: view.content?.durable_view_id,
+      source_candidate_ids: Array.isArray(view.content?.source_candidate_ids) ? view.content.source_candidate_ids : [],
+    });
     return;
   }
   printViewTrace(id);
@@ -284,8 +822,7 @@ function printMemoryTrace(id: string): void {
 function rejectMemoryCandidate(id: string, reason: string): void {
   const candidate = store.getView(id);
   if (!candidate || candidate.view_type !== "memory.candidate") {
-    err(`Memory candidate not found: ${id}`);
-    process.exitCode = 1;
+    fail(`Memory candidate not found: ${id}`, "MEMORY_CANDIDATE_NOT_FOUND");
     return;
   }
   const feedback = store.insertRecord({
@@ -298,6 +835,14 @@ function rejectMemoryCandidate(id: string, reason: string): void {
     privacy: { level: "private", retention: "normal" },
   });
   const result = compileMemoryGateView({ candidates: [candidate], reject_ids: [id], rejection_reason: reason, write: true }, store);
+  if (jsonOutput) {
+    emitJson({
+      candidate_id: id,
+      feedback_id: feedback.id,
+      decision: result.decisions[0]?.action ?? "none",
+    });
+    return;
+  }
   out(`rejected ${id}`);
   out(`feedback ${feedback.id}`);
   out(`decision ${result.decisions[0]?.action ?? "none"}`);
@@ -306,15 +851,21 @@ function rejectMemoryCandidate(id: string, reason: string): void {
 function promoteMemoryCandidate(id: string): void {
   const candidate = store.getView(id);
   if (!candidate || candidate.view_type !== "memory.candidate") {
-    err(`Memory candidate not found: ${id}`);
-    process.exitCode = 1;
+    fail(`Memory candidate not found: ${id}`, "MEMORY_CANDIDATE_NOT_FOUND");
     return;
   }
   const result = compileMemoryGateView({ candidates: [candidate], force_promote_ids: [id], write: true }, store);
   const decision = result.decisions[0];
   if (!decision || (decision.action !== "promote" && decision.action !== "merge")) {
-    err(`Memory candidate not promoted: ${id} (${decision && "reason" in decision ? decision.reason : "no decision"})`);
-    process.exitCode = 1;
+    fail(`Memory candidate not promoted: ${id} (${decision && "reason" in decision ? decision.reason : "no decision"})`, "MEMORY_CANDIDATE_NOT_PROMOTED");
+    return;
+  }
+  if (jsonOutput) {
+    emitJson({
+      candidate_id: id,
+      action: decision.action,
+      target: decision.action === "merge" ? decision.target_view_id : result.views[0]?.id ?? decision.target_view_type,
+    });
     return;
   }
   out(`${decision.action} ${id}`);
@@ -326,21 +877,277 @@ function printStoredViewLine(view: StoredContextView): void {
   out(`  ${view.view_type} ${view.id} ${view.updated_at} ${view.title ?? ""}`.trim());
 }
 
+function recordSummary(record: StoredContextRecord): Record<string, unknown> {
+  return {
+    id: record.id,
+    schema: record.schema.name,
+    source: record.source.type,
+    title: record.content?.title,
+    url: record.content?.url,
+    observed_at: record.time?.observed_at,
+  };
+}
+
+function runScreenpipeJson(args: string[]): { ok: true; value: unknown } | { ok: false; error: string } {
+  try {
+    const output = execFileSync("screenpipe", args, {
+      cwd: process.cwd(),
+      env: process.env,
+      encoding: "utf8",
+    }).trim();
+    return { ok: true, value: output ? JSON.parse(output) : {} };
+  } catch (error) {
+    return { ok: false, error: commandErrorMessage(error) };
+  }
+}
+
+function runScreenpipeJsonLines(args: string[]): { ok: true; items: unknown[] } | { ok: false; error: string } {
+  try {
+    const output = execFileSync("screenpipe", args, {
+      cwd: process.cwd(),
+      env: process.env,
+      encoding: "utf8",
+    }).trim();
+    if (!output) return { ok: true, items: [] };
+    return { ok: true, items: output.split(/\n+/).filter(Boolean).map(line => JSON.parse(line)) };
+  } catch (error) {
+    return { ok: false, error: commandErrorMessage(error) };
+  }
+}
+
+function commandErrorMessage(error: unknown): string {
+  if (error && typeof error === "object" && "stderr" in error) {
+    const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim();
+    if (stderr) return stderr;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function passthroughScreenpipeArgs(args: string[], namedFlags: Set<string>, booleanFlags = new Set<string>()): string[] {
+  const passthrough: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg.startsWith("-") || arg === "--write") continue;
+    if (booleanFlags.has(arg)) {
+      passthrough.push(arg);
+      continue;
+    }
+    if (namedFlags.has(arg)) {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith("--")) {
+        passthrough.push(arg);
+        continue;
+      }
+      passthrough.push(arg, value);
+      index += 1;
+    }
+  }
+  return passthrough;
+}
+
+function positionalArgs(args: string[]): string[] {
+  const valueFlags = new Set([
+    "--content-type",
+    "--limit",
+    "-n",
+    "--offset",
+    "--start",
+    "--end",
+    "--app",
+    "--window",
+    "--browser-url",
+    "--frame-name",
+    "--speaker",
+    "--device-name",
+    "--machine-id",
+    "--min-length",
+    "--max-length",
+    "--max-content-length",
+    "--data-dir",
+    "--port",
+    "--from",
+    "--date",
+    "--actor",
+  ]);
+  const positions: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (valueFlags.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (!arg.startsWith("-")) positions.push(arg);
+  }
+  return positions;
+}
+
+function markdownMemoryTarget(kind: "daily" | "profile", args: string[]): MarkdownMemoryTarget {
+  const date = valueAfter(args, "--date") ?? new Date().toISOString().slice(0, 10);
+  const relativePath = kind === "daily" ? join("memory", "daily", `${date}.md`) : join("memory", "profile", "user.md");
+  const root = process.env.INFO_MEMORY_ROOT ?? process.cwd();
+  return {
+    kind,
+    view_type: kind === "daily" ? "memory.daily" : "memory.profile",
+    view_id: kind === "daily" ? `memory:daily:${date}` : "memory:profile:user",
+    title: kind === "daily" ? `Daily memory ${date}` : "Memory profile",
+    relative_path: relativePath,
+    path: join(root, relativePath),
+    date,
+  };
+}
+
+function firstNonHeadingLine(markdown: string): string | undefined {
+  for (const line of markdown.split(/\r?\n/).map(item => item.trim())) {
+    if (line && !line.startsWith("#")) return line.slice(0, 240);
+  }
+  return undefined;
+}
+
 function printHelp(): void {
+  if (jsonOutput) {
+    emitJson({
+      usage: [
+        "pnpm mf [--json] state",
+        "pnpm mf [--json] view list",
+        "pnpm mf [--json] view show <view_type>",
+        "pnpm mf [--json] view json <view_type>",
+        "pnpm mf [--json] view latest <view_type>",
+        "pnpm mf [--json] view trace <view_id>",
+        "pnpm mf [--json] view search <query>",
+        "pnpm mf [--json] view upsert <json_file|-> [--actor agent|user]",
+        "pnpm mf [--json] processor list",
+        "pnpm mf [--json] processor report",
+        "pnpm mf [--json] processor run <processor_id> --record <record_id>",
+        "pnpm mf [--json] processor run <processor_id> --view <view_id>",
+        "pnpm mf [--json] task list [--refresh] [--limit 100]",
+        "pnpm mf [--json] task queue [--limit 8]",
+        "pnpm mf [--json] task process [--runtime local_mock|claude_code|acp_stdio] [--limit 8] [--dry-run]",
+        "pnpm mf [--json] sensor screenpipe status",
+        "pnpm mf [--json] sensor screenpipe search [query] [--write] [--focused] [--app <app>] [--browser-url <url>] [--window <title>] [--content-type <type>] [--speaker <speaker>] [--start <time>]",
+        "pnpm mf [--json] memory daily show|write|sync [--date YYYY-MM-DD] [--from file] [--actor agent|user]",
+        "pnpm mf [--json] memory profile show|write|sync [--from file] [--actor agent|user]",
+        "pnpm mf [--json] memory list",
+        "pnpm mf [--json] memory candidates",
+        "pnpm mf [--json] memory trace <memory_id>",
+        "pnpm mf [--json] memory reject <candidate_id> [reason]",
+        "pnpm mf [--json] memory promote <candidate_id>",
+      ],
+    });
+    return;
+  }
   out(`Usage:
-  pnpm mf view list
-  pnpm mf view show <view_type>
-  pnpm mf view json <view_type>
-  pnpm mf view latest <view_type>
-  pnpm mf view trace <view_id>
-  pnpm mf view search <query>
-  pnpm mf processor list
-  pnpm mf processor report
-  pnpm mf memory list
-  pnpm mf memory candidates
-  pnpm mf memory trace <memory_id>
-  pnpm mf memory reject <candidate_id> [reason]
-  pnpm mf memory promote <candidate_id>`);
+  pnpm mf [--json] state
+  pnpm mf [--json] view list
+  pnpm mf [--json] view show <view_type>
+  pnpm mf [--json] view json <view_type>
+  pnpm mf [--json] view latest <view_type>
+  pnpm mf [--json] view trace <view_id>
+  pnpm mf [--json] view search <query>
+  pnpm mf [--json] view upsert <json_file|-> [--actor agent|user]
+  pnpm mf [--json] processor list
+  pnpm mf [--json] processor report
+  pnpm mf [--json] processor run <processor_id> --record <record_id>
+  pnpm mf [--json] processor run <processor_id> --view <view_id>
+  pnpm mf [--json] task list [--refresh] [--limit 100]
+  pnpm mf [--json] task queue [--limit 8]
+  pnpm mf [--json] task process [--runtime local_mock|claude_code|acp_stdio] [--limit 8] [--dry-run]
+  pnpm mf [--json] sensor screenpipe status
+  pnpm mf [--json] sensor screenpipe search [query] [--write] [--focused] [--app <app>] [--browser-url <url>] [--window <title>] [--content-type <type>] [--speaker <speaker>] [--start <time>]
+  pnpm mf [--json] memory daily show|write|sync [--date YYYY-MM-DD] [--from file] [--actor agent|user]
+  pnpm mf [--json] memory profile show|write|sync [--from file] [--actor agent|user]
+  pnpm mf [--json] memory list
+  pnpm mf [--json] memory candidates
+  pnpm mf [--json] memory trace <memory_id>
+  pnpm mf [--json] memory reject <candidate_id> [reason]
+  pnpm mf [--json] memory promote <candidate_id>`);
+}
+
+function parseGlobalArgs(argv: string[]): { json: boolean; argv: string[] } {
+  return {
+    json: argv.includes("--json"),
+    argv: argv.filter(arg => arg !== "--json"),
+  };
+}
+
+function viewSummary(view: StoredContextView): Record<string, unknown> {
+  return {
+    id: view.id,
+    view_type: view.view_type,
+    title: view.title,
+    summary: view.summary,
+    status: view.status,
+    stability: view.stability,
+    updated_at: view.updated_at,
+    created_at: view.created_at,
+    source_records: view.source_records ?? [],
+    source_views: view.source_views ?? [],
+    producer: view.compiler?.id,
+    scope: view.scope ?? {},
+    content: view.content ?? {},
+  };
+}
+
+function provenanceSummary(view: StoredContextView): Record<string, unknown> {
+  return {
+    producer: view.compiler?.id,
+    source_record_count: (view.source_records ?? []).length,
+    source_view_count: (view.source_views ?? []).length,
+    freshness: { updated_at: view.updated_at, created_at: view.created_at },
+    status: view.status,
+    scope: view.scope ?? {},
+  };
+}
+
+function normalizeCliUpsertView(view: ContextView, actor: "user" | "agent"): ContextView {
+  return {
+    ...view,
+    compiler: view.compiler ?? {
+      id: actor === "agent" ? "agent.create_view" : "manual.create_view",
+      version: "1",
+      mode: "deterministic",
+    },
+    metadata: {
+      ...(view.metadata ?? {}),
+      created_via: actor === "agent" ? "agent_surface_cli" : "manual_cli",
+      actor,
+    },
+  };
+}
+
+function actorFromArgs(args: string[]): "user" | "agent" {
+  const value = valueAfter(args, "--actor") ?? "agent";
+  if (value === "agent" || value === "user") return value;
+  throw new Error("--actor must be agent or user");
+}
+
+function valueAfter(args: string[], flag: string): string | undefined {
+  const index = args.indexOf(flag);
+  if (index < 0) return undefined;
+  return args[index + 1];
+}
+
+function parseJson(raw: string, label: string): { ok: true; value: unknown } | { ok: false; error: string } {
+  try {
+    return { ok: true, value: JSON.parse(raw) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: `Invalid JSON from ${label}: ${message}` };
+  }
+}
+
+function emitJson<T>(data: T): void {
+  const envelope: CliEnvelope<T> = { ok: true, command: currentCommand, data };
+  out(JSON.stringify(envelope, null, 2));
+}
+
+function fail(message: string, code = "ERROR"): void {
+  if (jsonOutput) {
+    const envelope: CliErrorEnvelope = { ok: false, command: currentCommand, error: { code, message } };
+    err(JSON.stringify(envelope, null, 2));
+  } else {
+    err(message);
+  }
+  process.exitCode = 1;
 }
 
 function printTable(rows: Array<Record<string, string>>, columns: string[]): void {
@@ -373,6 +1180,5 @@ function err(message = ""): void {
 }
 
 main(process.argv.slice(2)).catch(error => {
-  err(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+  fail(error instanceof Error ? error.message : String(error));
 });

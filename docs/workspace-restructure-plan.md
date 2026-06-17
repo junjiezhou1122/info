@@ -3,6 +3,10 @@
 > 把 `src/` + `packages/` 重组为对齐核心概念模型的 pnpm workspace 真包结构。
 > 概念模型基线见 [`info-design-consensus.md`](info-design-consensus.md) 与
 > [`info-ambient-runtime-architecture.md`](info-ambient-runtime-architecture.md)。
+>
+> Status: this is now a historical migration plan. The active backend has moved
+> into `packages/*`, the active UI is `apps/ui`, and there is no active root
+> `src/` tree. Use `packages/README.md` for the current package map.
 
 ## 0. 为什么重构
 
@@ -24,9 +28,10 @@ Observation -> Context Graph -> Program -> Capability/Agent -> View -> Applicati
 2. **有 `packages/` 却无 `pnpm-workspace.yaml`。** 整个东西是被 `tsx` 拉平编译的单一 TS program
    （`tsconfig` include `src/**`+`packages/**`）。只有 `ui`、`browser-extension` 是真 workspace。
    `packages/connectors`、`packages/views` 是伪装成包的普通目录。
+   迁移后 Observation 来源已落到 `packages/sensors`。
 3. **三个分层违例：**
    - `src/broker` 反向 reach 进 `src/runtime`、`src/programs`
-   - `packages/views/visual-frame` → `packages/connectors/screenpipe`（编译时拉 connector）
+   - `packages/views/visual-frame` → `packages/connectors/screenpipe`（编译时拉 connector，迁移后为 `packages/sensors/screenpipe`）
    - `src/pipeline`（content-classifier）是与 `runtimeTick` 完全断开的第二条编译路径
 4. **重复与死代码：** `language-learning` 双份（`src/plugins` + `src/programs/builtins`）；
    `packages/evaluators` 仅 README；`worker.ts` 手抄 `http-server.ts` 路由子集；
@@ -38,15 +43,15 @@ Observation -> Context Graph -> Program -> Capability/Agent -> View -> Applicati
 
 ```text
 apps/          Applications —— 纯 HTTP，零代码耦合
-  @info/ui                 (现 packages/ui)
+  @info/ui                 (现 apps/ui)
   chrome-acp extension     (现 apps/chrome-acp/packages/chrome-extension)
 
 @info/server      HTTP API + iii worker（唯一对外暴露面）   现 src/server
 @info/runtime     Tick 编排：sensors→views→programs 串联     现 src/runtime
 @info/programs    Program 循环 + ProgramRuntime + 路由       现 src/programs
-@info/capabilities 可复用能力 + agent-runtime adapter        现 packages/adapters + src/programs/capabilities
+@info/capabilities 可复用能力 + agent-runtime adapter        现 packages/capabilities
 @info/views       所有 View 编译器                          现 packages/views + src/pipeline + src/threads + runtime 内 timeline 编译器
-@info/sensors     Observation 来源                          现 packages/connectors
+@info/sensors     Observation 来源                          现 packages/sensors
 @info/core        Kernel: types/schema/store(=Context Graph)/llm/env/policy/broker  现 src/core + src/broker + src/plugins
 ```
 
@@ -66,9 +71,9 @@ apps  ->  server  ->  runtime  ->  programs  ->  capabilities
 | 目标包 | 收纳现有目录 | 理由 |
 |---|---|---|
 | `@info/core` | `src/core`, `src/broker`, `src/plugins` | broker 本质是 policy-aware 图查询，属 kernel；plugins registry 是 manifest 读取，属 kernel |
-| `@info/sensors` | `packages/connectors/*` | Observation 来源，重命名 connectors→sensors 对齐术语 |
+| `@info/sensors` | `packages/sensors/*` | Observation 来源，重命名 connectors→sensors 对齐术语 |
 | `@info/views` | `packages/views/*`, `src/pipeline`, `src/threads`, `src/runtime/{timeline,activity-timeline,project-timeline,work-thread-view,episode-summary,correlation}` | 所有"把 records→View"的编译逻辑归一处 |
-| `@info/capabilities` | `packages/adapters/agent-runtime`, `src/programs/capabilities` | 可复用能力 + agent 执行后端 |
+| `@info/capabilities` | `packages/capabilities/agent-runtime`, `packages/programs/capabilities` | 可复用能力 + agent 执行后端 |
 | `@info/programs` | `src/programs/{runner,registry,types,signals,view-kinds,builtins}` | Program 循环引擎 |
 | `@info/runtime` | `src/runtime/{runtime,feedback,view-provenance,background-tasks,toolsmith-artifacts,screen-noise,triggers}` | tick 编排 |
 | `@info/server` | `src/server` | HTTP + worker |
@@ -101,10 +106,10 @@ apps  ->  server  ->  runtime  ->  programs  ->  capabilities
   workspace 解析。先不移动文件，仅让 workspace 能解析 `@info/*`（指向现有目录），验证基线仍绿。
 - **阶段 1｜`@info/core`**：`src/core` + `src/broker` + `src/plugins` → `packages/core/`。
   切断 broker 对 runtime/programs 的反向依赖（下沉 helper）。所有 `../core/x` → `@info/core`。
-- **阶段 2｜`@info/sensors`**：`packages/connectors/*` → `packages/sensors/`，import 改 `@info/core`。
+- **阶段 2｜`@info/sensors`**：`packages/connectors/*` 已迁移到 `packages/sensors/`，import 改 `@info/core`。
 - **阶段 3｜`@info/views`**：收 `packages/views` + `src/pipeline` + `src/threads` + runtime 内 timeline 编译器。
   修 visual-frame→sensor（摄取/编译分离）；并 pipeline 进统一调度；提取重复 regex。
-- **阶段 4｜`@info/capabilities`**：`packages/adapters/agent-runtime` + `src/programs/capabilities`。
+- **阶段 4｜`@info/capabilities`**：`packages/capabilities/agent-runtime` + `packages/programs/capabilities`。
 - **阶段 5｜`@info/programs`**：`src/programs/*`。合并双份 language-learning。
 - **阶段 6｜`@info/runtime`**：`src/runtime/*`（去掉已下沉到 views 的部分）。
 - **阶段 7｜`@info/server`**：`src/server`。`worker.ts` 复用 `http-server` 路由表。

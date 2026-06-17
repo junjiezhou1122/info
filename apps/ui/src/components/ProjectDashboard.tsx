@@ -67,8 +67,8 @@ export default function ProjectDashboard({
         {projects.map(project => (
           <button key={project.id} className={`pd-row ${selectedId === project.id ? "selected" : ""}`} onClick={() => { setSelectedId(project.id); onInspect?.({ view: project, loading: false }); }}>
             <div className="pd-row-top">
-              <span className="pd-row-type">project.current</span>
-              {typeof project.confidence === "number" && <b className="pd-row-confidence">{Math.round(project.confidence * 100)}%</b>}
+              <span className="pd-row-type">{project.view_type}</span>
+              <b className="pd-row-confidence">{sourceSummary(project)}</b>
             </div>
             <h4>{project.title || project.id}</h4>
             <p className="pd-row-summary">{project.summary || projectFocus(project) || "No summary."}</p>
@@ -141,7 +141,7 @@ function FocusSetSection({ focusSets }: { focusSets: ContextViewSummary[] }) {
             <li key={lane.lane_key}>
               <div>
                 <b>{lane.label}</b>
-                <span>{lane.lane_kind} · {formatConfidence(lane.confidence)} confidence</span>
+                <span>{lane.lane_kind} · {laneEvidenceSummary(lane)}</span>
               </div>
               <strong>{Math.round(lane.attention_share * 100)}%</strong>
             </li>
@@ -220,8 +220,19 @@ function projectList(view: ContextViewSummary | undefined, key: "open_questions"
   return Array.isArray(value) ? value : [];
 }
 
-function formatConfidence(value?: number) {
-  return typeof value === "number" ? `${Math.round(value * 100)}%` : "-";
+function sourceSummary(view: ContextViewSummary) {
+  const total = (view.source_record_count ?? view.source_records?.length ?? 0) + (view.source_view_count ?? view.source_views?.length ?? 0);
+  if (total > 0) return `${total} source${total === 1 ? "" : "s"}`;
+  return typeof view.compiler === "string" ? view.compiler : view.compiler?.id || "provenance";
+}
+
+function laneEvidenceSummary(lane: WorkFocusLane) {
+  const records = lane.source_records?.length ?? 0;
+  const routes = lane.candidate_route_ids?.length ?? 0;
+  const parts = [];
+  if (routes > 0) parts.push(`${routes} route${routes === 1 ? "" : "s"}`);
+  if (records > 0) parts.push(`${records} source${records === 1 ? "" : "s"}`);
+  return parts.join(" · ") || "provenance";
 }
 
 function relativeTime(iso?: string) {

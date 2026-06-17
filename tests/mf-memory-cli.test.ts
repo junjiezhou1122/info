@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "@info/core";
@@ -17,10 +17,10 @@ function withDb(fn: (dbPath: string, store: ContextStore) => void) {
   }
 }
 
-function mf(dbPath: string, args: string[]) {
+function mf(dbPath: string, args: string[], env: NodeJS.ProcessEnv = {}) {
   return execFileSync("node", ["--experimental-sqlite", "--import", "tsx", "scripts/mf.ts", ...args], {
     cwd: process.cwd(),
-    env: { ...process.env, CONTEXT_DB_PATH: dbPath },
+    env: { ...process.env, ...env, CONTEXT_DB_PATH: dbPath },
     encoding: "utf8",
   });
 }
@@ -74,6 +74,34 @@ test("mf memory candidates, list, and trace inspect memory views", () => withDb(
   assert.match(trace, /gate_status: candidate/);
   assert.match(trace, /target_view_type: memory\.preferences/);
   assert.match(trace, /record obs:memory-cli/);
+}));
+
+test("mf memory daily writes markdown-backed editable View", () => withDb((dbPath, store) => {
+  const memoryRoot = mkdtempSync(join(tmpdir(), "info-mf-memory-root-"));
+  const source = join(tmpdir(), `info-mf-daily-${Date.now()}.md`);
+  writeFileSync(source, "# 2026-06-17\n\nWorked on Agent Surface CLI contracts.\n");
+
+  const result = JSON.parse(mf(dbPath, ["--json", "memory", "daily", "write", "--date", "2026-06-17", "--from", source], { INFO_MEMORY_ROOT: memoryRoot })) as {
+    ok: boolean;
+    data: { relative_path: string; view: { id: string; view_type: string; content: Record<string, unknown> } };
+  };
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.relative_path, join("memory", "daily", "2026-06-17.md"));
+  assert.equal(result.data.view.id, "memory:daily:2026-06-17");
+  assert.equal(result.data.view.view_type, "memory.daily");
+  assert.match(String(result.data.view.content.markdown), /Agent Surface CLI/);
+  assert.equal(store.getView("memory:daily:2026-06-17")?.metadata?.markdown_backed, true);
+  assert.ok(store.listRuntimeEvents({ event_types: ["agent_surface.memory_markdown_synced"], limit: 10 }).some(event => event.subject_id === "memory:daily:2026-06-17"));
+
+  const show = JSON.parse(mf(dbPath, ["--json", "memory", "daily", "show", "--date", "2026-06-17"], { INFO_MEMORY_ROOT: memoryRoot })) as {
+    ok: boolean;
+    data: { exists: boolean; markdown: string; view: { id: string } | null };
+  };
+  assert.equal(show.ok, true);
+  assert.equal(show.data.exists, true);
+  assert.match(show.data.markdown, /Worked on Agent Surface/);
+  assert.equal(show.data.view?.id, "memory:daily:2026-06-17");
 }));
 
 test("mf memory reject records feedback and marks candidate rejected", () => withDb((dbPath, store) => {

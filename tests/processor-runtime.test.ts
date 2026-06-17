@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "@info/core";
@@ -153,8 +154,92 @@ test("runtime records unsupported runtimes as failed processor runs", async () =
 
   assert.equal(result.runs.length, 1);
   assert.equal(result.runs[0].ok, false);
-  assert.match(result.runs[0].error ?? "", /not implemented yet/);
+  assert.match(result.runs[0].error ?? "", /requires a handler or configured provider bridge/);
   assert.ok(store.listRuntimeEvents({ event_type: "processor.run.failed", plugin_id: "processor.remote_llm_placeholder", limit: 1 })[0]);
+}));
+
+test("cli processor runtime executes a JSON worker and writes returned drafts", async () => withStore(async (store) => {
+  const dir = mkdtempSync(join(tmpdir(), "info-processor-cli-"));
+  const worker = join(dir, "worker.mjs");
+  writeFileSync(worker, `
+const payload = JSON.parse(process.env.INFO_PROCESSOR_INPUT);
+process.stdout.write(JSON.stringify({
+  views: [{
+    type: "analysis.cli_worker",
+    title: "CLI worker output",
+    content: { source_id: payload.input.observation.id, processor_id: process.env.INFO_PROCESSOR_ID }
+  }],
+  diagnostics: { runtime: process.env.INFO_PROCESSOR_RUNTIME }
+}));
+`);
+  const observation = store.insertRecord({
+    id: "obs:cli-runtime",
+    schema: { name: "observation.cli_runtime", version: 1 },
+    source: { type: "test" },
+    content: { title: "CLI source" },
+  });
+  const processor: ProcessorDefinition = {
+    id: "processor.cli_worker",
+    consumes: { observations: ["observation.cli_runtime"] },
+    produces: { views: ["analysis.cli_worker"] },
+    runtime: { kind: "cli", command: process.execPath, args: [worker] },
+  };
+
+  const result = await new ProcessorRuntime({ store, processors: [processor] }).processObservation(observation);
+
+  assert.equal(result.runs[0]?.ok, true);
+  const view = store.getView(result.views_written[0]);
+  assert.equal(view?.view_type, "analysis.cli_worker");
+  assert.equal(view?.content?.source_id, "obs:cli-runtime");
+  assert.equal(view?.metadata?.processor_runtime, "cli");
+  assert.equal(result.runs[0]?.diagnostics.runtime, "cli");
+}));
+
+test("http processor runtime posts processor payload and writes returned drafts", async () => withStore(async (store) => {
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", chunk => { body += String(chunk); });
+    req.on("end", () => {
+      const payload = JSON.parse(body);
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        views: [{
+          type: "analysis.http_worker",
+          title: "HTTP worker output",
+          content: { source_id: payload.input.observation.id, processor_id: payload.processor.id },
+        }],
+        diagnostics: { method: req.method },
+      }));
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const observation = store.insertRecord({
+      id: "obs:http-runtime",
+      schema: { name: "observation.http_runtime", version: 1 },
+      source: { type: "test" },
+      content: { title: "HTTP source" },
+    });
+    const processor: ProcessorDefinition = {
+      id: "processor.http_worker",
+      consumes: { observations: ["observation.http_runtime"] },
+      produces: { views: ["analysis.http_worker"] },
+      runtime: { kind: "http", url: `http://127.0.0.1:${address.port}/processor` },
+    };
+
+    const result = await new ProcessorRuntime({ store, processors: [processor] }).processObservation(observation);
+
+    assert.equal(result.runs[0]?.ok, true);
+    const view = store.getView(result.views_written[0]);
+    assert.equal(view?.view_type, "analysis.http_worker");
+    assert.equal(view?.content?.source_id, "obs:http-runtime");
+    assert.equal(view?.metadata?.processor_runtime, "http");
+    assert.equal(result.runs[0]?.diagnostics.method, "POST");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 }));
 
 test("surface state prefers Chrome ACP context for browser/editor surfaces", async () => withStore(async (store) => {

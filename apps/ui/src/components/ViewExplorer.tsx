@@ -2,13 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { fetchContextView, fetchViewFamilies, fetchViewsByType } from "../api";
 import type { ContextViewSummary } from "../types";
 
+const AGENT_SURFACE_VIEW_ORDER = ["state.surface", "work.focus_set", "project.current", "memory.daily", "memory.profile"];
+
 export default function ViewExplorer({
   onInspect,
 }: {
   onInspect?: (state: { view?: ContextViewSummary; loading: boolean }) => void;
 }) {
   const [families, setFamilies] = useState<{ family: string; count: number }[]>([]);
-  const [selectedType, setSelectedType] = useState<string>("intent");
+  const [selectedType, setSelectedType] = useState<string>("state.surface");
   const [views, setViews] = useState<ContextViewSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
@@ -88,10 +90,11 @@ export default function ViewExplorer({
     try {
       const res = await fetchViewFamilies();
       const list = res.families?.map(f => ({ family: f.family, count: f.count })) ?? [];
-      setFamilies(list.filter(f => f.count > 0));
+      const visible = orderViewFamilies(list).filter(f => f.count > 0);
+      setFamilies(visible);
       setStatus(`${list.reduce((sum, f) => sum + f.count, 0)} views across ${list.filter(f => f.count > 0).length} families`);
-      if (!selectedType || !list.find(f => f.family === selectedType)) {
-        setSelectedType(list.find(f => f.count > 0)?.family ?? "intent");
+      if (!selectedType || !list.find(f => f.family === selectedType && f.count > 0)) {
+        setSelectedType(preferredViewFamily(visible));
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -160,7 +163,7 @@ export default function ViewExplorer({
       <div className="workbench-metrics" aria-label="View explorer metrics">
         <Metric label="Selected" value={activeView?.title || activeView?.id || "None"} />
         <Metric label="Updated" value={relativeTime(activeView?.updated_at)} />
-        <Metric label="Confidence" value={formatConfidence(activeView?.confidence)} />
+        <Metric label={viewPrimaryMetricLabel(selectedType)} value={viewPrimaryMetricValue(activeView)} />
       </div>
       <div className="vx-list">
         {filteredViews.length === 0 && !loading
@@ -173,7 +176,7 @@ export default function ViewExplorer({
             >
               <div className="vx-row-top">
                 <span className="vx-row-type">{view.view_type}</span>
-                {typeof view.confidence === "number" && <b className="vx-row-confidence">{Math.round(view.confidence * 100)}%</b>}
+                {viewPrimaryRowBadge(view) && <b className="vx-row-confidence">{viewPrimaryRowBadge(view)}</b>}
               </div>
               <h4>{view.title || view.id}</h4>
               {view.summary && <p className="vx-row-summary">{view.summary}</p>}
@@ -246,6 +249,11 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
 
 function viewFamilyLabel(family: string) {
   const labels: Record<string, string> = {
+    "state.surface": "Current Surface",
+    "work.focus_set": "Work Focus Set",
+    "project.current": "Current Project",
+    "memory.daily": "Daily Memory",
+    "memory.profile": "Memory Profile",
     evidence: "Evidence",
     visual_frame: "Visual Frame",
     audio: "Audio",
@@ -258,10 +266,53 @@ function viewFamilyLabel(family: string) {
     memory: "Memory",
     "memory.candidate": "Memory Candidate",
     "memory.gate": "Memory Gate",
-    "project.current": "Project",
-    "work.focus_set": "Work Focus",
+    "project.current_context": "Project Context",
   };
   return labels[family] ?? family;
+}
+
+function orderViewFamilies(families: { family: string; count: number }[]) {
+  return [...families].sort((a, b) => {
+    const ai = AGENT_SURFACE_VIEW_ORDER.indexOf(a.family);
+    const bi = AGENT_SURFACE_VIEW_ORDER.indexOf(b.family);
+    if (ai !== -1 || bi !== -1) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    return a.family.localeCompare(b.family);
+  });
+}
+
+function preferredViewFamily(families: { family: string; count: number }[]) {
+  return AGENT_SURFACE_VIEW_ORDER.find(type => families.some(family => family.family === type && family.count > 0))
+    ?? families.find(family => family.count > 0)?.family
+    ?? "state.surface";
+}
+
+function isAgentSurfaceView(type: string) {
+  return AGENT_SURFACE_VIEW_ORDER.includes(type);
+}
+
+function viewPrimaryMetricLabel(type: string) {
+  return isAgentSurfaceView(type) ? "Sources" : "Confidence";
+}
+
+function viewPrimaryMetricValue(view?: ContextViewSummary) {
+  if (!view) return "-";
+  return isAgentSurfaceView(view.view_type)
+    ? sourceSummary(view) ?? "-"
+    : formatConfidence(view.confidence);
+}
+
+function viewPrimaryRowBadge(view: ContextViewSummary) {
+  return isAgentSurfaceView(view.view_type)
+    ? sourceSummary(view)
+    : typeof view.confidence === "number"
+      ? `${Math.round(view.confidence * 100)}%`
+      : undefined;
+}
+
+function sourceSummary(view: ContextViewSummary) {
+  const total = (view.source_record_count ?? view.source_records?.length ?? 0) + (view.source_view_count ?? view.source_views?.length ?? 0);
+  if (total > 0) return `${total} source${total === 1 ? "" : "s"}`;
+  return typeof view.compiler === "string" ? view.compiler : view.compiler?.id || "provenance";
 }
 
 function formatConfidence(value?: number) {

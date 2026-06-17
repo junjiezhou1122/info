@@ -53,7 +53,7 @@ test("README documents Chrome ACP extension as sensor View reader and AgentTask 
 
   assert.match(readme, /apps\/chrome-acp\/packages\/chrome-extension/);
   assert.match(readme, /Save & Analyze 写入 `\/context\/ingest\?process=true&cascade_views=true`/);
-  assert.match(readme, /Ask Claude Code.*`\/agent-tasks\?cascade_views=true`/);
+  assert.match(readme, /Ask Claude Code.*`\/agent\/tasks\?refresh=true`/);
   assert.match(readme, /实时检索所有 active Views/);
   assert.match(readme, /archive\/browser-extension-legacy/);
 });
@@ -246,6 +246,7 @@ test("runtime UI surfaces proactive ambient View families", () => {
   for (const viewType of [
     "advice.research",
     "advice.writing_assist",
+    "agent.task_list",
     "task.background_research",
     "draft.writing_continuation",
     "opportunity.tool",
@@ -256,6 +257,16 @@ test("runtime UI surfaces proactive ambient View families", () => {
     assert.match(main, new RegExp(viewType.replace(".", "\\.")));
     assert.match(catalog, new RegExp(viewType.replace(".", "\\.")));
   }
+
+  const chromeTasks = readFileSync("apps/chrome-acp/packages/chrome-extension/src/components/TasksView.tsx", "utf8");
+  const chromeInfoMcp = readFileSync("apps/chrome-acp/packages/proxy-server/src/mcp/info-handler.ts", "utf8");
+  const chromeCapture = readFileSync("apps/chrome-acp/packages/chrome-extension/src/lib/info-capture.ts", "utf8");
+  assert.match(chromeTasks, /agent\.task_list/);
+  assert.match(chromeTasks, /new Set\(\["agent\.", "task\."\]\)/);
+  assert.match(chromeInfoMcp, /agent\.task_list/);
+  assert.match(chromeCapture, /agentTasksEndpoint/);
+  assert.match(chromeCapture, /shouldUseAgentTasksEndpoint/);
+  assert.match(chromeCapture, /pollAgentTasks/);
 });
 
 function emptyDirectories(root: string): string[] {

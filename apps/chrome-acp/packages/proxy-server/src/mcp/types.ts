@@ -824,10 +824,55 @@ export const INFO_SUBMIT_FEEDBACK_TOOL: McpTool = {
   },
 };
 
+export const INFO_AGENT_TASKS_TOOL: McpTool = {
+  name: "info_agent_tasks",
+  description:
+    "Inspect or run Info's unified agent task list. Use mode='list' to read the current agent.task_list view, mode='queue' to queue background tasks, mode='process' to run queued tasks, and mode='cancel'/'retry' to update one task.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      mode: {
+        type: "string",
+        enum: ["list", "queue", "process", "cancel", "retry"],
+        description: "Which agent task operation to perform.",
+      },
+      task_id: {
+        type: "string",
+        description: "Task View id required for mode='cancel' or mode='retry'.",
+      },
+      limit: {
+        type: "number",
+        description: "Maximum task count to inspect or queue/process. Defaults to 8.",
+      },
+      runtime: {
+        type: "string",
+        description: "Runtime to use when processing tasks, e.g. 'local_mock', 'claude_code', or 'acp_stdio'.",
+      },
+      refresh: {
+        type: "boolean",
+        description: "Refresh the task list before returning it when mode='list'. Defaults to true.",
+      },
+      dry_run: {
+        type: "boolean",
+        description: "Queue/process without writing when supported.",
+      },
+      autonomy: {
+        type: "string",
+        description: "Optional autonomy override for processing, such as 'suggest' or 'draft'.",
+      },
+      reason: {
+        type: "string",
+        description: "Optional reason recorded on cancel/retry lifecycle events.",
+      },
+    },
+  },
+};
+
 // All info context tools
 export const INFO_TOOLS = [
   INFO_SEARCH_CONTEXT_TOOL,
   INFO_LIST_VIEWS_TOOL,
   INFO_GET_VIEW_TOOL,
   INFO_SUBMIT_FEEDBACK_TOOL,
+  INFO_AGENT_TASKS_TOOL,
 ];

@@ -15,7 +15,7 @@ The package split should make the second concern explicit:
 ```text
 Program
   -> capability.agent_task.submit
-  -> packages/adapters/agent-runtime
+  -> packages/capabilities/agent-runtime
   -> external agent runtime
   -> ContextView + runtime events
 ```
@@ -113,7 +113,7 @@ ACP ClientSideConnection
 Implemented:
 
 ```text
-packages/adapters/agent-runtime/
+packages/capabilities/agent-runtime/
   index.ts
   types.ts
   mock-runtime.ts
@@ -130,7 +130,7 @@ packages/adapters/agent-runtime/
 
 The package owns runtime invocation and session orchestration. It does not own Program routing, View compiler policy, browser extension UI, or raw observation ingestion.
 
-Top-level exports are available from `packages/adapters/index.ts` and `packages/index.ts`.
+Top-level exports are available from `@info/capabilities`.
 
 ## Core Interfaces
 
@@ -293,7 +293,6 @@ The runtime adapter should reject action plans, file diffs, and task lists unles
 
 ## Open Design Questions
 
-- Should the package live at `packages/adapters/agent-runtime` or as a top-level `packages/agent-runtime` package?
 - Should Info expose filesystem/terminal ACP client capabilities at all in v0, or only MCP providers?
 - Do we want long-lived sessions per WorkThread, or one-shot sessions per AgentTask until session history is mature?
 - Should runtime state be persisted as Views, runtime events, or both?
@@ -302,7 +301,13 @@ The runtime adapter should reject action plans, file diffs, and task lists unles
 
 ## Recommended Decision
 
-Start with `packages/adapters/agent-runtime` because the existing package layout already has an adapters namespace. Keep the public interface runtime-neutral, but implement ACP stdio first because ACP gives us session lifecycle, capability negotiation, tool call streaming, cancellation, and future registry compatibility.
+Keep the implementation under `packages/capabilities/agent-runtime`. The old
+`packages/adapters/agent-runtime` name described the boundary, but the actual
+workspace package is `@info/capabilities`, and `agent-runtime` is the reusable
+capability submodule inside it. Keep the public interface runtime-neutral, but
+implement ACP stdio first because ACP gives us session lifecycle, capability
+negotiation, tool call streaming, cancellation, and future registry
+compatibility.
 
 Do not copy `chrome-acp`'s WebSocket proxy into Info. Copy its architecture lesson: ACP is the runtime protocol; browser and context powers are MCP providers injected at session setup.
 

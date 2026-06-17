@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CircleAlert,
   CircleCheck,
+  RotateCcw,
   ExternalLink,
   Globe,
   Loader2,
@@ -48,12 +49,29 @@ type TriggerResponse = {
   body?: { processing?: { runs?: Array<{ written_views?: string[] }> }; written_views?: string[] };
 };
 
+type AgentTasksActionResponse = {
+  ok: boolean;
+  error?: string;
+  queued?: number;
+  processed?: number;
+  skipped?: number;
+  task_list?: { counts?: Record<string, number> };
+};
+
+type AgentTaskItemActionResponse = {
+  ok: boolean;
+  error?: string;
+  action?: "cancel" | "retry";
+  task_id?: string;
+};
+
 const PREFIX_LABEL: Record<string, string> = {
   "analysis.browser_page": "Page analysis",
   "analysis.browser_agent_task": "Agent analysis",
   "analysis.repo": "Repo analysis",
   "advice.research": "Research advice",
   "advice.writing_assist": "Writing assist",
+  "agent.task_list": "Task list",
   "task.background_research": "Background research",
   "task.toolsmith_prototype": "Toolsmith task",
   "opportunity.tool": "Tool opportunity",
@@ -83,6 +101,13 @@ function confidenceLabel(c?: number): { label: string; tone: "high" | "mid" | "l
   if (c >= 0.8) return { label: `${Math.round(c * 100)}%`, tone: "high" };
   if (c >= 0.5) return { label: `${Math.round(c * 100)}%`, tone: "mid" };
   return { label: `${Math.round(c * 100)}%`, tone: "low" };
+}
+
+function taskStatusTone(status?: string): "default" | "secondary" | "destructive" | "outline" {
+  if (status === "completed") return "default";
+  if (status === "failed") return "destructive";
+  if (status === "cancelled") return "outline";
+  return "secondary";
 }
 
 function summaryOf(view: AmbientView): string {
@@ -154,7 +179,7 @@ export function TasksView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
-  const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set(["analysis."]));
+  const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set(["agent.", "task."]));
   const filter = "all"; // kept for legacy callers; UI now uses activeFilters directly
   const toggleFilter = useCallback((prefix: string) => {
     setActiveFilters(prev => {
@@ -168,6 +193,10 @@ export function TasksView() {
   }, []);
   const [triggering, setTriggering] = useState(false);
   const [lastTriggerError, setLastTriggerError] = useState<string | null>(null);
+  const [taskAction, setTaskAction] = useState<"queue" | "process" | "cancel" | "retry" | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [lastTaskMessage, setLastTaskMessage] = useState<string | null>(null);
+  const [lastTaskError, setLastTaskError] = useState<string | null>(null);
   const refreshTimer = useRef<number | null>(null);
 
   const filteredPrefixes = useMemo(() => {
@@ -251,6 +280,61 @@ export function TasksView() {
     }
   }, [load]);
 
+  const runTaskAction = useCallback(async (mode: "queue" | "process") => {
+    setTaskAction(mode);
+    setLastTaskError(null);
+    setLastTaskMessage(null);
+    try {
+      const response = (await chrome.runtime.sendMessage({
+        type: "agent-tasks",
+        mode,
+        runtime: mode === "process" ? "local_mock" : undefined,
+        limit: mode === "process" ? 1 : 8,
+      })) as AgentTasksActionResponse;
+      if (!response?.ok) {
+        setLastTaskError(response?.error ?? `Agent task ${mode} failed`);
+        return;
+      }
+      const counts = response.task_list?.counts ?? {};
+      setLastTaskMessage(
+        mode === "queue"
+          ? `Queued ${response.queued ?? 0}; open ${Number(counts.queued ?? 0) + Number(counts.candidate ?? 0)}.`
+          : `Processed ${response.processed ?? 0}; skipped ${response.skipped ?? 0}.`,
+      );
+      await load("replace");
+    } catch (e) {
+      setLastTaskError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskAction(null);
+    }
+  }, [load]);
+
+  const runTaskItemAction = useCallback(async (view: AmbientView, action: "cancel" | "retry") => {
+    setTaskAction(action);
+    setActiveTaskId(view.id);
+    setLastTaskError(null);
+    setLastTaskMessage(null);
+    try {
+      const response = (await chrome.runtime.sendMessage({
+        type: "agent-task-action",
+        taskId: view.id,
+        action,
+        reason: action === "cancel" ? "Cancelled from Chrome ACP Tasks view." : "Retried from Chrome ACP Tasks view.",
+      })) as AgentTaskItemActionResponse;
+      if (!response?.ok) {
+        setLastTaskError(response?.error ?? `Task ${action} failed`);
+        return;
+      }
+      setLastTaskMessage(action === "cancel" ? "Task cancelled." : "Task requeued.");
+      await load("replace");
+    } catch (e) {
+      setLastTaskError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskAction(null);
+      setActiveTaskId(null);
+    }
+  }, [load]);
+
   return (
     <div className="flex flex-col h-full">
       <header className="px-3 pt-3 pb-2 flex items-center justify-between gap-2 border-b">
@@ -284,11 +368,32 @@ export function TasksView() {
             )}
             <span className="ml-1.5">Analyze</span>
           </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void runTaskAction("queue")}
+            disabled={Boolean(taskAction)}
+            title="Queue background agent tasks"
+          >
+            {taskAction === "queue" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+            <span className="ml-1.5">Queue</span>
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void runTaskAction("process")}
+            disabled={Boolean(taskAction)}
+            title="Run one queued task with the local mock runtime"
+          >
+            {taskAction === "process" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CircleCheck className="h-3.5 w-3.5" />}
+            <span className="ml-1.5">Run</span>
+          </Button>
         </div>
       </header>
 
       <div className="px-3 py-2 flex items-center gap-1 text-xs border-b bg-muted/30 flex-wrap">
-        {[
+          {[
+          { id: "agent.", label: "Queue" },
           { id: "analysis.", label: "Browser" },
           { id: "advice.", label: "Advice" },
           { id: "task.", label: "Tasks" },
@@ -327,6 +432,18 @@ export function TasksView() {
           {lastTriggerError}
         </div>
       )}
+      {lastTaskError && (
+        <div className="px-3 py-2 text-xs text-destructive flex items-center gap-1.5 border-b">
+          <CircleAlert className="h-3.5 w-3.5" />
+          {lastTaskError}
+        </div>
+      )}
+      {lastTaskMessage && (
+        <div className="px-3 py-2 text-xs text-muted-foreground flex items-center gap-1.5 border-b">
+          <CircleCheck className="h-3.5 w-3.5 text-green-500" />
+          {lastTaskMessage}
+        </div>
+      )}
 
       <ScrollArea className="flex-1">
         <div className="p-3 space-y-2">
@@ -361,6 +478,14 @@ export function TasksView() {
                             </Badge>
                             {view.status === "accepted" && (
                               <CircleCheck className="h-3 w-3 text-green-500 shrink-0" />
+                            )}
+                            {view.status === "cancelled" && (
+                              <RotateCcw className="h-3 w-3 text-muted-foreground shrink-0" />
+                            )}
+                            {view.status && view.status !== "accepted" && view.status !== "cancelled" && (
+                              <Badge variant={taskStatusTone(view.status)} className="text-[10px] shrink-0">
+                                {view.status}
+                              </Badge>
                             )}
                             <span className="text-[10px] text-muted-foreground ml-auto shrink-0">
                               {timeAgo(view.updated_at)}
@@ -441,6 +566,20 @@ export function TasksView() {
                             Open
                           </Button>
                         )}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={taskAction !== null}
+                          onClick={() => void runTaskItemAction(view, view.status === "cancelled" ? "retry" : "cancel")}
+                          title={view.status === "cancelled" ? "Retry task" : "Cancel task"}
+                        >
+                          {taskAction === (view.status === "cancelled" ? "retry" : "cancel") && activeTaskId === view.id ? (
+                            <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                          ) : (
+                            <RotateCcw className="h-3 w-3 mr-1" />
+                          )}
+                          {view.status === "cancelled" ? "Retry" : "Cancel"}
+                        </Button>
                       </div>
                     </CollapsibleContent>
                   </CardContent>

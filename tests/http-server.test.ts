@@ -121,6 +121,125 @@ test("POST /feedback rejects missing related View or Observation targets", async
   assert.equal(store.recent(10).length, 0);
 }));
 
+test("GET /agent/tasks exposes the unified agent task list View", async () => withStore(async (store) => {
+  const source = store.insertRecord({
+    id: "record:http-agent-task-source",
+    schema: { name: "observation.local_project", version: 1 },
+    source: { type: "local_project" },
+    content: { title: "HTTP agent task source" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  store.upsertView({
+    id: "task:background-research:http",
+    view_type: "task.background_research",
+    title: "HTTP queued research",
+    source_records: [source.id],
+    content: { focus: "HTTP task surface", goal: "Expose agent task list over HTTP." },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const response = await request(store, "/agent/tasks?refresh=true");
+  const body = response.body as {
+    ok: boolean;
+    task_list: { counts: Record<string, number>; items: Array<{ id: string; view_type: string; status: string }> };
+    view: { id: string; view_type: string } | null;
+  };
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.task_list.counts.candidate, 1);
+  assert.deepEqual(body.task_list.items.map(item => [item.id, item.view_type, item.status]), [
+    ["task:background-research:http", "task.background_research", "candidate"],
+  ]);
+  assert.equal(body.view?.id, "agent:task_list:current");
+  assert.equal(body.view?.view_type, "agent.task_list");
+}));
+
+test("POST /agent/tasks queues and processes tasks through the HTTP contract", async () => withStore(async (store) => {
+  const source = store.insertRecord({
+    id: "record:http-agent-task-process-source",
+    schema: { name: "observation.local_project", version: 1 },
+    source: { type: "local_project" },
+    content: { title: "HTTP process task source", text: "Process this with local mock." },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  store.upsertView({
+    id: "task:background-research:http-process",
+    view_type: "task.background_research",
+    title: "HTTP process research",
+    source_records: [source.id],
+    content: { focus: "HTTP task processing", goal: "Produce a background research brief." },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const response = await request(store, "/agent/tasks", {
+    method: "POST",
+    body: { mode: "process", runtime: "local_mock", limit: 1 },
+  });
+  const body = response.body as {
+    ok: boolean;
+    processed: number;
+    task_list: { counts: Record<string, number>; items: Array<{ id: string; status: string; runtime?: string }> };
+  };
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.processed, 1);
+  assert.equal(body.task_list.counts.completed, 1);
+  assert.equal(body.task_list.items[0]?.id, "task:background-research:http-process");
+  assert.equal(body.task_list.items[0]?.status, "completed");
+  assert.equal(body.task_list.items[0]?.runtime, "local_mock");
+  assert.ok(store.listViews({ view_types: ["brief.background_research"], limit: 5 }).length >= 1);
+}));
+
+test("POST /agent/tasks rejects plugin-scoped queue or process requests", async () => withStore(async (store) => {
+  const response = await request(store, "/agent/tasks?plugin_id=external-agent", {
+    method: "POST",
+    body: { mode: "queue" },
+  });
+
+  assert.equal(response.status, 403);
+  assert.equal(response.body.ok, false);
+  assert.equal(response.body.error, "plugins cannot queue or process agent tasks");
+  assert.equal(response.body.plugin_id, "external-agent");
+}));
+
+test("POST /agent/tasks/:id can cancel and retry a task view", async () => withStore(async (store) => {
+  const source = store.insertRecord({
+    id: "record:http-agent-task-lifecycle-source",
+    schema: { name: "observation.local_project", version: 1 },
+    source: { type: "local_project" },
+    content: { title: "HTTP agent task lifecycle source" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  store.upsertView({
+    id: "task:background-research:http-lifecycle",
+    view_type: "task.background_research",
+    title: "HTTP lifecycle research",
+    source_records: [source.id],
+    content: { goal: "Exercise lifecycle actions" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const cancelled = await request(store, "/agent/tasks/task%3Abackground-research%3Ahttp-lifecycle", {
+    method: "POST",
+    body: { action: "cancel", reason: "not needed" },
+  });
+  assert.equal(cancelled.status, 200);
+  assert.equal(cancelled.body.ok, true);
+  assert.equal(cancelled.body.view.content.background_task.status, "cancelled");
+  assert.equal(cancelled.body.task_list.counts.cancelled, 1);
+
+  const retried = await request(store, "/agent/tasks/task%3Abackground-research%3Ahttp-lifecycle", {
+    method: "POST",
+    body: { action: "retry", reason: "retry it" },
+  });
+  assert.equal(retried.status, 200);
+  assert.equal(retried.body.ok, true);
+  assert.equal(retried.body.view.content.background_task.status, "queued");
+  assert.equal(retried.body.task_list.counts.queued, 1);
+}));
+
 test("POST /context/chat answers through Claude ACP chat without creating AgentTask", async () => withStore(async (store) => {
   const dir = mkdtempSync(join(process.cwd(), ".tmp-info-http-chat-acp-test-"));
   const script = join(dir, "fake-chat-acp-agent.mjs");

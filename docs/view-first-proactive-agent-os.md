@@ -64,8 +64,8 @@ as `project:/Users/junjie/info`, `topic:midscene`, and
 `communication:messages`.
 
 `project.current` is downstream from `work.focus_set`. It updates only from
-high-confidence project lanes so unrelated browser pages and message
-interruptions do not pollute project state.
+strong, fresh, provenance-backed project lanes so unrelated browser pages and
+message interruptions do not pollute project state.
 
 ## Core Objects
 
@@ -131,7 +131,8 @@ project.current
 writing.advice
 learning.youtube_fragment
 research.brief
-memory.preferences
+memory.daily
+memory.profile
 automation.outcome
 ```
 
@@ -147,7 +148,6 @@ type ViewIdentity = {
   purpose?: string;
   scope?: Record<string, unknown>;
   content?: Record<string, unknown>;
-  confidence?: number;
   stability?: "ephemeral" | "session" | "project" | "long_term";
   metadata?: Record<string, unknown>;
 };
@@ -212,7 +212,9 @@ Observation A
 ```
 
 Each view should preserve enough `source_records`, `source_views`, compiler
-metadata, and confidence to explain why it exists and when it should be trusted.
+metadata, freshness, status, and scope to explain why it exists and how it was
+produced. Agent-facing contracts should expose provenance summaries instead of
+treating `confidence` as a universal quality signal.
 
 ### Feedback
 
@@ -228,30 +230,27 @@ processors. It should not directly mutate old observations.
 Memory is not a separate storage primitive. Memory is a retained view whose
 purpose is to change future behavior.
 
-The durable path is candidate-first:
+Memory is dynamic and editable. A processor, human, or authorized agent may
+revise a memory View, but the revision must preserve provenance and audit
+evidence. The first stable memory families are intentionally small:
 
 ```text
-Observations / existing Views
+Observations / Views / Feedback
         |
         v
-memory.candidate
+memory.daily      // one editable markdown-backed day record
         |
         v
-processor.memory_gate
-        |
-        +--> memory.preferences
-        +--> memory.workflow_patterns
-        +--> memory.skill_gaps
-        +--> memory.agent_collaboration_style
-        +--> project.memory
-        +--> agent.case_memory
+memory.profile    // editable durable preferences, style, patterns, principles
 ```
 
-`memory.candidate` is a session View. It stores a compact claim, target memory
-type, confidence, promotion policy, and source provenance. It should not copy
-large source text or secret payloads. `processor.memory_gate` is the only
-built-in path that promotes candidates into durable memory. The gate can
-promote, merge, hold, or reject candidates.
+`memory.daily` summarizes one calendar day's work, decisions, active projects,
+useful context, and notable evidence. `memory.profile` is derived from daily
+memories and explicit feedback, then curated into durable user preferences,
+thinking style, workflow patterns, project principles, and stable context.
+
+Candidate/gate processors can still exist as legacy or experimental
+projections, but they are not the default memory contract for agents.
 
 EverOS-style memory backends can be attached behind an adapter boundary, but
 Info remains the source of truth for Views, provenance, and privacy policy.
@@ -259,16 +258,12 @@ Info remains the source of truth for Views, provenance, and privacy policy.
 Examples:
 
 ```text
-memory.preferences
-memory.workflow_patterns
-memory.skill_gaps
-memory.agent_collaboration_style
-project.memory
-agent.case_memory
+memory.daily
+memory.profile
 ```
 
 Long-term memory needs higher standards than ordinary views: provenance,
-stability, feedback, staleness, and reversibility.
+stability, feedback, staleness, reversibility, and edit history.
 
 ## Built-In View Families Are Not Kernel Objects
 
@@ -283,11 +278,7 @@ project.tasks
 project.decisions
 
 memory.profile
-memory.preferences
-memory.workflow_patterns
-memory.skill_gaps
-memory.agent_collaboration_style
-agent.case_memory
+memory.daily
 ```
 
 This leaves room for non-programmer domains without changing the kernel:

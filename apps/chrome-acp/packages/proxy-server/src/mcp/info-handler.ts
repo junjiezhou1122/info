@@ -6,6 +6,7 @@
 //   - info_list_views       → GET  /context/views
 //   - info_get_view         → GET  /context/views/:id
 //   - info_submit_feedback  → POST /feedback
+//   - info_agent_tasks      → GET/POST /agent/tasks
 //
 // All requests go through Node's built-in fetch (Node 18+). Failures are
 // returned as McpToolCallResult with isError=true so the agent can react.
@@ -117,6 +118,7 @@ const VIEW_FAMILY_TYPES: Record<string, string[] | undefined> = {
     "advice.research",
     "advice.writing_assist",
     "task.background_research",
+    "agent.task_list",
     "draft.writing_continuation",
     "opportunity.tool",
     "task.toolsmith_prototype",
@@ -128,7 +130,7 @@ const VIEW_FAMILY_TYPES: Record<string, string[] | undefined> = {
     "memory.language.difficult_segments",
   ],
   analyze: ["analysis.browser_page", "analysis.browser_agent_task", "analysis.repo"],
-  task: ["task.background_research", "task.browser_ambient", "task.toolsmith_prototype"],
+  task: ["agent.task_list", "task.background_research", "task.browser_ambient", "task.toolsmith_prototype"],
   language: [
     "app.language.learning_pack",
     "app.language.review_queue",
@@ -340,6 +342,69 @@ async function handleSubmitFeedback(args: Record<string, unknown> | undefined): 
   return textResult(JSON.stringify(data, null, 2));
 }
 
+async function handleAgentTasks(args: Record<string, unknown> | undefined): Promise<McpToolCallResult> {
+  const mode = asString(args?.mode) ?? "list";
+  const limit = clampLimit(asNumber(args?.limit), 8);
+  const endpoint = new URL(`${infoBaseUrl()}/agent/tasks`);
+  if (mode === "list") {
+    if (asBoolean(args?.refresh) ?? true) endpoint.searchParams.set("refresh", "true");
+    endpoint.searchParams.set("limit", String(limit));
+    log.info("info_agent_tasks → GET /agent/tasks", { url: endpoint.toString(), mode, limit });
+    const { ok, status, data } = await getJson<{ ok?: boolean; error?: unknown }>(endpoint.toString());
+    if (!ok) {
+      const detail = typeof data === "string" ? data : JSON.stringify(data);
+      return errorResult(`HTTP ${status}: ${detail.slice(0, 600)}`);
+    }
+    if (typeof data === "object" && data && data.ok === false) {
+      return errorResult(`info returned ok=false: ${JSON.stringify(data.error ?? data).slice(0, 600)}`);
+    }
+    return textResult(JSON.stringify(data, null, 2));
+  }
+
+  if (mode === "cancel" || mode === "retry") {
+    const taskId = asString(args?.task_id);
+    if (!taskId) return errorResult("task_id is required for cancel/retry");
+    const taskEndpoint = new URL(`${infoBaseUrl()}/agent/tasks/${encodeURIComponent(taskId)}`);
+    const body: Record<string, unknown> = { action: mode, actor: "acp.agent" };
+    const reason = asString(args?.reason);
+    if (reason) body.reason = reason;
+    log.info("info_agent_tasks → POST /agent/tasks/:id", { url: taskEndpoint.toString(), mode, taskId });
+    const { ok, status, data } = await postJson<{ ok?: boolean; error?: unknown }>(taskEndpoint.toString(), body);
+    if (!ok) {
+      const detail = typeof data === "string" ? data : JSON.stringify(data);
+      return errorResult(`HTTP ${status}: ${detail.slice(0, 600)}`);
+    }
+    if (typeof data === "object" && data && data.ok === false) {
+      return errorResult(`info returned ok=false: ${JSON.stringify(data.error ?? data).slice(0, 600)}`);
+    }
+    return textResult(JSON.stringify(data, null, 2));
+  }
+
+  const body: Record<string, unknown> = {
+    mode: mode === "process" ? "process" : "queue",
+    limit,
+  };
+  const runtime = asString(args?.runtime);
+  if (runtime) body.runtime = runtime;
+  const dryRun = asBoolean(args?.dry_run);
+  if (dryRun !== undefined) body.dry_run = dryRun;
+  const autonomy = asString(args?.autonomy);
+  if (autonomy) body.autonomy = autonomy;
+  const write = asBoolean(args?.write);
+  if (write !== undefined) body.write = write;
+
+  log.info("info_agent_tasks → POST /agent/tasks", { url: endpoint.toString(), mode, limit, runtime });
+  const { ok, status, data } = await postJson<{ ok?: boolean; error?: unknown }>(endpoint.toString(), body);
+  if (!ok) {
+    const detail = typeof data === "string" ? data : JSON.stringify(data);
+    return errorResult(`HTTP ${status}: ${detail.slice(0, 600)}`);
+  }
+  if (typeof data === "object" && data && data.ok === false) {
+    return errorResult(`info returned ok=false: ${JSON.stringify(data.error ?? data).slice(0, 600)}`);
+  }
+  return textResult(JSON.stringify(data, null, 2));
+}
+
 export async function executeInfoTool(params: McpToolCallParams): Promise<McpToolCallResult> {
   const args = (params.arguments ?? {}) as Record<string, unknown>;
   try {
@@ -352,6 +417,8 @@ export async function executeInfoTool(params: McpToolCallParams): Promise<McpToo
         return await handleGetView(args);
       case "info_submit_feedback":
         return await handleSubmitFeedback(args);
+      case "info_agent_tasks":
+        return await handleAgentTasks(args);
       default:
         return errorResult(`unknown info tool: ${params.name}`);
     }

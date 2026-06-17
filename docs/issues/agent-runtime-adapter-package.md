@@ -6,7 +6,7 @@ Info is moving toward package-level boundaries, but `capability.agent_task.submi
 
 ## Goal
 
-Create `packages/adapters/agent-runtime` as the reusable boundary between Info capabilities and external/local agent runtimes.
+Create `packages/capabilities/agent-runtime` as the reusable boundary between Info capabilities and external/local agent runtimes.
 
 The package should support:
 
@@ -29,7 +29,7 @@ ACP is a JSON-RPC protocol between clients and coding agents. The local stable t
 Files to add in the implementation issue:
 
 ```text
-packages/adapters/agent-runtime/
+packages/capabilities/agent-runtime/
   index.ts
   types.ts
   mock-runtime.ts
@@ -43,7 +43,7 @@ packages/adapters/agent-runtime/
 Follow-up wiring:
 
 ```text
-packages/adapters/index.ts
+packages/capabilities/index.ts
 packages/index.ts
 src/programs/capabilities/agent-task-submit.ts
 tests/agent-runtime-adapter.test.ts
@@ -51,14 +51,14 @@ tests/agent-runtime-adapter.test.ts
 
 ## Acceptance Criteria
 
-- `capability.agent_task.submit` delegates runtime execution through an `AgentRuntimeAdapter` instead of directly shelling out.
-- Existing local mock behavior still works.
-- Existing Claude Code JSON CLI behavior is preserved behind an adapter or explicitly left as a compatibility path.
-- ACP stdio adapter can initialize an ACP-compatible command, create a session, send a prompt, collect updates, and return structured output.
-- Adapter accepts externally supplied MCP server configs and passes them into ACP session creation.
-- Policy denial for private provenance still happens before external runtime execution.
-- Tests cover mock success, invalid output contract, privacy denial, adapter selection, and ACP prompt/content mapping.
-- Documentation in `docs/agent-runtime-adapter-package.md` remains accurate after implementation.
+- [x] `capability.agent_task.submit` delegates runtime execution through an `AgentRuntimeAdapter` instead of directly shelling out.
+- [x] Existing local mock behavior still works.
+- [x] Existing Claude Code JSON CLI behavior is preserved behind an adapter or explicitly left as a compatibility path.
+- [x] ACP stdio adapter can initialize an ACP-compatible command, create a session, send a prompt, collect updates, and return structured output.
+- [x] Adapter accepts externally supplied MCP server configs and passes them into ACP session creation.
+- [x] Policy denial for private provenance still happens before external runtime execution.
+- [x] Tests cover mock success, invalid output contract, privacy denial, adapter selection, and ACP prompt/content mapping.
+- [x] Documentation in `docs/agent-runtime-adapter-package.md` remains accurate after implementation.
 
 ## Non-Goals
 
@@ -77,6 +77,13 @@ tests/agent-runtime-adapter.test.ts
 5. Add runtime event hooks for lifecycle and permission events.
 6. Wire `capability.agent_task.submit` to select runtime by `task.runtime` / env default.
 7. Add tests and update docs.
+
+## Implementation Status
+
+- Implemented: `packages/capabilities/agent-runtime` with `local_mock`, `claude_code` CLI JSON, and `acp_stdio` adapters.
+- Implemented: `capability.agent_task.submit` selects adapters through `createDefaultAgentRuntimeAdapter`.
+- Implemented: slow work can now be exposed through `agent.task_list`, `/agent/tasks`, and `mf task list|queue|process`.
+- Remaining enhancement: richer permission event streaming and long-running cancel/resume UX for real external agents.
 
 ## References
 

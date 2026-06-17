@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "@info/core";
 import { processAmbientBackgroundTasks } from "@info/runtime/background-tasks.js";
+import { buildAgentTaskList, updateAgentTaskLifecycle } from "@info/runtime/agent-tasks.js";
 import type { BackgroundTaskIiiClient } from "@info/runtime/background-tasks.js";
 import { III_RUNTIME_FUNCTIONS, InProcessIiiRuntimeClient, registerInfoIiiRuntime } from "@info/iii-runtime";
 import type { RuntimeTickRequest, RuntimeTickResult } from "@info/runtime/runtime.js";
@@ -53,6 +54,72 @@ test("background task layer queues project.current into a provenance-backed task
   assert.ok(task?.source_views?.includes("view:project_current:proactive"));
   assert.equal(task?.content?.forbidden_actions instanceof Array && task.content.forbidden_actions.includes("write_legacy_records"), true);
   assert.equal(store.recent(20).some(item => item.id === task?.id), false);
+  const taskList = store.getView("agent:task_list:current");
+  assert.equal(taskList?.view_type, "agent.task_list");
+  assert.equal((taskList?.content?.counts as Record<string, number> | undefined)?.candidate, 1);
+}));
+
+test("agent task list summarizes queued and processed AgentTask Views", async () => withStore(async (store) => {
+  const record = store.insertRecord({
+    id: "record:agent-task-list-source",
+    schema: { name: "observation.local_project", version: 1 },
+    source: { type: "local_project" },
+    content: { title: "Agent task list source" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  store.upsertView({
+    id: "task:background-research:list",
+    view_type: "task.background_research",
+    title: "Queued research",
+    source_records: [record.id],
+    content: { goal: "Summarize queued task", speed: "background", autonomy: "suggest" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const before = buildAgentTaskList({ write: true }, store);
+  assert.equal(before.items.length, 1);
+  assert.equal(before.counts.candidate, 1);
+  assert.equal(before.latest_view?.view_type, "agent.task_list");
+
+  const iii = new InProcessIiiRuntimeClient();
+  await registerInfoIiiRuntime(iii, { store, workerName: "info-agent-task-list-test" });
+  await processAmbientBackgroundTasks({ mode: "process", iii, runtime: "local_mock", write: true }, store);
+  const after = buildAgentTaskList({ write: false }, store);
+  assert.equal(after.counts.completed, 1);
+  assert.equal(after.items[0]?.runtime, "local_mock");
+}));
+
+test("agent task lifecycle can cancel and retry task Views", async () => withStore(async (store) => {
+  const record = store.insertRecord({
+    id: "record:agent-task-lifecycle-source",
+    schema: { name: "observation.local_project", version: 1 },
+    source: { type: "local_project" },
+    content: { title: "Agent task lifecycle source" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  store.upsertView({
+    id: "task:background-research:lifecycle",
+    view_type: "task.background_research",
+    title: "Lifecycle research",
+    source_records: [record.id],
+    content: { goal: "Test lifecycle" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const cancelled = updateAgentTaskLifecycle("task:background-research:lifecycle", "cancel", { reason: "no longer needed" }, store);
+  assert.equal(cancelled.ok, true);
+  assert.equal(cancelled.task_list?.counts.cancelled, 1);
+  assert.equal(store.getView("task:background-research:lifecycle")?.content?.background_task?.status, "cancelled");
+
+  const skipped = await processAmbientBackgroundTasks({ mode: "process", runtime: "local_mock", write: true }, store);
+  assert.equal(skipped.processed, 0);
+
+  const retried = updateAgentTaskLifecycle("task:background-research:lifecycle", "retry", { reason: "try again" }, store);
+  assert.equal(retried.ok, true);
+  assert.equal(retried.task_list?.counts.queued, 1);
+  assert.equal(store.getView("task:background-research:lifecycle")?.content?.background_task?.status, "queued");
+  assert.ok(store.listRuntimeEvents({ event_type: "agent_task.cancelled", subject_id: "task:background-research:lifecycle", limit: 1 })[0]);
+  assert.ok(store.listRuntimeEvents({ event_type: "agent_task.retried", subject_id: "task:background-research:lifecycle", limit: 1 })[0]);
 }));
 
 test("background task layer refuses source Views without provenance", async () => withStore(async (store) => {

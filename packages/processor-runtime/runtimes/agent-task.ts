@@ -1,8 +1,9 @@
 import type { ProcessorContext, ProcessorHandlerResult, ProcessorInput } from "../types.js";
 
 export async function runAgentTaskProcessor(
-  _input: ProcessorInput,
+  input: ProcessorInput,
   context: ProcessorContext,
 ): Promise<ProcessorHandlerResult> {
-  throw new Error(`Agent task processor runtime is not implemented yet: ${context.processor.id}`);
+  if (context.processor.handler) return context.processor.handler(input, context);
+  throw new Error(`Agent task processor runtime requires a handler or configured AgentTask bridge: ${context.processor.id}`);
 }

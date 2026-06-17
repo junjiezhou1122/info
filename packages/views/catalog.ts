@@ -181,6 +181,14 @@ export const VIEW_FAMILY_DEFINITIONS: readonly ViewFamilyDefinition[] = [
     manual_create: true,
   },
   {
+    view_type: "agent.task_list",
+    label: "Agent Task List",
+    purpose: "Unified queue surface for slow AgentTask work handled by Claude Code, Codex, ACP, or local adapters.",
+    category: "ambient",
+    producers: ["runtime"],
+    default_page_size: 20,
+  },
+  {
     view_type: "draft.tool_prototype",
     label: "Tool Prototype",
     purpose: "Prototype plan for a workflow-improving tool.",

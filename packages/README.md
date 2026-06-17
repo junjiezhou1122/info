@@ -1,10 +1,8 @@
 # Packages
 
 `packages/` holds the backend as a pnpm workspace of `@info/*` packages.
-Application surfaces live in `apps/`. Dependencies flow strictly downward —
-each package may only depend on packages below it. See
-[`../docs/workspace-restructure-plan.md`](../docs/workspace-restructure-plan.md)
-for the full design and migration history.
+Application surfaces live in `apps/`. Dependencies flow strictly downward -
+each package may only depend on packages below it.
 
 ## Dependency layers (top depends on bottom)
 
@@ -42,6 +40,7 @@ apps/{ui,browser-extension}   Application surfaces — HTTP only, no code import
   domain enums. Depends on `@info/core`.
 - `capabilities/` — `agent-runtime`: the generic AgentTask execution boundary
   (ACP stdio, Claude-Code CLI-JSON, mock, MCP providers). Zero runtime coupling.
+  Current implementation lives under `packages/capabilities/agent-runtime/`.
 - `processor-runtime/` — the open ProcessorDefinition runtime, including
   consumes/produces declarations, view-system diagnostics, and realtime
   processors such as `state.surface` and `observation.route_candidate`.
@@ -57,7 +56,7 @@ apps/{ui,browser-extension}   Application surfaces — HTTP only, no code import
 - Each package declares its `@info/*` dependencies in its own `package.json`;
   the root `package.json` lists every `@info/*` package as `workspace:*` so
   `tests/` and `scripts/` resolve bare specifiers. tsx resolves package names
-  to `.ts` sources via each `package.json`'s `exports` field — no build step.
+  to `.ts` sources via each `package.json`'s `exports` field - no build step.
 - Import across packages by package name (`@info/core`), never by relative path.
 - Never introduce an upward import (a lower layer importing a higher one).
 - `apps/` are excluded from the root tsconfig; they build with their own Vite

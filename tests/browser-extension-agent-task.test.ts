@@ -471,6 +471,33 @@ test("Browser sidepanel Ask uses normal context chat instead of AgentTask", () =
   assert.doesNotMatch(sidepanel, /Claude Code AgentTask/);
 });
 
+test("Chrome ACP Tasks view and MCP tools expose the unified agent task surface", () => {
+  const tasks = readFileSync("apps/chrome-acp/packages/chrome-extension/src/components/TasksView.tsx", "utf8");
+  const capture = readFileSync("apps/chrome-acp/packages/chrome-extension/src/lib/info-capture.ts", "utf8");
+  const mcpTypes = readFileSync("apps/chrome-acp/packages/proxy-server/src/mcp/types.ts", "utf8");
+  const mcpHandler = readFileSync("apps/chrome-acp/packages/proxy-server/src/mcp/info-handler.ts", "utf8");
+
+  assert.match(tasks, /type:\s*"agent-tasks"/);
+  assert.match(tasks, /type:\s*"agent-task-action"/);
+  assert.match(tasks, /Queue/);
+  assert.match(tasks, /Run/);
+  assert.match(tasks, /Cancel/);
+  assert.match(tasks, /Retry/);
+  assert.match(tasks, /local_mock/);
+  assert.match(capture, /if \(message\?\.type === "agent-tasks"\)/);
+  assert.match(capture, /if \(message\?\.type === "agent-task-action"\)/);
+  assert.match(capture, /runAgentTasksAction/);
+  assert.match(capture, /updateAgentTask/);
+  assert.match(capture, /url.pathname = "\/agent\/tasks"/);
+  assert.match(capture, /url.pathname = `\/agent\/tasks\/\$\{encodeURIComponent\(taskId\)\}`/);
+  assert.match(mcpTypes, /info_agent_tasks/);
+  assert.match(mcpTypes, /"cancel", "retry"/);
+  assert.match(mcpTypes, /mode:\s*\{\s*type:\s*"string"/);
+  assert.match(mcpHandler, /info_agent_tasks → GET \/agent\/tasks/);
+  assert.match(mcpHandler, /info_agent_tasks → POST \/agent\/tasks/);
+  assert.match(mcpHandler, /info_agent_tasks → POST \/agent\/tasks\/:id/);
+});
+
 test("Browser ambient extracts Program-produced and cascaded View IDs from processed ingest", () => {
   assert.deepEqual(viewIdsFromProcessedIngestResponse({
     processing: {
