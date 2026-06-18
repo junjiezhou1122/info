@@ -615,3 +615,80 @@ test("mf evolution rollback archives applied operations and emits rolled_back ev
   const err = JSON.parse(second.stderr) as { ok: boolean; error: { code: string } };
   assert.equal(err.error.code, "EVOLUTION_OPERATION_NOT_FOUND");
 }));
+
+test("mf help includes evolution subcommands", () => withDb((dbPath) => {
+  const help = JSON.parse(mf(dbPath, ["--json", "help"])) as { ok: boolean; data: { usage: string[] } };
+  assert.equal(help.ok, true);
+  assert.ok(help.data.usage.some(line => line.includes("evolution candidates")));
+  assert.ok(help.data.usage.some(line => line.includes("evolution show")));
+  assert.ok(help.data.usage.some(line => line.includes("evolution apply")));
+  assert.ok(help.data.usage.some(line => line.includes("evolution verify")));
+  assert.ok(help.data.usage.some(line => line.includes("evolution rollback")));
+}));
+
+test("mf evolution apply --mode full_auto creates an accepted view", () => withDb((dbPath, store) => {
+  store.upsertView({
+    id: "view:promo:full-auto",
+    view_type: "view.promotion_candidates",
+    status: "candidate",
+    compiler: { id: "processor.view_promotion_engine", mode: "deterministic" },
+    content: {
+      candidates: [
+        { id: "cand:full-auto:01", action: "create_view", target_view_type: "project.memory", priority: "high", reason: "Auto promote test" },
+      ],
+    },
+  });
+
+  const result = JSON.parse(mf(dbPath, ["--json", "evolution", "apply", "cand:full-auto:01", "--mode", "full_auto"])) as {
+    ok: boolean;
+    data: { action: string; mode: string; applied_view_id: string | null };
+  };
+  assert.equal(result.ok, true);
+  assert.equal(result.data.mode, "full_auto");
+  assert.ok(result.data.applied_view_id !== null);
+  const appliedView = store.getView(result.data.applied_view_id!);
+  assert.equal(appliedView?.view_type, "project.memory");
+  assert.equal(appliedView?.status, "accepted");
+}));
+
+test("mf evolution apply retire_view action archives the target view", () => withDb((dbPath, store) => {
+  store.upsertView({
+    id: "view:stale:target",
+    view_type: "research.brief",
+    title: "Stale research brief",
+    status: "accepted",
+    compiler: { id: "agent.create_view", mode: "deterministic" },
+    content: { topic: "old" },
+  });
+  store.upsertView({
+    id: "view:promo:retire",
+    view_type: "view.promotion_candidates",
+    status: "candidate",
+    compiler: { id: "processor.view_promotion_engine", mode: "deterministic" },
+    content: {
+      candidates: [
+        { id: "cand:retire:target", action: "retire_view", target_view_id: "view:stale:target", priority: "low", reason: "Stale view to retire" },
+      ],
+    },
+  });
+
+  const result = JSON.parse(mf(dbPath, ["--json", "evolution", "apply", "cand:retire:target"])) as {
+    ok: boolean;
+    data: { action: string; applied_view_id: string | null };
+  };
+  assert.equal(result.ok, true);
+  assert.equal(result.data.action, "retire_view");
+  assert.equal(result.data.applied_view_id, "view:stale:target");
+  assert.equal(store.getView("view:stale:target")?.status, "archived");
+}));
+
+test("mf evolution verify returns error for unknown candidate", () => withDb((dbPath) => {
+  const result = spawnSync("node", ["--no-warnings", "--experimental-sqlite", "--import", "tsx", "scripts/mf.ts", "--json", "evolution", "verify", "cand:missing"], {
+    cwd: process.cwd(),
+    env: { ...process.env, CONTEXT_DB_PATH: dbPath },
+    encoding: "utf8",
+  });
+  assert.notEqual(result.status, 0);
+  const error = JSON.parse(result.stderr) as { ok: boolean; error: { code: string } };
+  assert.equal(error.error.code, "EVOLUTION_CANDIDATE_NOT_FOUND");
+}));
