@@ -600,40 +600,45 @@ export class ContextStore {
   }
 
   listViewFamilySummaries(options: { view_types?: string[]; active_only?: boolean; include_kinds?: boolean } = {}): Array<{ family: string; count: number; latest?: StoredContextView; kinds: string[] }> {
-    const clauses: string[] = [];
-    const params: SQLInputValue[] = [];
-    if (options.view_types?.length) {
-      clauses.push(`view_type in (${options.view_types.map(() => "?").join(", ")})`);
-      params.push(...options.view_types);
-    }
-    if (options.active_only) clauses.push(`(status is null or status not in ('archived', 'rejected'))`);
-    const where = clauses.length ? ` where ${clauses.join(" and ")}` : "";
-    const rows = this.db.prepare(`select view_type as family, count(*) as count, max(updated_at) as latest_updated_at from context_views${where} group by view_type`).all(...params) as Array<{ family: string; count: number; latest_updated_at?: string }>;
-    return rows.map(row => {
+    const families = options.view_types?.length
+      ? options.view_types
+      : (this.db.prepare(`select distinct view_type as family from context_views order by view_type`).all() as Array<{ family: string }>).map(row => row.family);
+    return families.map(family => {
+      const countRow = this.db.prepare(`
+        select count(*) as count
+        from context_views indexed by idx_context_views_type_status_updated_at
+        where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""}
+      `).get(family) as { count?: number } | undefined;
       const latest = this.db.prepare(`
         select id, view_type, title, summary, status, compiler_json, confidence, stability, lossiness, created_at, updated_at
         from context_views indexed by idx_context_views_type_updated_created_id
         where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""}
         order by updated_at desc, created_at desc, id desc
         limit 1
-      `).get(row.family) as any;
-      const kindRows = options.include_kinds
-      ? this.db.prepare(`select content_json from context_views indexed by idx_context_views_type_updated_created_id where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""} order by updated_at desc, created_at desc, id desc limit 80`).all(row.family) as Array<{ content_json?: string }>
-        : [];
-      const kinds = options.include_kinds
-        ? [...new Set(kindRows
-          .map(kindRow => parseJson<Record<string, unknown>>(kindRow.content_json, {}))
-          .map(content => typeof content.kind === "string" ? content.kind : undefined)
-          .filter((value): value is string => Boolean(value)))]
-          .slice(0, 12)
-        : [];
+      `).get(family) as any;
+      const kinds = options.include_kinds ? this.kindsForViewType(family, options.active_only) : [];
       return {
-        family: row.family,
-        count: Number(row.count ?? 0),
+        family,
+        count: Number(countRow?.count ?? 0),
         latest: latest ? rowToViewSummary(latest) : undefined,
         kinds,
       };
     });
+  }
+
+  private kindsForViewType(viewType: string, activeOnly?: boolean): string[] {
+    const kindRows = this.db.prepare(`
+      select content_json
+      from context_views indexed by idx_context_views_type_updated_created_id
+      where view_type = ?${activeOnly ? " and (status is null or status not in ('archived', 'rejected'))" : ""}
+      order by updated_at desc, created_at desc, id desc
+      limit 80
+    `).all(viewType) as Array<{ content_json?: string }>;
+    return [...new Set(kindRows
+      .map(kindRow => parseJson<Record<string, unknown>>(kindRow.content_json, {}))
+      .map(content => typeof content.kind === "string" ? content.kind : undefined)
+      .filter((value): value is string => Boolean(value)))]
+      .slice(0, 12);
   }
 
   listViews(options: {
