@@ -1,6 +1,6 @@
 # YouTube Learning Loop
 
-GitHub issue: https://github.com/junjiezhou1122/info/issues/8
+GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/8
 
 ## Problem
 

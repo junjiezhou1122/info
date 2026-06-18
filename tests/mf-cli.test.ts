@@ -373,7 +373,7 @@ test("mf sensor screenpipe search passes filters, normalizes records, and can wr
   writeFileSync(bin, `#!/bin/sh
 echo "$@" > "$SCREENPIPE_ARGS_FILE"
 if [ "$1" = "search" ]; then
-  printf '%s\\n' '{"type":"ocr","content":{"id":"frame-1","timestamp":"2026-06-17T01:02:03.000Z","app_name":"Cursor","window_name":"Info","browser_url":"https://github.com/junjiezhou1122/info","text":"Agent Surface CLI"}}'
+  printf '%s\\n' '{"type":"ocr","content":{"id":"frame-1","timestamp":"2026-06-17T01:02:03.000Z","app_name":"Cursor","window_name":"Metaflow","browser_url":"https://github.com/junjiezhou1122/Metaflow","text":"Agent Surface CLI"}}'
 else
   printf '%s\\n' '{"running":true}'
 fi

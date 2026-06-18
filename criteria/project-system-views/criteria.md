@@ -1,6 +1,6 @@
 # Project System Views
 
-GitHub issue: https://github.com/junjiezhou1122/info/issues/6
+GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/6
 
 ## Problem
 

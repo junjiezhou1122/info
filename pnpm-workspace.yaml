@@ -1,4 +1,4 @@
-# Info workspace.
+# Metaflow workspace.
 # Backend @info/* packages + the two Application surfaces.
 # See docs/workspace-restructure-plan.md.
 packages:

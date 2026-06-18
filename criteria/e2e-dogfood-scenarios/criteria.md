@@ -1,6 +1,6 @@
 # End-to-End Dogfood Scenarios
 
-GitHub issue: https://github.com/junjiezhou1122/info/issues/12
+GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/12
 
 ## Problem
 

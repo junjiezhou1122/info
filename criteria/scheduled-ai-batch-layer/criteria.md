@@ -1,6 +1,6 @@
 # Scheduled AI Batch Layer
 
-GitHub issue: https://github.com/junjiezhou1122/info/issues/3
+GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/3
 
 ## Problem
 

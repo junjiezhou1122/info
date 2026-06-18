@@ -1,6 +1,6 @@
-# Info
+# Metaflow
 
-Info is a local-first, agent-native context runtime for adaptive personal
+Metaflow is a local-first, agent-native context runtime for adaptive personal
 memory.
 
 It does not merely store the past. It continuously learns better
@@ -13,14 +13,14 @@ The short version is:
 One observation -> many Views -> many future tasks
 ```
 
-![Info loop architecture](assets/info-loop.svg)
+![Metaflow loop architecture](assets/info-loop.svg)
 
 ## The Idea
 
 Traditional memory systems store history and hope retrieval will find the right
 chunk later.
 
-Info turns raw experience into a dynamic ViewGraph:
+Metaflow turns raw experience into a dynamic ViewGraph:
 
 ```text
 Observations
@@ -42,7 +42,7 @@ failures, and better task success.
 
 ## Core Loop
 
-Info has one loop:
+Metaflow has one loop:
 
 ```text
 Observation -> Processor -> View -> Task/App/Action -> Feedback -> Evolution
@@ -223,5 +223,5 @@ pnpm run ui:build
 
 ## Status
 
-This is a mature working system with a live CLI, View system, runtime processors, memory surfaces, and a Chrome ACP browser agent surface.
+Metaflow is a mature working system with a live CLI, View system, runtime processors, memory surfaces, and a Chrome ACP browser agent surface.
 The implementation is still evolving, but the contract is no longer a sketch.

@@ -1,12 +1,12 @@
 # Build Agent Surface CLI and dynamic View foundation
 
-GitHub parent issue: https://github.com/junjiezhou1122/info/issues/17
+GitHub parent issue: https://github.com/junjiezhou1122/Metaflow/issues/17
 
 Parent tracking issue for the CLI-first work discussed in the view redesign. UI remains a consumer of the same underlying HTTP/CLI/ViewSpec contracts, not the source of truth.
 
 ## What to build
 
-Build the bottom-layer Agent Surface CLI and dynamic View foundation for Info. Agents should be able to inspect canonical Views, discover processors, trigger allowed processors, read Screenpipe-backed evidence, and create/edit dynamic Views without depending on the UI.
+Build the bottom-layer Agent Surface CLI and dynamic View foundation for Metaflow. Agents should be able to inspect canonical Views, discover processors, trigger allowed processors, read Screenpipe-backed evidence, and create/edit dynamic Views without depending on the UI.
 
 ## Acceptance criteria
 
@@ -14,7 +14,7 @@ Build the bottom-layer Agent Surface CLI and dynamic View foundation for Info. A
 - [x] Canonical Views are readable through the CLI: `state.surface`, `work.focus_set`, `project.current`, `memory.daily`, and `memory.profile`.
 - [x] Processors can be inspected and whitelisted processors can be triggered with Processor Run evidence.
 - [x] Dynamic Views can be created or edited by humans and agents with provenance/audit metadata.
-- [x] Screenpipe evidence can be queried through Info CLI entrypoints and optionally normalized into Observations.
+- [x] Screenpipe evidence can be queried through Metaflow CLI entrypoints and optionally normalized into Observations.
 - [x] Daily/profile memory are markdown-backed editable Views.
 - [x] CLI docs and smoke tests cover the agent-facing flows.
 
@@ -25,48 +25,48 @@ None - can start immediately
 ## Slices
 
 1. **Agent Surface CLI JSON Contract**
-   - GitHub issue: https://github.com/junjiezhou1122/info/issues/18
+   - GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/18
    - Type: AFK
    - Blocked by: None
    - User stories covered: agent can call CLI reliably; machine-readable errors and exit codes.
 
 2. **View Read CLI for Canonical Views**
-   - GitHub issue: https://github.com/junjiezhou1122/info/issues/19
+   - GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/19
    - Type: AFK
    - Blocked by: Agent Surface CLI JSON Contract
    - User stories covered: agent can inspect `state.surface`, `work.focus_set`, `project.current`, `memory.daily`, `memory.profile`.
 
 3. **Processor Inspect and Trigger CLI**
-   - GitHub issue: https://github.com/junjiezhou1122/info/issues/20
+   - GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/20
    - Type: AFK
    - Blocked by: Agent Surface CLI JSON Contract
    - User stories covered: agent can discover processors and trigger allowed processors with run evidence.
 
 4. **Dynamic View Create/Edit CLI**
-   - GitHub issue: https://github.com/junjiezhou1122/info/issues/21
+   - GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/21
    - Type: AFK
    - Blocked by: Agent Surface CLI JSON Contract, View Read CLI for Canonical Views
    - User stories covered: human and agent can add/edit views dynamically with provenance.
 
-5. **Screenpipe Evidence Access Through Info CLI**
-   - GitHub issue: https://github.com/junjiezhou1122/info/issues/25
+5. **Screenpipe Evidence Access Through Metaflow CLI**
+   - GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/25
    - Type: AFK
    - Blocked by: Agent Surface CLI JSON Contract
-   - User stories covered: agent can query Screenpipe-like evidence through Info.
+   - User stories covered: agent can query Screenpipe-like evidence through Metaflow.
 
 6. **Memory Daily/Profile Markdown Views**
-   - GitHub issue: https://github.com/junjiezhou1122/info/issues/22
+   - GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/22
    - Type: AFK
    - Blocked by: View Read CLI for Canonical Views, Dynamic View Create/Edit CLI
    - User stories covered: daily markdown memory and durable profile memory are editable and reusable.
 
 7. **Agent-Facing CLI Docs and Smoke Tests**
-   - GitHub issue: https://github.com/junjiezhou1122/info/issues/23
+   - GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/23
    - Type: AFK
-   - Blocked by: Agent Surface CLI JSON Contract, View Read CLI for Canonical Views, Processor Inspect and Trigger CLI, Dynamic View Create/Edit CLI, Screenpipe Evidence Access Through Info CLI, Memory Daily/Profile Markdown Views
+   - Blocked by: Agent Surface CLI JSON Contract, View Read CLI for Canonical Views, Processor Inspect and Trigger CLI, Dynamic View Create/Edit CLI, Screenpipe Evidence Access Through Metaflow CLI, Memory Daily/Profile Markdown Views
    - User stories covered: other agents can follow the CLI contract without UI.
 
-Note: https://github.com/junjiezhou1122/info/issues/24 appears to be a duplicate docs issue created by a retry after intermittent GitHub API EOF errors. It should be closed or repurposed when GitHub API access is stable.
+Note: https://github.com/junjiezhou1122/Metaflow/issues/24 appears to be a duplicate docs issue created by a retry after intermittent GitHub API EOF errors. It should be closed or repurposed when GitHub API access is stable.
 
 ## Implementation Status
 

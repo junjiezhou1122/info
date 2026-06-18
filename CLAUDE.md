@@ -1,4 +1,4 @@
-# Info Agent Policy
+# Metaflow Agent Policy
 
 ## Chrome ACP current-page operation
 

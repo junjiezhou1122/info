@@ -1,6 +1,6 @@
 # Proactive Action Layer
 
-GitHub issue: https://github.com/junjiezhou1122/info/issues/5
+GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/5
 
 ## Problem
 

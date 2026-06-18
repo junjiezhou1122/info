@@ -1,6 +1,6 @@
 # Chrome ACP Ambient UX
 
-GitHub issue: https://github.com/junjiezhou1122/info/issues/7
+GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/7
 
 ## Problem
 

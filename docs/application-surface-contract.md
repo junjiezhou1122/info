@@ -1,6 +1,6 @@
 # Application Surface Contract
 
-Applications in Info are projections over the ViewGraph.
+Applications in Metaflow are projections over the ViewGraph.
 
 They should not own the user's personal context as a separate silo. They choose
 the Views that matter for a task, render them into an interface, and write
@@ -336,4 +336,3 @@ If a View contract is useful across tasks, give it a processor.
 
 If the processor repeatedly improves future work, let the Promotion Engine keep
 or strengthen it.
-

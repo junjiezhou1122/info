@@ -1,6 +1,6 @@
 # Current Page Automation Router
 
-GitHub issue: https://github.com/junjiezhou1122/info/issues/10
+GitHub issue: https://github.com/junjiezhou1122/Metaflow/issues/10
 
 ## Problem
 

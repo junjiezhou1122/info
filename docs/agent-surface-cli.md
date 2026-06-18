@@ -1,6 +1,6 @@
 # Agent Surface CLI
 
-The Agent Surface CLI is the agent-native contract for Info. The UI consumes the
+The Agent Surface CLI is the agent-native contract for Metaflow. The UI consumes the
 same Views and evidence, but it is not the source of truth.
 
 ## Canonical Views
@@ -119,7 +119,7 @@ the same contract.
 
 ## Screenpipe
 
-Query Screenpipe through Info without using the UI:
+Query Screenpipe through Metaflow without using the UI:
 
 ```bash
 pnpm mf --json sensor screenpipe status
@@ -135,7 +135,7 @@ Add `--write` to normalize returned Screenpipe items into Context Observations:
 pnpm mf --json sensor screenpipe search --focused --start "30m ago" --write
 ```
 
-Raw media stays in Screenpipe; Info stores normalized metadata and provenance.
+Raw media stays in Screenpipe; Metaflow stores normalized metadata and provenance.
 
 ## Markdown Memory
 
