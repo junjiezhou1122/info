@@ -414,3 +414,38 @@ fi
     rmSync(dir, { recursive: true, force: true });
   }
 }));
+
+test("mf memory demote moves accepted memory back to candidate", () => withDb((dbPath, store) => {
+  store.upsertView({ id: "memory:test:demote", view_type: "memory.daily", title: "Test", status: "accepted" });
+  const result = JSON.parse(mf(dbPath, ["--json", "memory", "demote", "memory:test:demote"])) as { ok: boolean; data: { memory_id: string; status: string } };
+  assert.equal(result.ok, true);
+  assert.equal(result.data.status, "candidate");
+  assert.equal(store.getView("memory:test:demote")?.status, "candidate");
+}));
+
+test("mf memory archive sets memory view status to archived", () => withDb((dbPath, store) => {
+  store.upsertView({ id: "memory:test:archive", view_type: "memory.profile", title: "Profile", status: "accepted" });
+  const result = JSON.parse(mf(dbPath, ["--json", "memory", "archive", "memory:test:archive", "stale"])) as { ok: boolean; data: { memory_id: string; status: string } };
+  assert.equal(result.ok, true);
+  assert.equal(result.data.status, "archived");
+  assert.equal(store.getView("memory:test:archive")?.status, "archived");
+}));
+
+test("mf memory consolidate promotes primary and archives secondary views", () => withDb((dbPath, store) => {
+  store.upsertView({ id: "memory:test:c1", view_type: "memory.daily", title: "C1" });
+  store.upsertView({ id: "memory:test:c2", view_type: "memory.daily", title: "C2" });
+  const result = JSON.parse(mf(dbPath, ["--json", "memory", "consolidate", "memory:test:c1", "memory:test:c2"])) as { ok: boolean; data: { primary_id: string; status: string; archived_ids: string[] } };
+  assert.equal(result.ok, true);
+  assert.equal(result.data.status, "accepted");
+  assert.equal(result.data.primary_id, "memory:test:c1");
+  assert.deepEqual(result.data.archived_ids, ["memory:test:c2"]);
+  assert.equal(store.getView("memory:test:c1")?.status, "accepted");
+  assert.equal(store.getView("memory:test:c2")?.status, "archived");
+}));
+
+test("mf help includes memory demote/archive/consolidate commands", () => withDb((dbPath) => {
+  const help = JSON.parse(mf(dbPath, ["--json", "help"])) as { ok: boolean; data: { usage: string[] } };
+  assert.ok(help.data.usage.some(line => line.includes("memory demote")));
+  assert.ok(help.data.usage.some(line => line.includes("memory archive")));
+  assert.ok(help.data.usage.some(line => line.includes("memory consolidate")));
+}));

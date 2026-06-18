@@ -117,6 +117,22 @@ async function main(argv: string[]): Promise<void> {
         promoteMemoryCandidate(id);
         return;
       }
+      if (command === "demote") {
+        const id = required(rest[0], "memory_id");
+        demoteMemoryView(id);
+        return;
+      }
+      if (command === "archive") {
+        const id = required(rest[0], "memory_id");
+        archiveMemoryView(id, rest.slice(1).join(" ").trim() || "manual archive");
+        return;
+      }
+      if (command === "consolidate") {
+        const ids = rest.filter(r => !r.startsWith("--"));
+        if (ids.length < 2) fail("consolidate requires at least two memory_ids", "CONSOLIDATE_REQUIRES_IDS");
+        consolidateMemoryViews(ids);
+        return;
+      }
     }
     if (area === "task") {
       if (command === "list") {
@@ -1071,6 +1087,56 @@ function promoteMemoryCandidate(id: string): void {
   else out(`target ${result.views[0]?.id ?? decision.target_view_type}`);
 }
 
+function demoteMemoryView(id: string): void {
+  const view = store.getView(id);
+  if (!view || !view.view_type.startsWith("memory.")) {
+    fail(`Memory view not found: ${id}`, "MEMORY_NOT_FOUND");
+    return;
+  }
+  if (view.status !== "accepted") {
+    fail(`Memory view ${id} is not accepted (status: ${view.status ?? "candidate"})`, "MEMORY_NOT_ACCEPTED");
+    return;
+  }
+  const demoted = store.upsertView({ ...view, status: "candidate" });
+  if (jsonOutput) {
+    emitJson({ memory_id: id, status: demoted.status });
+    return;
+  }
+  out(`demoted ${id} -> candidate`);
+}
+
+function archiveMemoryView(id: string, reason: string): void {
+  const view = store.getView(id);
+  if (!view || !view.view_type.startsWith("memory.")) {
+    fail(`Memory view not found: ${id}`, "MEMORY_NOT_FOUND");
+    return;
+  }
+  const archived = store.upsertView({ ...view, status: "archived", metadata: { ...(view.metadata ?? {}), archive_reason: reason } });
+  if (jsonOutput) {
+    emitJson({ memory_id: id, status: archived.status });
+    return;
+  }
+  out(`archived ${id}`);
+}
+
+function consolidateMemoryViews(ids: string[]): void {
+  const views = ids.map(id => {
+    const v = store.getView(id);
+    if (!v || !v.view_type.startsWith("memory.")) fail(`Memory view not found: ${id}`, "MEMORY_NOT_FOUND");
+    return v!;
+  });
+  const [primary, ...rest] = views;
+  const accepted = store.upsertView({ ...primary, status: "accepted", metadata: { ...(primary.metadata ?? {}), consolidated_from: ids } });
+  for (const v of rest) {
+    store.upsertView({ ...v, status: "archived", metadata: { ...(v.metadata ?? {}), consolidated_into: primary.id } });
+  }
+  if (jsonOutput) {
+    emitJson({ primary_id: accepted.id, status: accepted.status, archived_ids: rest.map(v => v.id) });
+    return;
+  }
+  out(`consolidated ${ids.join(", ")} -> ${accepted.id}`);
+}
+
 function printStoredViewLine(view: StoredContextView): void {
   out(`  ${view.view_type} ${view.id} ${view.updated_at} ${view.title ?? ""}`.trim());
 }
@@ -1233,6 +1299,9 @@ function printHelp(): void {
         "pnpm mf [--json] memory trace <memory_id>",
         "pnpm mf [--json] memory reject <candidate_id> [reason]",
         "pnpm mf [--json] memory promote <candidate_id>",
+        "pnpm mf [--json] memory demote <memory_id>",
+        "pnpm mf [--json] memory archive <memory_id> [reason]",
+        "pnpm mf [--json] memory consolidate <memory_id> <memory_id> [more...]",
       ],
     });
     return;
@@ -1265,7 +1334,10 @@ function printHelp(): void {
   pnpm mf [--json] memory candidates
   pnpm mf [--json] memory trace <memory_id>
   pnpm mf [--json] memory reject <candidate_id> [reason]
-  pnpm mf [--json] memory promote <candidate_id>`);
+  pnpm mf [--json] memory promote <candidate_id>
+  pnpm mf [--json] memory demote <memory_id>
+  pnpm mf [--json] memory archive <memory_id> [reason]
+  pnpm mf [--json] memory consolidate <memory_id> <memory_id> [more...]`);
 }
 
 function parseGlobalArgs(argv: string[]): { json: boolean; argv: string[] } {
