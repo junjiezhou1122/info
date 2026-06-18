@@ -30,6 +30,39 @@ const AMBIENT_VIEW_TYPES = [
   "app.language.review_queue",
   "memory.language.difficult_segments",
 ];
+const VIEW_GROUPS = [
+  {
+    id: "surface",
+    title: "Now",
+    subtitle: "current work state",
+    types: ["state.surface", "work.focus_set", "project.current", "thread.active_work", "project.current_context"],
+  },
+  {
+    id: "actions",
+    title: "Actions",
+    subtitle: "things the runtime can help with",
+    types: ["agent.task_list", "advice.research", "advice.writing_assist", "task.background_research", "draft.writing_continuation", "opportunity.tool", "task.toolsmith_prototype", "draft.tool_prototype", "tool.prototype_artifact"],
+  },
+  {
+    id: "memory",
+    title: "Memory",
+    subtitle: "durable context",
+    types: ["memory.profile", "memory.daily", "memory", "brief.research", "brief.background_research", "resource"],
+  },
+  {
+    id: "patterns",
+    title: "Patterns",
+    subtitle: "intent and workflow compression",
+    types: ["intent", "workflow", "activity_block", "activity", "proposal"],
+  },
+  {
+    id: "evidence",
+    title: "Evidence",
+    subtitle: "raw signals for debugging",
+    types: ["audio", "visual_frame", "evidence"],
+  },
+];
+const DEFAULT_VIEW_TYPE = "work.focus_set";
 const VIEW_CATALOG_CACHE = new Map<string, ViewFamilyDefinition>();
 let VIEW_CATALOG_ORDER_CACHE: string[] = FALLBACK_VIEW_TYPE_ORDER;
 type SourceFilter = "screenpipe" | "browser" | "runtime" | "all";
@@ -71,11 +104,11 @@ function App() {
         bucketMinutes: chooseBucket(minutes),
         includeLowLevelScreenpipe: debugMode,
         dedupe: !debugMode,
-        bucketItemLimit: debugMode ? false : 50,
+        bucketItemLimit: debugMode ? 80 : 18,
         summarizeHeartbeats: !debugMode,
         sourceFilter,
         mergeContinuous: true,
-        mergeGapMinutes: 3,
+        mergeGapMinutes: debugMode ? 3 : 8,
       });
       if (seq !== refreshSeq.current) return;
       setTimeline(next);
@@ -766,46 +799,54 @@ function ViewFamily({ family }: { family: ViewFamilySummary }) {
 }
 
 function MemoryViewsPanel({ response, loading, status, onInspect }: { response: ViewFamiliesResponse | null; loading: boolean; status: string; onInspect: (state: { view?: ContextViewSummary; loading: boolean }) => void }) {
-  const [selectedType, setSelectedType] = useState("state.surface");
+  const [selectedGroupId, setSelectedGroupId] = useState(VIEW_GROUPS[0].id);
+  const [selectedType, setSelectedType] = useState(DEFAULT_VIEW_TYPE);
   const [selectedViewId, setSelectedViewId] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<ContextViewSummary | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [typeViews, setTypeViews] = useState<Record<string, ContextViewSummary[]>>({});
   const [typeLoading, setTypeLoading] = useState(false);
   const [typeStatus, setTypeStatus] = useState("");
-  const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const families = response?.families ?? [];
-  const familyOrder = viewTypeOrder({ response, families });
   const familyByType = useMemo(() => new Map(families.map(family => [family.family, family])), [families]);
+  const groups = useMemo(() => viewGroupSummaries(families), [families]);
+  const selectedGroup = groups.find(group => group.id === selectedGroupId) ?? groups[0];
+  const visibleTypes = selectedGroup?.types ?? [];
   const views = typeViews[selectedType] ?? [];
+  const selectedTypeLoaded = typeViews[selectedType]?.length ?? 0;
   const loadedViews = Object.values(typeViews).flat();
-  const aiViews = loadedViews.filter(view => compilerId(view).startsWith("ai."));
-  const tabs = useMemo(() => familyOrder.map(type => {
+  const tabs = useMemo(() => visibleTypes.map(type => {
     const family = familyByType.get(type);
     const loaded = typeViews[type]?.length ?? 0;
-    const aiCount = typeViews[type]?.filter(view => compilerId(view).startsWith("ai.")).length ?? 0;
-    return { type, count: family?.count ?? 0, loaded, aiCount };
-  }), [familyByType, familyOrder, typeViews]);
+    return { type, count: family?.count ?? 0, loaded };
+  }), [familyByType, visibleTypes, typeViews]);
   const selectedViews = useMemo(() => views
     .filter(view => view.view_type === selectedType)
     .sort((a, b) => Date.parse(b.updated_at ?? "") - Date.parse(a.updated_at ?? "")), [views, selectedType]);
   const selectedSummary = selectedViews.find(view => view.id === selectedViewId) ?? selectedViews[0];
   const activeView = selectedDetail?.id === selectedSummary?.id ? selectedDetail : selectedSummary;
   const totalCount = families.reduce((sum, family) => sum + family.count, 0);
+  const readableCount = groups.reduce((sum, group) => sum + group.count, 0);
 
   useEffect(() => {
     if (!families.length) return;
-    const currentCount = familyByType.get(selectedType)?.count ?? 0;
-    if (currentCount === 0) setSelectedType(tabs.find(tab => tab.count > 0)?.type ?? "state.surface");
-  }, [families, familyByType, selectedType, tabs]);
+    const group = groups.find(group => group.id === selectedGroupId) ?? groups[0];
+    if (!group) return;
+    if (!group.types.includes(selectedType) || (familyByType.get(selectedType)?.count ?? 0) === 0) {
+      setSelectedGroupId(group.id);
+      setSelectedType(firstPopulatedType(group, familyByType) ?? group.types[0] ?? DEFAULT_VIEW_TYPE);
+      setSelectedViewId(null);
+      setSelectedDetail(null);
+    }
+  }, [families, familyByType, groups, selectedGroupId, selectedType]);
 
   useEffect(() => {
     const familyCount = familyByType.get(selectedType)?.count ?? 0;
-    if (!familyCount || typeViews[selectedType]?.length) return;
+    if (!familyCount || selectedTypeLoaded) return;
     let cancelled = false;
     setTypeLoading(true);
     setTypeStatus(`Loading ${viewFamilyLabel(selectedType)}…`);
-    fetchViewsByType(selectedType, { limit: viewPageSize(selectedType) })
+    fetchViewsByType(selectedType, { limit: initialViewPageSize(selectedType) })
       .then(result => {
         if (cancelled) return;
         setTypeViews(prev => ({ ...prev, [selectedType]: result.views ?? [] }));
@@ -820,7 +861,7 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
     return () => {
       cancelled = true;
     };
-  }, [selectedType, familyByType, typeViews]);
+  }, [selectedType, familyByType, selectedTypeLoaded]);
 
   useEffect(() => {
     if (!selectedViews.length) {
@@ -857,18 +898,6 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
     onInspect({ view: activeView, loading: detailLoading });
   }, [activeView, detailLoading, onInspect]);
 
-  useEffect(() => {
-    const target = loadMoreRef.current;
-    const current = typeViews[selectedType] ?? [];
-    const familyCount = familyByType.get(selectedType)?.count ?? 0;
-    if (!target || current.length >= familyCount) return;
-    const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) void loadMore();
-    }, { root: null, rootMargin: "900px 0px", threshold: 0.01 });
-    observer.observe(target);
-    return () => observer.disconnect();
-  }, [selectedType, selectedViews.length, typeLoading, familyByType, typeViews]);
-
   async function loadMore() {
     const current = typeViews[selectedType] ?? [];
     const familyCount = familyByType.get(selectedType)?.count ?? 0;
@@ -876,7 +905,7 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
     setTypeLoading(true);
     setTypeStatus(`Loading more ${viewFamilyLabel(selectedType)}…`);
     try {
-      const result = await fetchViewsByType(selectedType, { limit: viewPageSize(selectedType) + current.length });
+      const result = await fetchViewsByType(selectedType, { limit: Math.min(current.length + initialViewPageSize(selectedType), viewPageSize(selectedType)) });
       setTypeViews(prev => ({ ...prev, [selectedType]: result.views ?? [] }));
       setTypeStatus(`${result.views?.length ?? 0}/${familyCount} ${viewFamilyLabel(selectedType)} loaded`);
     } catch (error) {
@@ -886,16 +915,31 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
     }
   }
 
-  if (loading) return <div className="empty-state">Loading runtime view families…</div>;
+  if (loading) return <ViewSkeleton />;
   return (
     <>
       <section className="status-row views-status">
-        <Stat label="Active Views" value={totalCount} />
+        <Stat label="Readable" value={readableCount} />
         <Stat label="Loaded" value={loadedViews.length} />
-        <Stat label="AI Loaded" value={aiViews.length} />
+        <Stat label="Total Stored" value={compactNumber(totalCount)} />
         <div className="status-text">{typeStatus || status}</div>
       </section>
-      <section className="view-type-tabs" aria-label="View type tabs">
+      <section className="view-workspace" aria-label="Runtime workspace">
+        <div className="view-group-rail" aria-label="View groups">
+          {groups.map(group => (
+            <button key={group.id} className={group.id === selectedGroup?.id ? "active" : ""} onClick={() => {
+              setSelectedGroupId(group.id);
+              setSelectedType(firstPopulatedType(group, familyByType) ?? group.types[0] ?? DEFAULT_VIEW_TYPE);
+              setSelectedViewId(null);
+              setSelectedDetail(null);
+            }}>
+              <span>{group.title}</span>
+              <b>{compactNumber(group.count)}</b>
+              <em>{group.subtitle}</em>
+            </button>
+          ))}
+        </div>
+      <section className="view-type-tabs compact" aria-label="View type tabs">
         {tabs.map(tab => (
           <button key={tab.type} className={tab.type === selectedType ? "active" : ""} onClick={() => {
             setSelectedType(tab.type);
@@ -904,7 +948,7 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
           }}>
             <span>{viewFamilyLabel(tab.type)}</span>
             <b>{compactNumber(tab.count)}</b>
-            <em>{tab.loaded > 0 ? `${tab.loaded} loaded${tab.aiCount > 0 ? ` · ${tab.aiCount} AI` : ""}` : viewTypePurpose(tab.type)}</em>
+            <em>{tab.loaded > 0 ? `${tab.loaded} loaded` : viewTypePurpose(tab.type)}</em>
           </button>
         ))}
       </section>
@@ -921,13 +965,14 @@ function MemoryViewsPanel({ response, loading, status, onInspect }: { response: 
             {selectedViews.length ? selectedViews.map(view => (
               <ViewListRow key={view.id} view={view} selected={view.id === selectedSummary?.id} onSelect={() => setSelectedViewId(view.id)} />
             )) : <div className="empty-inline">{typeLoading ? `Loading ${viewFamilyLabel(selectedType)}…` : `No ${viewFamilyLabel(selectedType)} yet.`}</div>}
-            {selectedViews.length < (familyByType.get(selectedType)?.count ?? 0) && (
-              <div className="load-more-sentinel" ref={loadMoreRef}>
-                {typeLoading ? "Loading more…" : "Scroll for more"}
-              </div>
+            {selectedViews.length < Math.min(familyByType.get(selectedType)?.count ?? 0, viewPageSize(selectedType)) && (
+              <button className="load-more-button" type="button" onClick={loadMore} disabled={typeLoading}>
+                {typeLoading ? "Loading more..." : `Load ${Math.min(initialViewPageSize(selectedType), (familyByType.get(selectedType)?.count ?? 0) - selectedViews.length)} more`}
+              </button>
             )}
           </div>
         </div>
+      </section>
       </section>
     </>
   );
@@ -1053,8 +1098,22 @@ function ViewDetail({ view, loading }: { view?: ContextViewSummary; loading: boo
   );
 }
 
+function ViewSkeleton() {
+  return (
+    <section className="view-skeleton" aria-label="Loading runtime workspace">
+      <div className="skeleton-line short" />
+      <div className="skeleton-grid">
+        {Array.from({ length: 5 }).map((_, index) => <div className="skeleton-card" key={index} />)}
+      </div>
+      <div className="skeleton-list">
+        {Array.from({ length: 6 }).map((_, index) => <div className="skeleton-row" key={index} />)}
+      </div>
+    </section>
+  );
+}
+
 function Timeline({ buckets, loading, sourceFilter, selectedItemId, onSelect, onOpenFrame }: { buckets: TimelineBucket[]; loading: boolean; sourceFilter: SourceFilter; selectedItemId: string | null; onSelect: (id: string) => void; onOpenFrame: (preview: FramePreview) => void }) {
-  if (loading) return <div className="empty-state">Loading timeline…</div>;
+  if (loading) return <TimelineSkeleton />;
   if (!buckets.length) return <div className="empty-state">No {sourceFilterLabel(sourceFilter).toLowerCase()} items in this time window. Click Sync or widen the time range.</div>;
   return (
     <section className="timeline-list" aria-label="Activity timeline">
@@ -1063,21 +1122,54 @@ function Timeline({ buckets, loading, sourceFilter, selectedItemId, onSelect, on
   );
 }
 
+function TimelineSkeleton() {
+  return (
+    <section className="timeline-list timeline-skeleton" aria-label="Loading timeline">
+      {Array.from({ length: 4 }).map((_, bucketIndex) => (
+        <section className="bucket" key={bucketIndex}>
+          <div className="bucket-heading">
+            <div>
+              <div className="skeleton-line time" />
+              <div className="skeleton-line summary" />
+            </div>
+            <span>Loading</span>
+          </div>
+          <div className="bucket-items">
+            {Array.from({ length: 3 }).map((_, rowIndex) => (
+              <div className="timeline-row" key={rowIndex}>
+                <div className="row-icon" />
+                <div className="row-content">
+                  <div className="skeleton-line" />
+                  <div className="skeleton-line summary" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </section>
+  );
+}
+
 function Bucket({ bucket, selectedItemId, onSelect, onOpenFrame }: { bucket: TimelineBucket; selectedItemId: string | null; onSelect: (id: string) => void; onOpenFrame: (preview: FramePreview) => void }) {
+  const dominant = dominantLabel(bucket);
   return (
     <section className="bucket">
       <div className="bucket-heading">
-        <time>{formatRange(bucket.start, bucket.end)}</time>
-        <span>{bucket.count} items</span>
+        <div>
+          <time>{formatRange(bucket.start, bucket.end)}</time>
+          {bucket.summary && <p>{bucket.summary}</p>}
+        </div>
+        <span>{dominant} · {bucket.count}</span>
       </div>
       <div className="bucket-items">
-        {bucket.items.map(item => <TimelineRow key={item.id} item={item} selected={item.id === selectedItemId} onSelect={() => onSelect(item.id)} onOpenFrame={onOpenFrame} />)}
+        {bucket.items.map(item => <TimelineRow key={item.id} item={item} selected={item.id === selectedItemId} showFrames={item.id === selectedItemId} onSelect={() => onSelect(item.id)} onOpenFrame={onOpenFrame} />)}
       </div>
     </section>
   );
 }
 
-function TimelineRow({ item, selected, onSelect, onOpenFrame }: { item: TimelineItem; selected: boolean; onSelect: () => void; onOpenFrame: (preview: FramePreview) => void }) {
+function TimelineRow({ item, selected, showFrames, onSelect, onOpenFrame }: { item: TimelineItem; selected: boolean; showFrames: boolean; onSelect: () => void; onOpenFrame: (preview: FramePreview) => void }) {
   const frameIds = frameIdsOf(item).slice(0, 3);
   return (
     <article className={`timeline-row ${selected ? "selected" : ""}`} onClick={onSelect}>
@@ -1090,13 +1182,17 @@ function TimelineRow({ item, selected, onSelect, onOpenFrame }: { item: Timeline
         <div className="row-subtitle">{item.subtitle || sourceLabel(item)}</div>
         <AttributionStrip item={item} />
         {item.text && <div className="row-text">{item.text}</div>}
-        {frameIds.length > 0 && (
+        {showFrames && frameIds.length > 0 && (
           <div className="row-frames" aria-label="Screenpipe OCR screenshots">
             {frameIds.map(frameId => (
               <FrameThumb key={String(frameId)} frameId={frameId} title={item.title} onOpenFrame={onOpenFrame} />
             ))}
           </div>
         )}
+        {!showFrames && frameIds.length > 0 && <button className="row-frame-count" type="button" onClick={event => {
+          event.stopPropagation();
+          onSelect();
+        }}>{frameIds.length} screenshots</button>}
         <div className="row-meta">
           <Tag>{item.source}</Tag>
           {item.schema && <Tag>{item.schema}</Tag>}
@@ -1558,8 +1654,46 @@ function compactNumber(value: number) {
   return String(value);
 }
 
+function viewGroupSummaries(families: ViewFamilySummary[]) {
+  const byType = new Map(families.map(family => [family.family, family]));
+  const used = new Set<string>();
+  const groups = VIEW_GROUPS.map(group => {
+    const types = group.types.filter(type => byType.has(type) || currentViewCatalogDefinition(type));
+    types.forEach(type => used.add(type));
+    return {
+      ...group,
+      types,
+      count: types.reduce((sum, type) => sum + (byType.get(type)?.count ?? 0), 0),
+    };
+  });
+  const otherTypes = viewTypeOrder({ families }).filter(type => !used.has(type));
+  if (otherTypes.length) {
+    groups.push({
+      id: "other",
+      title: "Other",
+      subtitle: "less common runtime views",
+      types: otherTypes,
+      count: otherTypes.reduce((sum, type) => sum + (byType.get(type)?.count ?? 0), 0),
+    });
+  }
+  return groups.filter(group => group.types.length);
+}
+
+function firstPopulatedType(group: { types: string[] }, familyByType: Map<string, ViewFamilySummary>) {
+  return group.types.find(type => (familyByType.get(type)?.count ?? 0) > 0);
+}
+
+function initialViewPageSize(type: string) {
+  if (type === "evidence" || type === "visual_frame" || type === "activity") return 24;
+  if (type === "audio" || type === "activity_block" || type === "proposal") return 36;
+  if (type.startsWith("advice.") || type.startsWith("task.") || type.startsWith("draft.") || type.startsWith("opportunity.")) return 30;
+  return 20;
+}
+
 function viewPageSize(type: string) {
-  return currentViewCatalogDefinition(type)?.default_page_size ?? (type === "state.surface" || type === "work.focus_set" || type === "project.current" ? 40 : type === "memory.daily" || type === "memory.profile" ? 30 : type === "evidence" || type === "activity" ? 120 : type === "visual_frame" || type === "proposal" ? 80 : type.startsWith("advice.") || type.startsWith("task.") || type.startsWith("draft.") || type.startsWith("opportunity.") ? 80 : 60);
+  const catalogSize = currentViewCatalogDefinition(type)?.default_page_size;
+  const localSize = type === "state.surface" || type === "work.focus_set" || type === "project.current" ? 40 : type === "memory.daily" || type === "memory.profile" ? 30 : type === "evidence" || type === "activity" ? 80 : type === "visual_frame" || type === "proposal" ? 60 : type.startsWith("advice.") || type.startsWith("task.") || type.startsWith("draft.") || type.startsWith("opportunity.") ? 60 : 48;
+  return Math.min(catalogSize ?? localSize, localSize);
 }
 
 function viewTypePurpose(type: string) {
@@ -1637,6 +1771,10 @@ function summarizeSignals(buckets: TimelineBucket[]) {
   };
 }
 
+function dominantLabel(bucket: TimelineBucket) {
+  return bucket.top_apps[0] || bucket.top_domains[0] || bucket.top_projects[0] || bucket.top_sources[0] || "activity";
+}
+
 function chooseBucket(minutes: number) {
   if (minutes <= 90) return 5;
   if (minutes <= 240) return 10;
@@ -1647,10 +1785,10 @@ function chooseBucket(minutes: number) {
 function timelineUiRecordLimit(minutes: number, sourceFilter: SourceFilter, detailMode: DetailMode) {
   if (detailMode === "debug") {
     const samplesPerMinute = sourceFilter === "runtime" ? 2 : sourceFilter === "browser" ? 8 : sourceFilter === "screenpipe" ? 10 : 12;
-    return Math.min(3_000, Math.max(500, Math.ceil(minutes * samplesPerMinute)));
+    return Math.min(2_400, Math.max(400, Math.ceil(minutes * samplesPerMinute)));
   }
-  const samplesPerMinute = sourceFilter === "runtime" ? 1 : sourceFilter === "browser" ? 3 : sourceFilter === "screenpipe" ? 4 : 5;
-  return Math.min(1_200, Math.max(240, Math.ceil(minutes * samplesPerMinute)));
+  const samplesPerMinute = sourceFilter === "runtime" ? 1 : sourceFilter === "browser" ? 2 : sourceFilter === "screenpipe" ? 3 : 4;
+  return Math.min(720, Math.max(160, Math.ceil(minutes * samplesPerMinute)));
 }
 
 function iconFor(item: TimelineItem) {
