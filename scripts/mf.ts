@@ -9,10 +9,16 @@ import {
   buildProcessorViewReport,
   ProcessorRuntime,
   createCurrentPageRouterProcessor,
+  createMemoryProfileUpdateProcessor,
+  createProjectCurrentProcessor,
+  createProjectDecisionExtractorProcessor,
+  createProjectInboxProcessor,
+  createProjectTasksProcessor,
   createRouteCandidateProcessor,
   createScreenpipeSurfaceProcessor,
   createSurfaceStateProcessor,
   createViewPromotionEngineProcessor,
+  createWorkRouterBatchProcessor,
   type ProcessorDefinition,
 } from "@info/processor-runtime";
 import { compileMemoryGate as compileMemoryGateView } from "@info/views";
@@ -117,6 +123,25 @@ async function main(argv: string[]): Promise<void> {
         promoteMemoryCandidate(id);
         return;
       }
+      if (command === "demote") {
+        const id = required(rest[0], "memory_id");
+        demoteMemoryView(id);
+        return;
+      }
+      if (command === "archive") {
+        const id = required(rest[0], "memory_id");
+        archiveMemoryView(id, rest.slice(1).join(" ").trim() || "manual archive");
+        return;
+      }
+      if (command === "consolidate") {
+        const ids = rest.filter(item => !item.startsWith("--"));
+        if (ids.length < 2) {
+          fail("consolidate requires at least two memory_ids", "CONSOLIDATE_REQUIRES_IDS");
+          return;
+        }
+        consolidateMemoryViews(ids);
+        return;
+      }
     }
     if (area === "task") {
       if (command === "list") {
@@ -131,6 +156,34 @@ async function main(argv: string[]): Promise<void> {
         await runAgentTaskQueue("process", rest);
         return;
       }
+    }
+    if (area === "evolution") {
+      if (command === "candidates") {
+        printEvolutionCandidates();
+        return;
+      }
+      if (command === "show") {
+        const id = required(rest[0], "candidate_id");
+        showEvolutionCandidate(id);
+        return;
+      }
+      if (command === "apply") {
+        const id = required(rest[0], "candidate_id");
+        await applyEvolutionCandidate(id, rest.slice(1));
+        return;
+      }
+      if (command === "verify") {
+        const id = required(rest[0], "candidate_id");
+        printEvolutionVerification(id);
+        return;
+      }
+      if (command === "rollback") {
+        const id = required(rest[0], "candidate_id");
+        rollbackEvolutionCandidate(id);
+        return;
+      }
+      fail("unknown command", "UNKNOWN_COMMAND");
+      return;
     }
     fail("unknown command", "UNKNOWN_COMMAND");
     return;
@@ -196,6 +249,26 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (command === "merge") {
+    mergeViewsFromCli(rest);
+    return;
+  }
+
+  if (command === "split") {
+    splitViewFromCli(rest);
+    return;
+  }
+
+  if (command === "diff") {
+    diffViewsFromCli(rest);
+    return;
+  }
+
+  if (command === "promote") {
+    promoteViewFromCli(rest);
+    return;
+  }
+
   fail("unknown command", "UNKNOWN_COMMAND");
 }
 
@@ -206,6 +279,12 @@ function builtInProcessors(): ProcessorDefinition[] {
     createCurrentPageRouterProcessor(),
     createScreenpipeSurfaceProcessor(),
     createViewPromotionEngineProcessor(),
+    createWorkRouterBatchProcessor(),
+    createProjectCurrentProcessor(),
+    createMemoryProfileUpdateProcessor(),
+    createProjectInboxProcessor(),
+    createProjectTasksProcessor(),
+    createProjectDecisionExtractorProcessor(),
   ];
 }
 
@@ -706,6 +785,77 @@ function deleteViewFromCli(args: string[]): void {
   out(`archived ${archived.view_type} ${archived.id}`);
 }
 
+function mergeViewsFromCli(args: string[]): void {
+  const sourceIds = valuesAfter(args, "--source-view");
+  if (sourceIds.length < 2) {
+    fail("merge requires at least two --source-view ids", "MISSING_ARGS");
+    return;
+  }
+  const targetId = required(valueAfter(args, "--id"), "target_id");
+  const viewType = valueAfter(args, "--view-type");
+  const title = valueAfter(args, "--title");
+  const patch = patchFromArgs(args);
+  const merged = store.mergeViews(sourceIds, targetId, { view_type: viewType ?? undefined, title: title ?? undefined, content: patch?.content });
+  if (!merged) {
+    fail("None of the source views were found", "VIEW_NOT_FOUND");
+    return;
+  }
+  appendAgentSurfaceViewEvent("agent_surface.view_merged", "agent", merged, { source_view_ids: sourceIds, command: currentCommand });
+  emitViewMutationResult("merged", merged);
+}
+
+function splitViewFromCli(args: string[]): void {
+  const sourceId = required(args[0], "view_id");
+  const source = store.getView(sourceId);
+  if (!source) {
+    fail(`View not found: ${sourceId}`, "VIEW_NOT_FOUND");
+    return;
+  }
+  const count = numberAfter(args, "--into") ?? 2;
+  const children = Array.from({ length: count }, (_, index) => ({
+    id: `${sourceId}:split:${index}`,
+    content: { split_index: index, split_total: count },
+    title: source.title ? `${source.title} (${index + 1}/${count})` : undefined,
+  }));
+  const results = store.splitView(sourceId, children);
+  if (jsonOutput) {
+    emitJson({ source: viewSummary(source), views: results.map(viewSummary) });
+    return;
+  }
+  out(`split ${source.view_type} ${sourceId} into ${results.length}`);
+  for (const view of results) out(`  ${view.id}`);
+}
+
+function diffViewsFromCli(args: string[]): void {
+  const idA = required(args[0], "view_id_a");
+  const idB = required(args[1], "view_id_b");
+  const diff = store.diffViews(idA, idB);
+  if (!diff) {
+    fail(`One or both views not found: ${idA}, ${idB}`, "VIEW_NOT_FOUND");
+    return;
+  }
+  if (jsonOutput) {
+    emitJson({ id_a: idA, id_b: idB, diff });
+    return;
+  }
+  out(`diff ${idA} ${idB}`);
+  for (const [key, value] of Object.entries(diff.added)) out(`  + ${key}: ${JSON.stringify(value)}`);
+  for (const [key, value] of Object.entries(diff.removed)) out(`  - ${key}: ${JSON.stringify(value)}`);
+  for (const [key, value] of Object.entries(diff.changed)) out(`  ~ ${key}: ${JSON.stringify(value.from)} -> ${JSON.stringify(value.to)}`);
+}
+
+function promoteViewFromCli(args: string[]): void {
+  const id = required(args[0], "view_id");
+  const targetType = required(valueAfter(args, "--view-type"), "view_type");
+  const promoted = store.promoteView(id, targetType);
+  if (!promoted) {
+    fail(`View not found: ${id}`, "VIEW_NOT_FOUND");
+    return;
+  }
+  appendAgentSurfaceViewEvent("agent_surface.view_promoted", "agent", promoted, { source_view_id: id, command: currentCommand });
+  emitViewMutationResult("promoted", promoted);
+}
+
 function printViewChildren(viewId: string, args: string[]): void {
   const root = store.getView(viewId);
   if (!root) {
@@ -1071,6 +1221,258 @@ function promoteMemoryCandidate(id: string): void {
   else out(`target ${result.views[0]?.id ?? decision.target_view_type}`);
 }
 
+function demoteMemoryView(id: string): void {
+  const view = store.getView(id);
+  if (!view || !view.view_type.startsWith("memory.")) {
+    fail(`Memory view not found: ${id}`, "MEMORY_NOT_FOUND");
+    return;
+  }
+  if (view.status !== "accepted") {
+    fail(`Memory view ${id} is not accepted (status: ${view.status ?? "candidate"})`, "MEMORY_NOT_ACCEPTED");
+    return;
+  }
+  const demoted = store.upsertView({ ...view, status: "candidate" });
+  if (jsonOutput) {
+    emitJson({ memory_id: id, status: demoted.status });
+    return;
+  }
+  out(`demoted ${id} -> candidate`);
+}
+
+function archiveMemoryView(id: string, reason: string): void {
+  const view = store.getView(id);
+  if (!view || !view.view_type.startsWith("memory.")) {
+    fail(`Memory view not found: ${id}`, "MEMORY_NOT_FOUND");
+    return;
+  }
+  const archived = store.upsertView({ ...view, status: "archived", metadata: { ...(view.metadata ?? {}), archive_reason: reason } });
+  if (jsonOutput) {
+    emitJson({ memory_id: id, status: archived.status });
+    return;
+  }
+  out(`archived ${id}`);
+}
+
+function consolidateMemoryViews(ids: string[]): void {
+  const views = ids.map(id => {
+    const view = store.getView(id);
+    if (!view || !view.view_type.startsWith("memory.")) fail(`Memory view not found: ${id}`, "MEMORY_NOT_FOUND");
+    return view!;
+  });
+  const [primary, ...rest] = views;
+  const accepted = store.upsertView({ ...primary, status: "accepted", metadata: { ...(primary.metadata ?? {}), consolidated_from: ids } });
+  for (const view of rest) {
+    store.upsertView({ ...view, status: "archived", metadata: { ...(view.metadata ?? {}), consolidated_into: primary.id } });
+  }
+  if (jsonOutput) {
+    emitJson({ primary_id: accepted.id, status: accepted.status, archived_ids: rest.map(view => view.id) });
+    return;
+  }
+  out(`consolidated ${ids.join(", ")} -> ${accepted.id}`);
+}
+
+function findEvolutionCandidate(id: string): { candidate: Record<string, unknown>; view: StoredContextView } | null {
+  const views = store.listViews({ view_types: ["view.promotion_candidates"], active_only: true, limit: 100 });
+  for (const view of views) {
+    const candidates = Array.isArray(view.content?.candidates) ? view.content.candidates as Array<Record<string, unknown>> : [];
+    const candidate = candidates.find(item => item.id === id);
+    if (candidate) return { candidate, view };
+  }
+  return null;
+}
+
+function printEvolutionCandidates(): void {
+  const views = store.listViews({ view_types: ["view.promotion_candidates"], active_only: true, limit: 100 });
+  const rows: Array<Record<string, string>> = [];
+  for (const view of views) {
+    const candidates = Array.isArray(view.content?.candidates) ? view.content.candidates as Array<Record<string, unknown>> : [];
+    for (const candidate of candidates) {
+      rows.push({
+        id: String(candidate.id ?? "-"),
+        action: String(candidate.action ?? "-"),
+        priority: String(candidate.priority ?? "-"),
+        target: String(candidate.target_view_type ?? candidate.target_processor_id ?? candidate.target_view_id ?? "-"),
+        reason: String(candidate.reason ?? "").slice(0, 80),
+      });
+    }
+  }
+  if (jsonOutput) {
+    emitJson({ candidates: rows });
+    return;
+  }
+  if (!rows.length) {
+    out("No evolution candidates found");
+    return;
+  }
+  printTable(rows, ["id", "action", "priority", "target", "reason"]);
+}
+
+function showEvolutionCandidate(id: string): void {
+  const found = findEvolutionCandidate(id);
+  if (!found) {
+    fail(`Evolution candidate not found: ${id}`, "EVOLUTION_CANDIDATE_NOT_FOUND");
+    return;
+  }
+  const operations = store.listViews({ view_types: ["evolution.operation"], limit: 100 })
+    .filter(view => view.content?.candidate_id === id);
+  const verification = store.listViews({ view_types: ["evolution.verification"], limit: 10 })
+    .find(view => view.content?.candidate_id === id);
+  if (jsonOutput) {
+    emitJson({ candidate: found.candidate, source_view_id: found.view.id, operations: operations.map(viewSummary), verification: verification ? viewSummary(verification) : null });
+    return;
+  }
+  out(`candidate: ${id}`);
+  out(`  action: ${found.candidate.action ?? "-"}`);
+  out(`  priority: ${found.candidate.priority ?? "-"}`);
+  out(`  target_view_type: ${found.candidate.target_view_type ?? "-"}`);
+  out(`  target_view_id: ${found.candidate.target_view_id ?? "-"}`);
+  out(`  target_processor_id: ${found.candidate.target_processor_id ?? "-"}`);
+  out(`  reason: ${found.candidate.reason ?? "-"}`);
+  out(`  expected_future_task: ${found.candidate.expected_future_task ?? "-"}`);
+  out(`  source_view_id: ${found.view.id}`);
+  if (operations.length) out(`  operations: ${operations.map(view => view.id).join(", ")}`);
+  if (verification) out(`  verification: ${verification.id} verdict=${verification.content?.verdict ?? "-"}`);
+}
+
+async function applyEvolutionCandidate(id: string, args: string[]): Promise<void> {
+  const found = findEvolutionCandidate(id);
+  if (!found) {
+    fail(`Evolution candidate not found: ${id}`, "EVOLUTION_CANDIDATE_NOT_FOUND");
+    return;
+  }
+  const { candidate } = found;
+  const mode = valueAfter(args, "--mode") ?? "agent_draft";
+  const action = String(candidate.action ?? "");
+  const opId = `evolution:op:${Date.now()}:${id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  let appliedViewId: string | undefined;
+
+  if (action === "create_view" && candidate.target_view_type) {
+    const targetViewType = String(candidate.target_view_type);
+    const newViewId = valueAfter(args, "--id") ?? `${targetViewType}:evo:${Date.now().toString(36)}`;
+    const newView = store.upsertView({
+      id: newViewId,
+      view_type: targetViewType,
+      title: String(candidate.reason ?? targetViewType).slice(0, 100),
+      status: mode === "full_auto" ? "accepted" : "candidate",
+      source_views: [found.view.id],
+      compiler: { id: "evolution.apply", version: "1", mode: "deterministic" },
+      content: { evolution_candidate_id: id, evolution_action: action, evolution_mode: mode },
+      metadata: { evolution_candidate_id: id, evolution_mode: mode },
+    });
+    appliedViewId = newView.id;
+  } else if (action && candidate.target_view_id) {
+    const target = store.getView(String(candidate.target_view_id));
+    if (target) {
+      if (action === "retire_view") {
+        const archived = store.upsertView({ ...target, status: "archived", metadata: { ...(target.metadata ?? {}), evolution_candidate_id: id } });
+        appliedViewId = archived.id;
+      } else {
+        const draftId = `evolution:draft:${Date.now().toString(36)}`;
+        const draft = store.upsertView({
+          id: draftId,
+          view_type: "evolution.draft",
+          title: `Draft: ${action} (${mode})`,
+          status: "candidate",
+          source_views: [found.view.id, String(candidate.target_view_id)],
+          compiler: { id: "evolution.apply", version: "1", mode: "deterministic" },
+          content: { evolution_candidate_id: id, evolution_action: action, evolution_mode: mode, target_view_id: candidate.target_view_id },
+          metadata: { evolution_candidate_id: id, evolution_mode: mode },
+        });
+        appliedViewId = draft.id;
+      }
+    }
+  }
+
+  const rollbackStrategy = isPlainObject(candidate.rollback) ? String(candidate.rollback.strategy ?? "archive_created") : "archive_created";
+  const opView = store.upsertView({
+    id: opId,
+    view_type: "evolution.operation",
+    title: `Evolution: ${action} (${mode})`,
+    status: "accepted",
+    source_views: [found.view.id],
+    compiler: { id: "evolution.apply", version: "1", mode: "deterministic" },
+    content: { candidate_id: id, action, mode, applied_view_id: appliedViewId, rollback_strategy: rollbackStrategy },
+    metadata: { evolution_candidate_id: id },
+  });
+  store.appendRuntimeEvent({
+    event_type: "evolution.applied",
+    actor: "agent",
+    status: "completed",
+    subject_type: "view",
+    subject_id: opView.id,
+    related_views: [found.view.id, ...(appliedViewId ? [appliedViewId] : [])],
+    payload: { candidate_id: id, action, mode, applied_view_id: appliedViewId, command: currentCommand },
+  });
+  if (jsonOutput) {
+    emitJson({ operation_id: opId, candidate_id: id, action, mode, applied_view_id: appliedViewId ?? null });
+    return;
+  }
+  out(`applied ${id} (${action}) mode=${mode}`);
+  out(`operation ${opId}`);
+  if (appliedViewId) out(`view ${appliedViewId}`);
+}
+
+function printEvolutionVerification(candidateId: string): void {
+  const found = findEvolutionCandidate(candidateId);
+  if (!found) {
+    fail(`Evolution candidate not found: ${candidateId}`, "EVOLUTION_CANDIDATE_NOT_FOUND");
+    return;
+  }
+  const operations = store.listViews({ view_types: ["evolution.operation"], limit: 100 })
+    .filter(view => view.content?.candidate_id === candidateId);
+  const verifications = store.listViews({ view_types: ["evolution.verification"], limit: 20 })
+    .filter(view => view.content?.candidate_id === candidateId);
+  if (jsonOutput) {
+    emitJson({ candidate_id: candidateId, candidate: found.candidate, operations: operations.map(viewSummary), verifications: verifications.map(viewSummary) });
+    return;
+  }
+  out(`candidate: ${candidateId}`);
+  out(`  applied_operations: ${operations.length}`);
+  if (!verifications.length) {
+    out("  verifications: none");
+    return;
+  }
+  for (const verification of verifications) {
+    out(`  verification ${verification.id}: verdict=${verification.content?.verdict ?? "-"} metric=${verification.content?.metric ?? "-"}`);
+  }
+}
+
+function rollbackEvolutionCandidate(candidateId: string): void {
+  const operations = store.listViews({ view_types: ["evolution.operation"], limit: 50 })
+    .filter(view => view.content?.candidate_id === candidateId && view.status !== "archived");
+  if (!operations.length) {
+    fail(`No applied operations found for candidate: ${candidateId}`, "EVOLUTION_OPERATION_NOT_FOUND");
+    return;
+  }
+  const rolledBack: string[] = [];
+  for (const op of operations) {
+    const appliedViewId = typeof op.content?.applied_view_id === "string" ? op.content.applied_view_id : undefined;
+    if (appliedViewId) {
+      const appliedView = store.getView(appliedViewId);
+      if (appliedView && appliedView.status !== "archived") {
+        store.upsertView({ ...appliedView, status: "archived", metadata: { ...(appliedView.metadata ?? {}), rollback_reason: `rollback of ${candidateId}` } });
+      }
+    }
+    store.upsertView({ ...op, status: "archived", metadata: { ...(op.metadata ?? {}), rolled_back: true } });
+    rolledBack.push(op.id);
+  }
+  store.appendRuntimeEvent({
+    event_type: "evolution.rolled_back",
+    actor: "agent",
+    status: "completed",
+    subject_type: "view",
+    subject_id: candidateId,
+    related_views: operations.map(op => op.id),
+    payload: { candidate_id: candidateId, rolled_back_operations: rolledBack, command: currentCommand },
+  });
+  if (jsonOutput) {
+    emitJson({ candidate_id: candidateId, rolled_back_operations: rolledBack });
+    return;
+  }
+  out(`rolled back ${rolledBack.length} operation(s) for ${candidateId}`);
+  for (const id of rolledBack) out(`  rolled back ${id}`);
+}
+
 function printStoredViewLine(view: StoredContextView): void {
   out(`  ${view.view_type} ${view.id} ${view.updated_at} ${view.title ?? ""}`.trim());
 }
@@ -1217,6 +1619,10 @@ function printHelp(): void {
         "pnpm mf [--json] view update <view_id> [--status candidate|accepted|archived|rejected] [--patch <json_file|->] [--actor agent|user]",
         "pnpm mf [--json] view delete <view_id> [--hard] [--reason <reason>] [--actor agent|user]",
         "pnpm mf [--json] view children <view_id> [--all] [--limit 50]",
+        "pnpm mf [--json] view merge --source-view <id> --source-view <id> --id <new_id> [--view-type <type>] [--title <title>]",
+        "pnpm mf [--json] view split <view_id> [--into <count>]",
+        "pnpm mf [--json] view diff <view_id_a> <view_id_b>",
+        "pnpm mf [--json] view promote <view_id> --view-type <target_type>",
         "pnpm mf [--json] processor list",
         "pnpm mf [--json] processor report",
         "pnpm mf [--json] processor run <processor_id> --record <record_id>",
@@ -1233,6 +1639,14 @@ function printHelp(): void {
         "pnpm mf [--json] memory trace <memory_id>",
         "pnpm mf [--json] memory reject <candidate_id> [reason]",
         "pnpm mf [--json] memory promote <candidate_id>",
+        "pnpm mf [--json] memory demote <memory_id>",
+        "pnpm mf [--json] memory archive <memory_id> [reason]",
+        "pnpm mf [--json] memory consolidate <memory_id> <memory_id> [more...]",
+        "pnpm mf [--json] evolution candidates",
+        "pnpm mf [--json] evolution show <candidate_id>",
+        "pnpm mf [--json] evolution apply <candidate_id> [--mode agent_draft|sandbox_auto|full_auto|manual] [--id <view_id>]",
+        "pnpm mf [--json] evolution verify <candidate_id>",
+        "pnpm mf [--json] evolution rollback <candidate_id>",
       ],
     });
     return;
@@ -1250,6 +1664,10 @@ function printHelp(): void {
   pnpm mf [--json] view update <view_id> [--status candidate|accepted|archived|rejected] [--patch <json_file|->] [--actor agent|user]
   pnpm mf [--json] view delete <view_id> [--hard] [--reason <reason>] [--actor agent|user]
   pnpm mf [--json] view children <view_id> [--all] [--limit 50]
+  pnpm mf [--json] view merge --source-view <id> --source-view <id> --id <new_id> [--view-type <type>] [--title <title>]
+  pnpm mf [--json] view split <view_id> [--into <count>]
+  pnpm mf [--json] view diff <view_id_a> <view_id_b>
+  pnpm mf [--json] view promote <view_id> --view-type <target_type>
   pnpm mf [--json] processor list
   pnpm mf [--json] processor report
   pnpm mf [--json] processor run <processor_id> --record <record_id>
@@ -1265,7 +1683,15 @@ function printHelp(): void {
   pnpm mf [--json] memory candidates
   pnpm mf [--json] memory trace <memory_id>
   pnpm mf [--json] memory reject <candidate_id> [reason]
-  pnpm mf [--json] memory promote <candidate_id>`);
+  pnpm mf [--json] memory promote <candidate_id>
+  pnpm mf [--json] memory demote <memory_id>
+  pnpm mf [--json] memory archive <memory_id> [reason]
+  pnpm mf [--json] memory consolidate <memory_id> <memory_id> [more...]
+  pnpm mf [--json] evolution candidates
+  pnpm mf [--json] evolution show <candidate_id>
+  pnpm mf [--json] evolution apply <candidate_id> [--mode agent_draft|sandbox_auto|full_auto|manual] [--id <view_id>]
+  pnpm mf [--json] evolution verify <candidate_id>
+  pnpm mf [--json] evolution rollback <candidate_id>`);
 }
 
 function parseGlobalArgs(argv: string[]): { json: boolean; argv: string[] } {

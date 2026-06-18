@@ -414,3 +414,147 @@ fi
     rmSync(dir, { recursive: true, force: true });
   }
 }));
+
+test("mf view merge split diff promote graph operations", () => withDb((dbPath, store) => {
+  store.upsertView({
+    id: "view:graph:a",
+    view_type: "project.current",
+    title: "View A",
+    status: "accepted",
+    content: { focus: "alpha", shared: "old" },
+  });
+  store.upsertView({
+    id: "view:graph:b",
+    view_type: "project.current",
+    title: "View B",
+    status: "accepted",
+    content: { detail: "beta", shared: "new" },
+  });
+
+  const merge = JSON.parse(mf(dbPath, [
+    "--json", "view", "merge",
+    "--source-view", "view:graph:a",
+    "--source-view", "view:graph:b",
+    "--id", "view:graph:merged",
+  ])) as { ok: boolean; data: { view: { id: string; source_views: string[] } } };
+  assert.equal(merge.ok, true);
+  assert.equal(merge.data.view.id, "view:graph:merged");
+  assert.deepEqual(merge.data.view.source_views, ["view:graph:a", "view:graph:b"]);
+
+  const split = JSON.parse(mf(dbPath, ["--json", "view", "split", "view:graph:a", "--into", "2"])) as {
+    ok: boolean;
+    data: { views: Array<{ id: string }> };
+  };
+  assert.equal(split.ok, true);
+  assert.equal(split.data.views.length, 2);
+
+  const diff = JSON.parse(mf(dbPath, ["--json", "view", "diff", "view:graph:a", "view:graph:b"])) as {
+    ok: boolean;
+    data: { diff: { added: Record<string, unknown>; removed: Record<string, unknown>; changed: Record<string, unknown> } };
+  };
+  assert.equal(diff.ok, true);
+  assert.ok("detail" in diff.data.diff.added);
+  assert.ok("focus" in diff.data.diff.removed);
+  assert.ok("shared" in diff.data.diff.changed);
+
+  const promote = JSON.parse(mf(dbPath, ["--json", "view", "promote", "view:graph:a", "--view-type", "work.focus_set"])) as {
+    ok: boolean;
+    data: { view: { view_type: string } };
+  };
+  assert.equal(promote.ok, true);
+  assert.equal(promote.data.view.view_type, "work.focus_set");
+}));
+
+test("mf memory lifecycle demote archive consolidate commands", () => withDb((dbPath, store) => {
+  store.upsertView({ id: "memory:test:demote", view_type: "memory.daily", title: "Daily", status: "accepted" });
+  store.upsertView({ id: "memory:test:archive", view_type: "memory.profile", title: "Profile", status: "accepted" });
+  store.upsertView({ id: "memory:test:c1", view_type: "memory.daily", title: "C1" });
+  store.upsertView({ id: "memory:test:c2", view_type: "memory.daily", title: "C2" });
+
+  const demote = JSON.parse(mf(dbPath, ["--json", "memory", "demote", "memory:test:demote"])) as { ok: boolean; data: { status: string } };
+  assert.equal(demote.ok, true);
+  assert.equal(demote.data.status, "candidate");
+  assert.equal(store.getView("memory:test:demote")?.status, "candidate");
+
+  const archive = JSON.parse(mf(dbPath, ["--json", "memory", "archive", "memory:test:archive", "stale"])) as { ok: boolean; data: { status: string } };
+  assert.equal(archive.ok, true);
+  assert.equal(archive.data.status, "archived");
+  assert.equal(store.getView("memory:test:archive")?.status, "archived");
+
+  const consolidate = JSON.parse(mf(dbPath, ["--json", "memory", "consolidate", "memory:test:c1", "memory:test:c2"])) as {
+    ok: boolean;
+    data: { primary_id: string; status: string; archived_ids: string[] };
+  };
+  assert.equal(consolidate.ok, true);
+  assert.equal(consolidate.data.primary_id, "memory:test:c1");
+  assert.equal(consolidate.data.status, "accepted");
+  assert.deepEqual(consolidate.data.archived_ids, ["memory:test:c2"]);
+  assert.equal(store.getView("memory:test:c2")?.status, "archived");
+}));
+
+test("mf evolution candidates show apply verify rollback", () => withDb((dbPath, store) => {
+  store.upsertView({
+    id: "view:stale:evo",
+    view_type: "project.current",
+    status: "accepted",
+    content: { focus: "stale" },
+  });
+  store.upsertView({
+    id: "view:promo:evo",
+    view_type: "view.promotion_candidates",
+    title: "Promotion batch",
+    status: "candidate",
+    compiler: { id: "processor.view_promotion_engine", mode: "deterministic" },
+    content: {
+      candidates: [
+        { id: "cand:create:evo", action: "create_view", target_view_type: "research.brief", priority: "high", reason: "Repeated research", rollback: { strategy: "archive_created" } },
+        { id: "cand:retire:evo", action: "retire_view", target_view_id: "view:stale:evo", priority: "low", reason: "Stale view" },
+      ],
+    },
+  });
+
+  const candidates = JSON.parse(mf(dbPath, ["--json", "evolution", "candidates"])) as { ok: boolean; data: { candidates: Array<{ id: string }> } };
+  assert.equal(candidates.ok, true);
+  assert.equal(candidates.data.candidates.length, 2);
+
+  const showBefore = JSON.parse(mf(dbPath, ["--json", "evolution", "show", "cand:create:evo"])) as {
+    ok: boolean;
+    data: { candidate: { id: string }; operations: unknown[] };
+  };
+  assert.equal(showBefore.data.candidate.id, "cand:create:evo");
+  assert.equal(showBefore.data.operations.length, 0);
+
+  const apply = JSON.parse(mf(dbPath, ["--json", "evolution", "apply", "cand:create:evo", "--mode", "full_auto", "--id", "view:evo:research"])) as {
+    ok: boolean;
+    data: { operation_id: string; applied_view_id: string | null };
+  };
+  assert.equal(apply.ok, true);
+  assert.equal(apply.data.applied_view_id, "view:evo:research");
+  assert.equal(store.getView("view:evo:research")?.status, "accepted");
+  assert.equal(store.getView(apply.data.operation_id)?.view_type, "evolution.operation");
+  assert.ok(store.listRuntimeEvents({ event_type: "evolution.applied", limit: 5 }).some(event => event.payload?.candidate_id === "cand:create:evo"));
+
+  const verify = JSON.parse(mf(dbPath, ["--json", "evolution", "verify", "cand:create:evo"])) as {
+    ok: boolean;
+    data: { operations: Array<{ id: string }> };
+  };
+  assert.equal(verify.ok, true);
+  assert.equal(verify.data.operations[0]?.id, apply.data.operation_id);
+
+  const rollback = JSON.parse(mf(dbPath, ["--json", "evolution", "rollback", "cand:create:evo"])) as {
+    ok: boolean;
+    data: { rolled_back_operations: string[] };
+  };
+  assert.equal(rollback.ok, true);
+  assert.deepEqual(rollback.data.rolled_back_operations, [apply.data.operation_id]);
+  assert.equal(store.getView("view:evo:research")?.status, "archived");
+  assert.equal(store.getView(apply.data.operation_id)?.status, "archived");
+
+  const retire = JSON.parse(mf(dbPath, ["--json", "evolution", "apply", "cand:retire:evo"])) as {
+    ok: boolean;
+    data: { applied_view_id: string | null };
+  };
+  assert.equal(retire.ok, true);
+  assert.equal(retire.data.applied_view_id, "view:stale:evo");
+  assert.equal(store.getView("view:stale:evo")?.status, "archived");
+}));

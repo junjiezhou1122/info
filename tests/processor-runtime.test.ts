@@ -8,9 +8,15 @@ import { ContextStore } from "@info/core";
 import {
   ProcessorRuntime,
   buildSurfaceStateView,
+  createMemoryProfileUpdateProcessor,
   createProcessorRegistry,
+  createProjectCurrentProcessor,
+  createProjectDecisionExtractorProcessor,
+  createProjectInboxProcessor,
+  createProjectTasksProcessor,
   createSurfaceStateProcessor,
   createViewPromotionEngineProcessor,
+  createWorkRouterBatchProcessor,
   matchesPattern,
   type ProcessorDefinition,
 } from "@info/processor-runtime";
@@ -434,3 +440,144 @@ test("surface view builder can summarize raw records without a runtime", () => {
   assert.equal(view.content?.surface_kind, "ide");
   assert.equal((view.content?.screen as any)?.frame_id, "7");
 });
+
+test("work_router_batch processor writes a work.focus_set view from route candidates", async () => withStore(async (store) => {
+  const now = new Date("2026-06-18T10:00:00.000Z");
+  const source = store.insertRecord({
+    id: "obs:batch:source",
+    schema: { name: "observation.local_project", version: 1 },
+    source: { type: "runtime" },
+    time: { observed_at: now.toISOString() },
+    content: { title: "Info repo" },
+    payload: { root: "/Users/junjie/info" },
+    privacy: { level: "private", retention: "normal" },
+  });
+  const seed = store.insertRecord({
+    id: "route:batch:seed",
+    schema: { name: "observation.route_candidate", version: 1 },
+    source: { type: "runtime", connector: "processor.route_candidate" },
+    time: { observed_at: now.toISOString() },
+    payload: {
+      source_observation_id: source.id,
+      candidate_routes: [{
+        route_key: "project:/Users/junjie/info",
+        lane_kind: "project",
+        score: 0.9,
+        rule_hits: ["project_path.present"],
+      }],
+    },
+    privacy: { level: "private", retention: "normal" },
+  });
+
+  const runtime = new ProcessorRuntime({ store, processors: [createWorkRouterBatchProcessor({ now })] });
+  const result = await runtime.processObservation(seed);
+
+  assert.deepEqual(result.processors_matched, ["processor.work_router_batch"]);
+  const view = store.getView(result.views_written[0]);
+  assert.equal(view?.view_type, "work.focus_set");
+  assert.equal(view?.compiler?.id, "processor.work_router_batch");
+  assert.equal((view?.content?.active_lanes as Array<{ lane_key: string }>)[0]?.lane_key, "project:/Users/junjie/info");
+}));
+
+test("project_current processor writes project.current from focus set views", async () => withStore(async (store) => {
+  const now = new Date("2026-06-18T10:00:00.000Z");
+  store.insertRecord({
+    id: "obs:project:source",
+    schema: { name: "observation.local_project", version: 1 },
+    source: { type: "runtime" },
+    time: { observed_at: now.toISOString() },
+    content: { title: "Changed packages/processor-runtime/index.ts" },
+    payload: { root: "/Users/junjie/info", files_touched: ["packages/processor-runtime/index.ts"] },
+    privacy: { level: "private", retention: "normal" },
+  });
+  const focus = store.upsertView({
+    id: "view:focus:project",
+    view_type: "work.focus_set",
+    status: "candidate",
+    source_records: ["obs:project:source"],
+    content: {
+      active_lanes: [{
+        lane_key: "project:/Users/junjie/info",
+        lane_kind: "project",
+        label: "info",
+        confidence: 0.8,
+        attention_share: 1,
+        source_records: ["obs:project:source"],
+        candidate_route_ids: ["route:project:1"],
+        evidence: { project: "info", project_path: "/Users/junjie/info" },
+      }],
+    },
+  });
+
+  const runtime = new ProcessorRuntime({ store, processors: [createProjectCurrentProcessor({ now })] });
+  const result = await runtime.processView(focus);
+
+  assert.deepEqual(result.processors_matched, ["processor.project_current"]);
+  const view = store.getView(result.views_written[0]);
+  assert.equal(view?.view_type, "project.current");
+  assert.equal(view?.compiler?.id, "processor.project_current");
+  assert.equal(view?.scope?.project_path, "/Users/junjie/info");
+}));
+
+test("memory_profile_update processor writes profile and preferences from feedback", async () => withStore(async (store) => {
+  const now = new Date("2026-06-18T10:00:00.000Z");
+  store.upsertView({
+    id: "view:memory_daily:today",
+    view_type: "memory.daily",
+    status: "active",
+    title: "Daily memory",
+    summary: "User prefers concise implementation notes.",
+    content: { summary: "User prefers concise implementation notes." },
+  });
+  const feedback = store.insertRecord({
+    id: "feedback:edit:1",
+    schema: { name: "feedback.output.edited", version: 1 },
+    source: { type: "user" },
+    content: { title: "Edited verbose answer" },
+    privacy: { level: "private", retention: "normal" },
+  });
+
+  const runtime = new ProcessorRuntime({ store, processors: [createMemoryProfileUpdateProcessor({ now })] });
+  const result = await runtime.processObservation(feedback);
+
+  assert.deepEqual(result.processors_matched, ["processor.memory_profile_update"]);
+  const written = result.views_written.map(id => store.getView(id));
+  assert.equal(written.some(view => view?.view_type === "memory.profile"), true);
+  assert.equal(written.some(view => view?.view_type === "memory.preferences"), true);
+  assert.equal(written.find(view => view?.view_type === "memory.preferences")?.compiler?.id, "processor.memory_profile_update");
+}));
+
+test("project inbox tasks and decisions processors write their project views", async () => withStore(async (store) => {
+  const now = new Date("2026-06-18T10:00:00.000Z");
+  const codex = store.insertRecord({
+    id: "obs:codex:project:1",
+    schema: { name: "observation.codex.message", version: 1 },
+    source: { type: "ai_session", connector: "codex" },
+    content: { title: "Decision: register project processors", text: "Decision: make project views runnable processors." },
+    privacy: { level: "private", retention: "normal" },
+  });
+  store.upsertView({
+    id: "view:project_current:info",
+    view_type: "project.current",
+    status: "active",
+    content: { focus: "processor registration" },
+  });
+
+  const runtime = new ProcessorRuntime({
+    store,
+    processors: [
+      createProjectInboxProcessor({ now }),
+      createProjectTasksProcessor({ now }),
+      createProjectDecisionExtractorProcessor({ now }),
+    ],
+  });
+  const result = await runtime.processObservation(codex);
+
+  assert.deepEqual(result.processors_matched, [
+    "processor.project_inbox",
+    "processor.project_tasks",
+    "processor.project_decision_extractor",
+  ]);
+  const writtenTypes = result.views_written.map(id => store.getView(id)?.view_type).sort();
+  assert.deepEqual(writtenTypes, ["project.decisions", "project.inbox", "project.tasks"]);
+}));

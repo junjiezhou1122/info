@@ -34,7 +34,7 @@ const VIEW_CATALOG_CACHE = new Map<string, ViewFamilyDefinition>();
 let VIEW_CATALOG_ORDER_CACHE: string[] = FALLBACK_VIEW_TYPE_ORDER;
 type SourceFilter = "screenpipe" | "browser" | "runtime" | "all";
 type DetailMode = "activity" | "debug";
-type ActiveTab = "timeline" | "ambient" | "views" | "settings";
+type ActiveTab = "home" | "timeline" | "ambient" | "views" | "settings";
 type FramePreview = { frameId: string | number; title?: string };
 
 function App() {
@@ -50,7 +50,7 @@ function App() {
   const [minutes, setMinutes] = useState(DEFAULT_MINUTES);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [detailMode, setDetailMode] = useState<DetailMode>("activity");
-  const [activeTab, setActiveTab] = useState<ActiveTab>("timeline");
+  const [activeTab, setActiveTab] = useState<ActiveTab>("home");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [viewInspector, setViewInspector] = useState<{ view?: ContextViewSummary; loading: boolean }>({ loading: false });
   const [previewFrame, setPreviewFrame] = useState<FramePreview | null>(null);
@@ -156,16 +156,17 @@ function App() {
   const stats = useMemo(() => summarize(filteredBuckets, lastTick), [filteredBuckets, lastTick]);
 
   return (
-    <div className={`app-shell ${activeTab === "views" || activeTab === "ambient" ? "views-mode" : ""}`}>
+    <div className={`app-shell ${activeTab === "home" ? "home-mode" : activeTab === "views" || activeTab === "ambient" ? "views-mode" : ""}`}>
       <aside className="sidebar">
         <div className="workspace-title">
-          <div className="workspace-icon">I</div>
+          <div className="workspace-icon">M</div>
           <div>
-            <b>Info</b>
+            <b>MetaFlow</b>
             <span>Local runtime</span>
           </div>
         </div>
         <nav className="nav-list" aria-label="App navigation">
+          <button className={`nav-item ${activeTab === "home" ? "active" : ""}`} onClick={() => setActiveTab("home")}><span>⌁</span>Home</button>
           <button className={`nav-item ${activeTab === "timeline" ? "active" : ""}`} onClick={() => setActiveTab("timeline")}><span>◷</span>Timeline</button>
           <button className={`nav-item ${activeTab === "ambient" ? "active" : ""}`} onClick={() => setActiveTab("ambient")}><span>✦</span>Ambient</button>
           <button className={`nav-item ${activeTab === "views" ? "active" : ""}`} onClick={() => setActiveTab("views")}><span>◇</span>Views</button>
@@ -178,49 +179,53 @@ function App() {
       </aside>
 
       <main className="page">
-        <header className="page-header">
-          <div>
-            <div className="breadcrumb">Info / Screenpipe</div>
-            <h1>{activeTab === "timeline" ? "Timeline" : activeTab === "ambient" ? "Ambient" : activeTab === "views" ? "Runtime Views" : "Runtime Settings"}</h1>
-            <p>{activeTab === "timeline" ? "按时间整理最近 focus 的 app、网页和项目活动。" : activeTab === "ambient" ? "主动后台搜索、写作介入和小工具机会都会先沉淀成可检查的 Views。" : activeTab === "views" ? "查看 Observation 压缩和 ambient Programs 产出的 Evidence、Intent、Workflow、Advice、Task、Draft 和 Memory Views。" : "控制 VisionFrame、ActivityBlock、Intent 和 Workflow 压缩的模型与开关。"}</p>
-          </div>
-          <div className="header-actions">
-            {activeTab === "timeline" ? (
-              <>
-                <select value={sourceFilter} onChange={event => setSourceFilter(event.target.value as SourceFilter)} aria-label="Timeline source">
-                  <option value="all">All sources</option>
-                  <option value="screenpipe">Screenpipe</option>
-                  <option value="browser">Browser</option>
-                  <option value="runtime">Runtime</option>
-                </select>
-                <select value={detailMode} onChange={event => setDetailMode(event.target.value as DetailMode)} aria-label="Timeline detail mode">
-                  <option value="activity">Activity</option>
-                  <option value="debug">Evidence debug</option>
-                </select>
-                <select value={minutes} onChange={event => setMinutes(Number(event.target.value))} aria-label="Timeline window">
-                  <option value={60}>Last 1h</option>
-                  <option value={180}>Last 3h</option>
-                  <option value={480}>Last 8h</option>
-                  <option value={1440}>Today</option>
-                </select>
-                <button className="secondary" onClick={() => setLive(value => !value)}>{live ? "Live" : "Paused"}</button>
-                <button className="secondary" onClick={() => refresh(false)} disabled={loading}>{loading ? "Loading…" : "Reload"}</button>
-                <button onClick={syncNow} disabled={loading}>{loading ? "Syncing…" : "Sync Screenpipe"}</button>
-              </>
-            ) : activeTab === "views" ? (
-              <>
-                <button className="secondary" onClick={() => setViewStatus("Create View will use the shared View catalog")}>Create View</button>
-                <button onClick={() => refreshViews(false)} disabled={viewsLoading}>{viewsLoading ? "Loading…" : "Reload Views"}</button>
-              </>
-            ) : activeTab === "ambient" ? (
-              <button onClick={() => setViewStatus("Ambient panel has local controls")}>Ambient Controls</button>
-            ) : (
-              <button onClick={() => setSettingsStatus("Reload settings from panel")}>Runtime Controls</button>
-            )}
-          </div>
-        </header>
+        {activeTab === "home" ? (
+          <MetaFlowHome onNavigate={setActiveTab} live={live} stats={stats} status={status} />
+        ) : (
+          <>
+            <header className="page-header">
+              <div>
+                <div className="breadcrumb">MetaFlow / Local runtime</div>
+                <h1>{activeTab === "timeline" ? "Timeline" : activeTab === "ambient" ? "Ambient" : activeTab === "views" ? "Runtime Views" : "Runtime Settings"}</h1>
+                <p>{activeTab === "timeline" ? "按时间整理最近 focus 的 app、网页和项目活动。" : activeTab === "ambient" ? "主动后台搜索、写作介入和小工具机会都会先沉淀成可检查的 Views。" : activeTab === "views" ? "查看 Observation 压缩和 ambient Programs 产出的 Evidence、Intent、Workflow、Advice、Task、Draft 和 Memory Views。" : "控制 VisionFrame、ActivityBlock、Intent 和 Workflow 压缩的模型与开关。"}</p>
+              </div>
+              <div className="header-actions">
+                {activeTab === "timeline" ? (
+                  <>
+                    <select value={sourceFilter} onChange={event => setSourceFilter(event.target.value as SourceFilter)} aria-label="Timeline source">
+                      <option value="all">All sources</option>
+                      <option value="screenpipe">Screenpipe</option>
+                      <option value="browser">Browser</option>
+                      <option value="runtime">Runtime</option>
+                    </select>
+                    <select value={detailMode} onChange={event => setDetailMode(event.target.value as DetailMode)} aria-label="Timeline detail mode">
+                      <option value="activity">Activity</option>
+                      <option value="debug">Evidence debug</option>
+                    </select>
+                    <select value={minutes} onChange={event => setMinutes(Number(event.target.value))} aria-label="Timeline window">
+                      <option value={60}>Last 1h</option>
+                      <option value={180}>Last 3h</option>
+                      <option value={480}>Last 8h</option>
+                      <option value={1440}>Today</option>
+                    </select>
+                    <button className="secondary" onClick={() => setLive(value => !value)}>{live ? "Live" : "Paused"}</button>
+                    <button className="secondary" onClick={() => refresh(false)} disabled={loading}>{loading ? "Loading…" : "Reload"}</button>
+                    <button onClick={syncNow} disabled={loading}>{loading ? "Syncing…" : "Sync Screenpipe"}</button>
+                  </>
+                ) : activeTab === "views" ? (
+                  <>
+                    <button className="secondary" onClick={() => setViewStatus("Create View will use the shared View catalog")}>Create View</button>
+                    <button onClick={() => refreshViews(false)} disabled={viewsLoading}>{viewsLoading ? "Loading…" : "Reload Views"}</button>
+                  </>
+                ) : activeTab === "ambient" ? (
+                  <button onClick={() => setViewStatus("Ambient panel has local controls")}>Ambient Controls</button>
+                ) : (
+                  <button onClick={() => setSettingsStatus("Reload settings from panel")}>Runtime Controls</button>
+                )}
+              </div>
+            </header>
 
-        {activeTab === "timeline" ? (
+            {activeTab === "timeline" ? (
           <>
             <section className="status-row">
               <Stat label="Items" value={stats.items} />
@@ -244,8 +249,12 @@ function App() {
         ) : (
           <RuntimeSettingsPanel initialStatus={settingsStatus} onStatus={setSettingsStatus} onTick={setLastTick} />
         )}
+          </>
+        )}
       </main>
-      {activeTab === "views" || activeTab === "ambient"
+      {activeTab === "home"
+        ? null
+        : activeTab === "views" || activeTab === "ambient"
         ? <aside className="view-inspector"><ViewDetail view={viewInspector.view} loading={viewInspector.loading} /></aside>
         : activeTab === "settings"
           ? <aside className="inspector empty"><span>{settingsStatus}</span></aside>
@@ -1205,6 +1214,223 @@ function FrameLightbox({ preview, onClose }: { preview: FramePreview | null; onC
       </div>
     </div>
   );
+}
+
+function MetaFlowHome({ onNavigate, live, stats, status }: { onNavigate: (tab: ActiveTab) => void; live: boolean; stats: { items: number; screenpipe: number | string; last: string }; status: string }) {
+  return (
+    <section className="metaflow-home" aria-label="MetaFlow home">
+      <header className="mf-nav">
+        <button className="mf-wordmark" type="button" onClick={() => onNavigate("home")} aria-label="MetaFlow home">
+          <span>MetaFlow</span>
+        </button>
+        <nav aria-label="MetaFlow sections">
+          <button type="button" onClick={() => onNavigate("timeline")}>Timeline</button>
+          <button type="button" onClick={() => onNavigate("ambient")}>Ambient</button>
+          <button type="button" onClick={() => onNavigate("views")}>Views</button>
+        </nav>
+      </header>
+
+      <section className="mf-hero">
+        <MetaFlowField />
+        <div className="mf-debug mf-debug-left" aria-hidden="true">
+          <span>FLOW FIELD</span>
+          <b>CTX 0.86</b>
+          <b>AGENTS {live ? "LIVE" : "PAUSED"}</b>
+          <b>VIEWGRAPH HOT</b>
+        </div>
+        <div className="mf-debug mf-debug-right" aria-hidden="true">
+          <span>RUNTIME</span>
+          <b>OBSERVE</b>
+          <b>COMPRESS</b>
+          <b>ACT</b>
+        </div>
+        <div className="mf-hero-copy">
+          <p>Personal context that moves with your work.</p>
+          <h1>Own your flow.</h1>
+          <span>MetaFlow turns your screens, sessions, memories, and agent work into a living local intelligence layer.</span>
+        </div>
+        <button className="mf-scroll" type="button" onClick={() => document.getElementById("metaflow-mission")?.scrollIntoView({ behavior: "smooth" })}>SCROLL</button>
+      </section>
+
+      <section id="metaflow-mission" className="mf-mission">
+        <div className="mf-mission-copy">
+          <div className="mf-kicker">SYSTEM</div>
+          <h2>Observe your work. Route the task. Compile the right view.</h2>
+          <p>
+            MetaFlow is a local-first context runtime for agentic work. It watches the sources you already use,
+            understands what kind of task is emerging, then turns raw evidence into durable views agents can inspect and act on.
+          </p>
+        </div>
+        <div className="mf-flow-diagram" aria-label="MetaFlow observe route view pipeline">
+          <div className="mf-flow-step">
+            <span>01</span>
+            <b>Observe</b>
+            <p>screen, browser, repo, audio, memory, active thread</p>
+          </div>
+          <div className="mf-flow-step">
+            <span>02</span>
+            <b>Route</b>
+            <p>research, writing, planning, toolsmith, language review</p>
+          </div>
+          <div className="mf-flow-step">
+            <span>03</span>
+            <b>Compile Views</b>
+            <p>evidence, intent, workflow, advice, task, draft, memory</p>
+          </div>
+          <div className="mf-flow-step">
+            <span>04</span>
+            <b>Act</b>
+            <p>ambient suggestions, background tasks, artifacts, agent handoff</p>
+          </div>
+        </div>
+        <div className="mf-source-grid" aria-label="Sources and views">
+          <div>
+            <span>Sources</span>
+            <b>Screenpipe</b>
+            <b>Browser</b>
+            <b>Git + project</b>
+            <b>Runtime events</b>
+          </div>
+          <div>
+            <span>Task shape</span>
+            <b>Need research</b>
+            <b>Continue writing</b>
+            <b>Build a tool</b>
+            <b>Review language</b>
+          </div>
+          <div>
+            <span>Views</span>
+            <b>brief.research</b>
+            <b>advice.writing</b>
+            <b>task.toolsmith</b>
+            <b>memory.profile</b>
+          </div>
+        </div>
+      </section>
+
+      <section className="mf-stack" aria-label="MetaFlow runtime stack">
+        <div className="mf-stack-visual" aria-hidden="true">
+          <div className="mf-layer layer-one"><span>Evidence</span></div>
+          <div className="mf-layer layer-two"><span>Views</span></div>
+          <div className="mf-layer layer-three"><span>Programs</span></div>
+          <div className="mf-layer layer-four"><span>Agents</span></div>
+        </div>
+        <div className="mf-stack-copy">
+          <div className="mf-kicker">RUNTIME</div>
+          <h2>Context becomes a surface agents can actually use.</h2>
+          <p>
+            Every signal is shaped into inspectable views before it becomes advice, a task, a draft, or a tool artifact.
+            That keeps MetaFlow fast, local, and accountable.
+          </p>
+          <div className="mf-actions">
+            <button type="button" onClick={() => onNavigate("ambient")}>Open Ambient</button>
+            <button type="button" onClick={() => onNavigate("views")}>Inspect Views</button>
+            <button type="button" onClick={() => onNavigate("timeline")}>Read Timeline</button>
+          </div>
+        </div>
+      </section>
+
+      <section className="mf-status" aria-label="Current runtime status">
+        <Stat label="Items" value={stats.items} />
+        <Stat label="Screenpipe" value={stats.screenpipe} />
+        <Stat label="Last seen" value={stats.last} />
+        <div className="status-text">{status}</div>
+      </section>
+    </section>
+  );
+}
+
+function MetaFlowField() {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    const surface = canvas;
+    const ctx = context;
+
+    let frame = 0;
+    let animation = 0;
+    let width = 0;
+    let height = 0;
+    let dpr = 1;
+
+    function resize() {
+      const rect = surface.getBoundingClientRect();
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      width = Math.max(1, Math.floor(rect.width));
+      height = Math.max(1, Math.floor(rect.height));
+      surface.width = Math.floor(width * dpr);
+      surface.height = Math.floor(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function draw() {
+      frame += 0.0075;
+      const gradient = ctx.createLinearGradient(0, 0, width, height);
+      gradient.addColorStop(0, "#071d36");
+      gradient.addColorStop(0.46, "#0c3140");
+      gradient.addColorStop(1, "#062522");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+
+      ctx.save();
+      ctx.globalCompositeOperation = "screen";
+      for (let band = 0; band < 18; band += 1) {
+        const yBase = height * (0.17 + band * 0.042);
+        const hue = band % 3 === 0 ? "151, 229, 206" : band % 3 === 1 ? "98, 178, 255" : "239, 232, 203";
+        ctx.beginPath();
+        for (let x = -40; x <= width + 40; x += 18) {
+          const drift = Math.sin(x * 0.008 + frame * (1.8 + band * 0.02) + band * 0.67) * (24 + band * 0.9);
+          const pulse = Math.cos(x * 0.014 - frame * 1.3 + band) * 8;
+          const y = yBase + drift + pulse + Math.sin(frame + band) * 20;
+          if (x === -40) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = `rgba(${hue}, ${0.08 + band * 0.006})`;
+        ctx.lineWidth = band % 4 === 0 ? 1.6 : 0.8;
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      ctx.save();
+      ctx.globalAlpha = 0.88;
+      for (let i = 0; i < 90; i += 1) {
+        const phase = frame * (0.5 + (i % 7) * 0.05) + i * 2.17;
+        const x = (width * (0.08 + ((i * 37) % 100) / 118) + Math.sin(phase) * 46) % width;
+        const y = height * (0.16 + ((i * 23) % 100) / 134) + Math.cos(phase * 0.9) * 34;
+        const radius = i % 9 === 0 ? 2.2 : 1.15;
+        ctx.fillStyle = i % 5 === 0 ? "rgba(181, 255, 221, 0.72)" : "rgba(222, 245, 235, 0.42)";
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      ctx.save();
+      ctx.globalCompositeOperation = "multiply";
+      const shade = ctx.createRadialGradient(width * 0.5, height * 0.5, height * 0.08, width * 0.5, height * 0.55, height * 0.78);
+      shade.addColorStop(0, "rgba(255,255,255,0)");
+      shade.addColorStop(1, "rgba(0,0,0,0.48)");
+      ctx.fillStyle = shade;
+      ctx.fillRect(0, 0, width, height);
+      ctx.restore();
+
+      animation = window.requestAnimationFrame(draw);
+    }
+
+    resize();
+    draw();
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      window.cancelAnimationFrame(animation);
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} className="mf-field" aria-hidden="true" />;
 }
 
 function Stat({ label, value }: { label: string; value: string | number }) {
