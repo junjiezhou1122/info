@@ -147,7 +147,7 @@ const TIMELINE_WINDOWS = [
 const VIEW_FAMILIES_CACHE_KEY = "metaflow.viewFamilies.v1";
 const VIEW_TYPE_VIEWS_CACHE_KEY = "metaflow.viewTypeViews.v1";
 const TIMELINE_CACHE_KEY = "metaflow.timeline.v1";
-const TIMELINE_SIGNATURE_VERSION = "timeline-v4";
+const TIMELINE_SIGNATURE_VERSION = "timeline-v5";
 const SIDEBAR_COLLAPSED_CACHE_KEY = "metaflow.sidebar.collapsed.v1";
 let AMBIENT_VIEWS_MEMORY_CACHE: { views: ContextViewSummary[]; status: string } | null = null;
 let RUNTIME_SETTINGS_MEMORY_CACHE: { settings: RuntimeSettings; status: string } | null = null;
@@ -216,7 +216,7 @@ function App() {
     }
     try {
       const debugMode = detailMode === "debug";
-      const sourceNeedsRawRecords = sourceFilter === "screenpipe" || sourceFilter === "runtime";
+      const sourceNeedsRawRecords = sourceFilter === "screenpipe" || sourceFilter === "runtime" || sourceFilter === "all";
       const rawMode = debugMode || sourceNeedsRawRecords;
       const range = initialTimelineRangeForSource(sourceFilter);
       const rangeMinutes = timelineRangeMinutes(range);
@@ -229,10 +229,10 @@ function App() {
         includeLowLevelScreenpipe: rawMode,
         includeRuntimeEvents: debugMode || sourceFilter === "runtime",
         dedupe: sourceNeedsRawRecords ? false : !debugMode,
-        bucketItemLimit: rawMode ? 80 : 18,
+        bucketItemLimit: rawMode ? timelineBucketItemLimit(sourceFilter) : 18,
         summarizeHeartbeats: !rawMode,
         sourceFilter,
-        mergeContinuous: sourceFilter !== "screenpipe",
+        mergeContinuous: sourceFilter !== "screenpipe" && sourceFilter !== "all",
         mergeGapMinutes: rawMode ? 3 : 8,
         write: true,
       });
@@ -271,7 +271,7 @@ function App() {
     setTimelinePaging(current => ({ ...current, loading: true, error: undefined }));
     try {
       const debugMode = detailMode === "debug";
-      const sourceNeedsRawRecords = sourceFilter === "screenpipe" || sourceFilter === "runtime";
+      const sourceNeedsRawRecords = sourceFilter === "screenpipe" || sourceFilter === "runtime" || sourceFilter === "all";
       const rawMode = debugMode || sourceNeedsRawRecords;
       const next = await fetchActivityTimeline({
         minutes: pageMinutes,
@@ -282,10 +282,10 @@ function App() {
         includeLowLevelScreenpipe: rawMode,
         includeRuntimeEvents: debugMode || sourceFilter === "runtime",
         dedupe: sourceNeedsRawRecords ? false : !debugMode,
-        bucketItemLimit: rawMode ? 80 : 18,
+        bucketItemLimit: rawMode ? timelineBucketItemLimit(sourceFilter) : 18,
         summarizeHeartbeats: !rawMode,
         sourceFilter,
-        mergeContinuous: sourceFilter !== "screenpipe",
+        mergeContinuous: sourceFilter !== "screenpipe" && sourceFilter !== "all",
         mergeGapMinutes: rawMode ? 3 : 8,
         write: false,
       });
@@ -3658,7 +3658,9 @@ function filterBuckets(buckets: TimelineBucket[], filter: SourceFilter, detailMo
 
 function isDebugTimelineItem(item: TimelineItem) {
   const hay = `${item.source} ${item.schema ?? ""} ${item.event_type ?? ""}`.toLowerCase();
-  return hay.includes("route_candidate") || hay.includes("processor.route_candidate");
+  return hay.includes("route_candidate")
+    || hay.includes("processor.route_candidate")
+    || hay.includes("local_project/runtime-snapshot");
 }
 
 function sourceMatches(item: TimelineItem, filter: SourceFilter) {
@@ -4119,7 +4121,7 @@ function todayRange() {
 
 function initialTimelineRangeForSource(sourceFilter: SourceFilter) {
   const day = todayRange();
-  if (sourceFilter !== "screenpipe" && sourceFilter !== "runtime") return day;
+  if (sourceFilter !== "screenpipe" && sourceFilter !== "runtime" && sourceFilter !== "all") return day;
   const endMs = Date.parse(day.end);
   const startMs = Date.parse(day.start);
   if (!Number.isFinite(endMs) || !Number.isFinite(startMs)) return day;
@@ -4222,6 +4224,12 @@ function uniqueTimelineItems(items: TimelineItem[]) {
 }
 
 function timelineUiRecordLimit(minutes: number, sourceFilter: SourceFilter, detailMode: DetailMode) {
+  if (sourceFilter === "all") {
+    const samplesPerMinute = detailMode === "debug" ? 4 : 3;
+    const minimum = detailMode === "debug" ? 1_500 : 1_200;
+    const maximum = detailMode === "debug" ? 3_000 : 2_000;
+    return Math.min(maximum, Math.max(minimum, Math.ceil(minutes * samplesPerMinute)));
+  }
   if (sourceFilter === "screenpipe") {
     const samplesPerMinute = detailMode === "debug" ? 1.8 : 1.2;
     const minimum = detailMode === "debug" ? 1_200 : 900;
@@ -4234,6 +4242,12 @@ function timelineUiRecordLimit(minutes: number, sourceFilter: SourceFilter, deta
   }
   const samplesPerMinute = sourceFilter === "runtime" ? 1 : sourceFilter === "browser" ? 5 : 10;
   return Math.min(TIMELINE_DAY_RECORD_LIMIT, Math.max(300, Math.ceil(minutes * samplesPerMinute)));
+}
+
+function timelineBucketItemLimit(sourceFilter: SourceFilter) {
+  if (sourceFilter === "all") return 260;
+  if (sourceFilter === "screenpipe") return 180;
+  return 120;
 }
 
 function liveSyncWindowMinutes() {
