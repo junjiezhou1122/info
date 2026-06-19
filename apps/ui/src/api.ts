@@ -57,7 +57,7 @@ export async function fetchActivityTimeline(options: { minutes?: number; startTi
   const minutes = options.minutes ?? 90;
   const sourceFilter = options.sourceFilter ?? "all";
   const debugMode = options.includeLowLevelScreenpipe === true;
-  const timeoutMs = sourceFilter === "screenpipe" && debugMode ? 60_000 : minutes > 240 ? 20_000 : 8_000;
+  const timeoutMs = sourceFilter === "screenpipe" && debugMode ? 60_000 : minutes > 240 ? 30_000 : 25_000;
   const res = await fetchWithTimeout(`${API_BASE}/timeline/activity/compile`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -90,16 +90,17 @@ export async function fetchActivityTimelineWatermark(options: { minutes?: number
   if (options.startTime) range.set("start_time", options.startTime);
   if (options.endTime) range.set("end_time", options.endTime);
   if (options.includeRuntimeEvents) range.set("include_runtime_events", "true");
-  const res = await fetchWithTimeout(`${API_BASE}/timeline/activity/watermark?${range.toString()}`, undefined, 5_000);
+  const res = await fetchWithTimeout(`${API_BASE}/timeline/activity/watermark?${range.toString()}`, undefined, 12_000);
   if (!res.ok) throw new Error(`timeline watermark failed: ${res.status}`);
   return res.json();
 }
 
-export async function fetchLatestActivityTimelineView(): Promise<ActivityTimelineResponse | null> {
-  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=timeline.activity&active_only=true&limit=1&summary_only=false`, undefined, 2_000);
+export async function fetchLatestActivityTimelineView(options: { todayOnly?: boolean } = {}): Promise<ActivityTimelineResponse | null> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=timeline.activity&active_only=true&limit=5&summary_only=false`, undefined, 4_000);
   if (!res.ok) throw new Error(`timeline view fetch failed: ${res.status}`);
   const body = await res.json();
-  const view = body.views?.[0] as ContextViewSummary | undefined;
+  const views = (body.views ?? []) as ContextViewSummary[];
+  const view = options.todayOnly ? views.find(isTodayTimelineView) : views[0];
   const buckets = Array.isArray(view?.content?.buckets) ? view.content.buckets as ActivityTimelineResponse["buckets"] : [];
   if (!view || !buckets.length) return null;
   return {
@@ -120,15 +121,10 @@ export async function fetchLatestActivityTimelineView(): Promise<ActivityTimelin
   };
 }
 
-export async function fetchLiveActivityTimeline(options: { limit?: number; bucketMinutes?: number; sourceFilter?: "screenpipe" | "browser" | "runtime" | "all" } = {}): Promise<ActivityTimelineResponse> {
-  const params = new URLSearchParams({
-    limit: String(options.limit ?? 120),
-    bucket_minutes: String(options.bucketMinutes ?? 15),
-    source_filter: options.sourceFilter ?? "all",
-  });
-  const res = await fetchWithTimeout(`${API_BASE}/timeline/activity/live?${params.toString()}`, undefined, 2_000);
-  if (!res.ok) throw new Error(`live timeline failed: ${res.status}`);
-  return res.json();
+function isTodayTimelineView(view: ContextViewSummary): boolean {
+  if (typeof view.id === "string" && view.id.startsWith("view:timeline:activity:day:")) return true;
+  const minutes = view.content?.minutes;
+  return typeof minutes === "number" && minutes > 4 * 60;
 }
 
 export async function fetchViewFamilies(): Promise<ViewFamiliesResponse> {

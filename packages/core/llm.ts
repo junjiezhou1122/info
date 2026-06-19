@@ -22,6 +22,8 @@ export type LlmOptions = {
   max_tokens?: number;
   omit_max_tokens?: boolean;
   allow_external?: boolean;
+  timeout_ms?: number;
+  max_attempts?: number;
 };
 
 export type LlmResult = {
@@ -73,8 +75,18 @@ async function completion(messages: Array<ChatMessage | VisionMessage>, options:
     ...(options.omit_max_tokens ? {} : { max_tokens: options.max_tokens ?? 800 }),
     ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
   });
+  const timeoutMs = positiveNumber(options.timeout_ms)
+    ?? positiveNumber(process.env[jsonMode ? "LLM_TIMEOUT_MS" : "VISION_LLM_TIMEOUT_MS"])
+    ?? positiveNumber(process.env.LLM_TIMEOUT_MS)
+    ?? (jsonMode ? 45_000 : 30_000);
+  const maxAttempts = positiveInteger(options.max_attempts)
+    ?? positiveInteger(process.env[jsonMode ? "LLM_MAX_ATTEMPTS" : "VISION_LLM_MAX_ATTEMPTS"])
+    ?? positiveInteger(process.env.LLM_MAX_ATTEMPTS)
+    ?? (jsonMode ? 3 : 1);
   let lastError = "";
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${cfg.base_url}/chat/completions`, {
         method: "POST",
@@ -83,17 +95,30 @@ async function completion(messages: Array<ChatMessage | VisionMessage>, options:
           ...(cfg.api_key ? { Authorization: `Bearer ${cfg.api_key}` } : {}),
         },
         body,
+        signal: controller.signal,
       });
       if (!res.ok) return { ok: false, model: cfg.model, base_url: cfg.base_url, error: `${res.status} ${await res.text()}` };
       const json = await res.json() as any;
       const content = json.choices?.[0]?.message?.content;
       return { ok: Boolean(content), model: cfg.model, base_url: cfg.base_url, content, error: content ? undefined : "empty completion" };
     } catch (error: any) {
-      lastError = error?.message ?? String(error);
-      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+      lastError = error?.name === "AbortError" ? `completion timed out after ${timeoutMs}ms` : error?.message ?? String(error);
+      if (attempt < maxAttempts - 1) await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+    } finally {
+      clearTimeout(timeout);
     }
   }
   return { ok: false, model: cfg.model, base_url: cfg.base_url, error: lastError || "completion failed" };
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const n = positiveNumber(value);
+  return n === undefined ? undefined : Math.max(1, Math.floor(n));
 }
 
 export function parseJsonObject(text: string): Record<string, unknown> | undefined {

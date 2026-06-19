@@ -1,14 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { createContextView, fetchActivityTimeline, fetchActivityTimelineWatermark, fetchAudioTranscripts, fetchContextView, fetchLatestActivityTimelineView, fetchLiveActivityTimeline, fetchProcessors, fetchRecentRecords, fetchRuntimeSettings, fetchViewFamilies, fetchViewsByType, fetchViewsByTypes, patchViewStatus, runProcessor, runRuntimeTick, saveRuntimeSettings, screenpipeFrameUrl, submitViewFeedback, syncScreenpipe, updateContextView } from "./api";
+import { ChevronLeft, ChevronRight, CircleDotDashed, FileText, Home, Search, Settings } from "lucide-react";
+import { createContextView, fetchActivityTimeline, fetchActivityTimelineWatermark, fetchAudioTranscripts, fetchContextView, fetchLatestActivityTimelineView, fetchProcessors, fetchRecentRecords, fetchRuntimeSettings, fetchViewFamilies, fetchViewsByType, fetchViewsByTypes, patchViewStatus, runProcessor, runRuntimeTick, saveRuntimeSettings, screenpipeFrameUrl, submitViewFeedback, syncScreenpipe, updateContextView } from "./api";
 import type { ActivityTimelineResponse, AudioTranscriptItem, ContextRecordSummary, ContextViewInput, ContextViewSummary, ContextViewUpdateInput, ProcessorDefinitionSummary, RuntimeSettings, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewCatalogResponse, ViewFamiliesResponse, ViewFamilyDefinition, ViewFamilySummary, ViewStatus } from "./types";
+import metaflowMarkUrl from "./assets/metaflow-mark.png";
 import "./styles.css";
 
-const POLL_MS = 60_000;
 const TIMELINE_WATERMARK_POLL_MS = 5_000;
 const VIEW_REFRESH_POLL_MS = 15_000;
 const DEFAULT_BUCKET_MINUTES = 60;
-const DEFAULT_TIMELINE_MINUTES = 90;
+const DEFAULT_TIMELINE_MINUTES = 24 * 60;
+const TIMELINE_DAY_RECORD_LIMIT = 1_200;
 const FALLBACK_VIEW_TYPE_ORDER = [
   "state.surface", "work.focus_set", "project.current", "memory.daily", "memory.profile",
   "evidence", "visual_frame", "audio", "activity", "activity_block", "proposal", "resource", "intent", "workflow", "memory",
@@ -71,6 +73,12 @@ let VIEW_CATALOG_ORDER_CACHE: string[] = FALLBACK_VIEW_TYPE_ORDER;
 type SourceFilter = "screenpipe" | "browser" | "runtime" | "all";
 type DetailMode = "activity" | "debug";
 type ActiveTab = "home" | "timeline" | "ambient" | "views" | "settings";
+type SidebarItem = {
+  id: string;
+  label: string;
+  icon: React.ComponentType<{ size?: number; strokeWidth?: number }>;
+  tab: ActiveTab;
+};
 type FramePreview = { frameId: string | number; title?: string };
 type TimelineSyncState = "idle" | "syncing" | "error";
 type FocusSegment = {
@@ -129,8 +137,17 @@ const TIMELINE_WINDOWS = [
 const VIEW_FAMILIES_CACHE_KEY = "metaflow.viewFamilies.v1";
 const VIEW_TYPE_VIEWS_CACHE_KEY = "metaflow.viewTypeViews.v1";
 const TIMELINE_CACHE_KEY = "metaflow.timeline.v1";
+const SIDEBAR_COLLAPSED_CACHE_KEY = "metaflow.sidebar.collapsed.v1";
 let AMBIENT_VIEWS_MEMORY_CACHE: { views: ContextViewSummary[]; status: string } | null = null;
 let RUNTIME_SETTINGS_MEMORY_CACHE: { settings: RuntimeSettings; status: string } | null = null;
+
+const SIDEBAR_ITEMS: SidebarItem[] = [
+  { id: "home", label: "Home", icon: Home, tab: "home" },
+  { id: "timeline", label: "Timeline", icon: Search, tab: "timeline" },
+  { id: "ambient", label: "Ambient", icon: CircleDotDashed, tab: "ambient" },
+  { id: "views", label: "Views", icon: FileText, tab: "views" },
+  { id: "settings", label: "Settings", icon: Settings, tab: "settings" },
+];
 
 function App() {
   const initialViewCache = useMemo(() => loadCachedViewFamilies(), []);
@@ -150,6 +167,7 @@ function App() {
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [detailMode, setDetailMode] = useState<DetailMode>("activity");
   const [activeTab, setActiveTab] = useState<ActiveTab>("home");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_CACHE_KEY) === "1");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [viewComposerOpen, setViewComposerOpen] = useState(false);
   const [previewFrame, setPreviewFrame] = useState<FramePreview | null>(null);
@@ -184,8 +202,8 @@ function App() {
       const debugMode = detailMode === "debug";
       const sourceNeedsRawRecords = sourceFilter === "screenpipe" || sourceFilter === "runtime";
       const rawMode = debugMode || sourceNeedsRawRecords;
-      const range = recentRange(DEFAULT_TIMELINE_MINUTES);
-      const rangeMinutes = DEFAULT_TIMELINE_MINUTES;
+      const range = todayRange();
+      const rangeMinutes = timelineRangeMinutes(range);
       const next = await fetchActivityTimeline({
         minutes: rangeMinutes,
         startTime: range.start,
@@ -223,7 +241,7 @@ function App() {
   async function hydrateLatestTimelineView() {
     if (timeline) return;
     try {
-      const cached = await fetchLatestActivityTimelineView();
+      const cached = await fetchLatestActivityTimelineView({ todayOnly: true });
       if (!cached) return;
       setTimeline(cached);
       timelineCacheMsRef.current = Date.now();
@@ -234,31 +252,6 @@ function App() {
       setStatus(`${cached.records_used} records · ${cached.buckets.length} buckets · latest compiled view`);
     } catch {
       // The compile path below can still populate the timeline.
-    }
-  }
-
-  async function refreshLiveTimeline(options: { quiet?: boolean } = {}) {
-    if (!options.quiet) setStatus("Loading live timeline...");
-    try {
-      const next = await fetchLiveActivityTimeline({
-        limit: detailMode === "debug" || sourceFilter === "screenpipe" ? 240 : 120,
-        bucketMinutes: Math.min(bucketMinutes, 15),
-        sourceFilter,
-      });
-      setTimeline(next);
-      timelineCacheMsRef.current = Date.now();
-      timelineSignatureRef.current = timelineSignature(bucketMinutes, detailMode, sourceFilter);
-      const watermark = timelineWatermarkFromResponse(next);
-      timelineWatermarkRef.current = watermark;
-      saveCachedTimeline(next, timelineCacheMsRef.current, timelineSignatureRef.current, watermark);
-      setTimelineSyncState("idle");
-      setTimelineSyncStatus(next.view.updated_at ? `Live · latest ${relativeTime(next.view.updated_at)}` : "Live");
-      setStatus(`${next.records_used} live records · ${next.buckets.length} buckets`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setTimelineSyncState("error");
-      setTimelineSyncStatus(message);
-      if (!options.quiet) setStatus(message);
     }
   }
 
@@ -311,7 +304,7 @@ function App() {
       setTimelineSyncState("idle");
       setTimelineSyncStatus(`${syncedWindows} windows synced`);
       if (options.manual) setStatus(`${syncedWindows} Screenpipe windows synced · reloading timeline…`);
-      await checkTimelineWatermark({ refreshOnChange: true, forceRefresh: options.manual || Boolean(tick.written_records?.length) });
+      await refresh({ quiet: true, force: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setTimelineSyncState("error");
@@ -335,7 +328,7 @@ function App() {
       timelineWatermarkRef.current = next.watermark;
       if (options.forceRefresh || (options.refreshOnChange !== false && previous && previous !== next.watermark)) {
         setTimelineSyncStatus("New activity detected");
-        await refreshLiveTimeline({ quiet: true });
+        await refresh({ quiet: true, force: true });
         return;
       }
       if (!previous) {
@@ -356,6 +349,11 @@ function App() {
     await syncTimeline({ fullDay: true, manual: true });
   }
 
+  async function showTodayTimeline() {
+    setTimelineSyncStatus("Loading today...");
+    await refresh({ quiet: false, force: true });
+  }
+
   useEffect(() => {
     if (activeTab !== "views") return;
     refreshViews({ quiet: Boolean(viewFamilies), force: true }).catch(error => setViewStatus(error instanceof Error ? error.message : String(error)));
@@ -372,25 +370,16 @@ function App() {
 
   useEffect(() => {
     if (activeTab !== "timeline") return;
-    const force = !timeline || timelineSignatureRef.current !== timelineSignature(bucketMinutes, detailMode, sourceFilter);
+    const force = !isTodayTimelineResponse(timeline) || timelineSignatureRef.current !== timelineSignature(bucketMinutes, detailMode, sourceFilter);
     hydrateLatestTimelineView().catch(() => undefined);
     if (!timeline) {
       setStatus(initialTimelineCache ? cachedTimelineStatus(initialTimelineCache.response, timelineCacheMsRef.current) : "Loading latest timeline view...");
-      refreshLiveTimeline({ quiet: true }).catch(error => setStatus(error instanceof Error ? error.message : String(error)));
+      refresh({ quiet: true, force: true }).catch(error => setStatus(error instanceof Error ? error.message : String(error)));
     } else {
-      if (force) refreshLiveTimeline({ quiet: true }).catch(error => setStatus(error instanceof Error ? error.message : String(error)));
+      if (force) refresh({ quiet: true, force: true }).catch(error => setStatus(error instanceof Error ? error.message : String(error)));
     }
     checkTimelineWatermark({ refreshOnChange: false }).catch(error => setTimelineSyncStatus(error instanceof Error ? error.message : String(error)));
   }, [activeTab, bucketMinutes, detailMode, sourceFilter, live]);
-
-  useEffect(() => {
-    if (!live) return;
-    if (activeTab !== "timeline") return;
-    const timer = window.setInterval(() => {
-      refreshLiveTimeline({ quiet: true }).catch(() => undefined);
-    }, POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [activeTab, live, bucketMinutes, detailMode, sourceFilter]);
 
   useEffect(() => {
     if (!live) return;
@@ -415,6 +404,7 @@ function App() {
   const stats = useMemo(() => summarize(filteredBuckets, lastTick), [filteredBuckets, lastTick]);
   const shellClass = [
     "app-shell",
+    sidebarCollapsed ? "sidebar-collapsed" : "",
     activeTab === "home" ? "home-mode" : "",
     activeTab === "views" || activeTab === "ambient" ? "workspace-mode" : "",
     activeTab === "views" ? "views-mode" : "",
@@ -422,28 +412,17 @@ function App() {
     activeTab === "settings" ? "settings-mode" : "",
   ].filter(Boolean).join(" ");
 
+  function toggleSidebar() {
+    setSidebarCollapsed(value => {
+      const next = !value;
+      localStorage.setItem(SIDEBAR_COLLAPSED_CACHE_KEY, next ? "1" : "0");
+      return next;
+    });
+  }
+
   return (
     <div className={shellClass}>
-      <aside className="sidebar">
-        <div className="workspace-title">
-          <div className="workspace-icon">M</div>
-          <div>
-            <b>MetaFlow</b>
-            <span>Local runtime</span>
-          </div>
-        </div>
-        <nav className="nav-list" aria-label="App navigation">
-          <button className={`nav-item ${activeTab === "home" ? "active" : ""}`} onClick={() => setActiveTab("home")}><span>⌁</span>Home</button>
-          <button className={`nav-item ${activeTab === "timeline" ? "active" : ""}`} onClick={() => setActiveTab("timeline")}><span>◷</span>Timeline</button>
-          <button className={`nav-item ${activeTab === "ambient" ? "active" : ""}`} onClick={() => setActiveTab("ambient")}><span>✦</span>Ambient</button>
-          <button className={`nav-item ${activeTab === "views" ? "active" : ""}`} onClick={() => setActiveTab("views")}><span>◇</span>Views</button>
-          <button className={`nav-item ${activeTab === "settings" ? "active" : ""}`} onClick={() => setActiveTab("settings")}><span>⚙</span>Settings</button>
-        </nav>
-        <div className="sidebar-foot">
-          <div className={`live-dot ${live ? "on" : ""}`} />
-          <span>{live ? "Live sync" : "Paused"}</span>
-        </div>
-      </aside>
+      <RuntimeSidebar activeTab={activeTab} collapsed={sidebarCollapsed} live={live} onNavigate={setActiveTab} onToggleCollapse={toggleSidebar} />
 
       <main className="page">
         {activeTab === "home" ? (
@@ -453,8 +432,8 @@ function App() {
             <header className="page-header">
               <div>
                 <div className="breadcrumb">MetaFlow / Local runtime</div>
-                <h1>{activeTab === "timeline" ? "Timeline" : activeTab === "ambient" ? "Ambient" : activeTab === "views" ? "Runtime Views" : "Runtime Settings"}</h1>
-                <p>{activeTab === "timeline" ? "按时间整理最近 focus 的 app、网页和项目活动。" : activeTab === "ambient" ? "主动后台搜索、写作介入和小工具机会都会先沉淀成可检查的 Views。" : activeTab === "views" ? "查看 Observation 压缩和 ambient Programs 产出的 Evidence、Intent、Workflow、Advice、Task、Draft 和 Memory Views。" : "控制 VisionFrame、ActivityBlock、Intent 和 Workflow 压缩的模型与开关。"}</p>
+                <h1>{pageTitle(activeTab)}</h1>
+                <p>{pageDescription(activeTab)}</p>
               </div>
               <div className="header-actions">
                 {activeTab === "timeline" ? (
@@ -465,7 +444,7 @@ function App() {
                         <button key={option.value} className={bucketMinutes === option.value ? "active" : ""} type="button" onClick={() => setBucketMinutes(option.value)}>{option.label}</button>
                       ))}
                     </div>
-                    <button className="secondary today-button" type="button" onClick={syncNow} disabled={timelineSyncState === "syncing"}>今天</button>
+                    <button className="secondary today-button" type="button" onClick={showTodayTimeline} disabled={loading}>{loading ? "加载中" : "今天"}</button>
                     <button className="secondary" onClick={() => setDetailMode(value => value === "debug" ? "activity" : "debug")}>{detailMode === "debug" ? "事件" : "原始"}</button>
                     <button className="secondary" onClick={() => setLive(value => !value)}>{live ? "Live" : "Paused"}</button>
                     <button className="secondary" onClick={() => refresh(false)} disabled={loading}>{loading ? "Loading…" : "Reload"}</button>
@@ -478,8 +457,10 @@ function App() {
                   </>
                 ) : activeTab === "ambient" ? (
                   <button onClick={() => setViewStatus("Ambient panel has local controls")}>Ambient Controls</button>
-                ) : (
+                ) : activeTab === "settings" ? (
                   <button onClick={() => setSettingsStatus("Reload settings from panel")}>Runtime Controls</button>
+                ) : (
+                  null
                 )}
               </div>
             </header>
@@ -519,6 +500,61 @@ function App() {
       <FrameLightbox preview={previewFrame} onClose={() => setPreviewFrame(null)} />
     </div>
   );
+}
+
+function RuntimeSidebar({ activeTab, collapsed, live, onNavigate, onToggleCollapse }: { activeTab: ActiveTab; collapsed: boolean; live: boolean; onNavigate: (tab: ActiveTab) => void; onToggleCollapse: () => void }) {
+  return (
+    <aside className="sidebar" data-collapsed={collapsed ? "true" : "false"}>
+      <div className="sidebar-brand">
+        <div className="sidebar-logo" aria-hidden="true">
+          <img src={metaflowMarkUrl} alt="" />
+        </div>
+        {!collapsed && <b>MetaFlow</b>}
+      </div>
+      <nav className="nav-list" aria-label="App navigation">
+        {SIDEBAR_ITEMS.map(item => {
+          const Icon = item.icon;
+          const active = item.tab === activeTab;
+          return (
+            <button
+              key={item.id}
+              className={`nav-item ${active ? "active" : ""}`}
+              type="button"
+              title={collapsed ? item.label : undefined}
+              onClick={() => onNavigate(item.tab)}
+            >
+              <span className="nav-icon"><Icon size={19} strokeWidth={2.1} /></span>
+              {!collapsed && <span className="nav-label">{item.label}</span>}
+            </button>
+          );
+        })}
+      </nav>
+      <div className="sidebar-lower">
+        <div className="sidebar-status" title={live ? "Live sync" : "Paused"}>
+          <div className={`live-dot ${live ? "on" : ""}`} />
+          {!collapsed && <span>{live ? "Live sync" : "Paused"}</span>}
+        </div>
+        <button className="sidebar-collapse-button" type="button" onClick={onToggleCollapse} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
+          {collapsed ? <ChevronRight size={24} strokeWidth={2.3} /> : <ChevronLeft size={24} strokeWidth={2.3} />}
+          {!collapsed && <span>Collapse</span>}
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function pageTitle(tab: ActiveTab): string {
+  if (tab === "timeline") return "Timeline";
+  if (tab === "ambient") return "Ambient";
+  if (tab === "views") return "Runtime Views";
+  return "Runtime Settings";
+}
+
+function pageDescription(tab: ActiveTab): string {
+  if (tab === "timeline") return "按时间整理最近 focus 的 app、网页和项目活动。";
+  if (tab === "ambient") return "主动后台搜索、写作介入和小工具机会都会先沉淀成可检查的 Views。";
+  if (tab === "views") return "查看 Observation 压缩和 ambient Programs 产出的 Evidence、Intent、Workflow、Advice、Task、Draft 和 Memory Views。";
+  return "控制 VisionFrame、ActivityBlock、Intent 和 Workflow 压缩的模型与开关。";
 }
 
 function AmbientPanel() {
@@ -2327,6 +2363,8 @@ function loadCachedTimeline(): { response: ActivityTimelineResponse; cachedAt: n
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { response?: ActivityTimelineResponse; cachedAt?: number; signature?: string; watermark?: string };
     if (!parsed.response?.ok || !Array.isArray(parsed.response.buckets)) return null;
+    if (parsed.response.view?.metadata?.live === true) return null;
+    if (!isTodayTimelineResponse(parsed.response)) return null;
     return {
       response: parsed.response,
       cachedAt: Number(parsed.cachedAt ?? 0) || 0,
@@ -2336,6 +2374,13 @@ function loadCachedTimeline(): { response: ActivityTimelineResponse; cachedAt: n
   } catch {
     return null;
   }
+}
+
+function isTodayTimelineResponse(response: ActivityTimelineResponse | null | undefined): response is ActivityTimelineResponse {
+  if (!response?.ok) return false;
+  if (response.view.id.startsWith("view:timeline:activity:day:")) return true;
+  const minutes = response.view.content?.minutes;
+  return typeof minutes === "number" && minutes > 4 * 60;
 }
 
 function saveCachedTimeline(response: ActivityTimelineResponse, cachedAt = Date.now(), signature = timelineSignature(DEFAULT_BUCKET_MINUTES, "activity", "all"), watermark = timelineWatermarkFromResponse(response)) {
@@ -3875,12 +3920,6 @@ function todayRange() {
   return { start: start.toISOString(), end: now.toISOString() };
 }
 
-function recentRange(minutes: number) {
-  const now = new Date();
-  const start = new Date(now.getTime() - Math.max(1, minutes) * 60_000);
-  return { start: start.toISOString(), end: now.toISOString() };
-}
-
 function timelineRangeMinutes(range: { start: string; end: string }) {
   const start = Date.parse(range.start);
   const end = Date.parse(range.end);
@@ -3892,10 +3931,10 @@ function timelineUiRecordLimit(minutes: number, sourceFilter: SourceFilter, deta
   if (sourceFilter === "screenpipe") return detailMode === "debug" ? 300 : 160;
   if (detailMode === "debug") {
     const samplesPerMinute = sourceFilter === "runtime" ? 2 : sourceFilter === "browser" ? 10 : 18;
-    return Math.min(30_000, Math.max(1_000, Math.ceil(minutes * samplesPerMinute)));
+    return Math.min(4_000, Math.max(1_000, Math.ceil(minutes * samplesPerMinute)));
   }
   const samplesPerMinute = sourceFilter === "runtime" ? 1 : sourceFilter === "browser" ? 5 : 10;
-  return Math.min(20_000, Math.max(900, Math.ceil(minutes * samplesPerMinute)));
+  return Math.min(TIMELINE_DAY_RECORD_LIMIT, Math.max(300, Math.ceil(minutes * samplesPerMinute)));
 }
 
 function liveSyncWindowMinutes() {

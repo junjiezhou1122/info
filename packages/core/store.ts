@@ -85,6 +85,7 @@ export class ContextStore {
 
       create index if not exists idx_context_records_created_at on context_records(created_at);
       create index if not exists idx_context_records_updated_at on context_records(updated_at);
+      create index if not exists idx_context_records_observed_at on context_records(coalesce(json_extract(time_json, '$.observed_at'), created_at));
       create index if not exists idx_context_records_schema on context_records(schema_name, schema_version);
       create index if not exists idx_context_records_source on context_records(source_type);
       create index if not exists idx_context_records_url on context_records(url);
