@@ -222,13 +222,10 @@ test("runtime UI lives under apps/ui with its own build boundary", () => {
 test("runtime UI surfaces proactive ambient View families", () => {
   const main = readFileSync("apps/ui/src/main.tsx", "utf8");
   const api = readFileSync("apps/ui/src/api.ts", "utf8");
-  const catalog = readFileSync("packages/views/catalog.ts", "utf8");
 
   assert.match(main, /activeTab === "ambient"/);
   assert.match(main, /function AmbientPanel/);
   assert.match(main, /process_background_tasks:\s*true/);
-  assert.match(main, /process_toolsmith_artifacts:\s*true/);
-  assert.match(main, /Build Tool Artifacts/);
   assert.match(main, /function toolArtifactUri/);
   assert.match(main, /ambient-open-link/);
   assert.match(main, /feedback\.analysis\.useful|analysis\.useful/);
@@ -245,14 +242,13 @@ test("runtime UI surfaces proactive ambient View families", () => {
     "agent.task_list",
     "task.background_research",
     "draft.writing_continuation",
-    "opportunity.tool",
-    "task.toolsmith_prototype",
-    "draft.tool_prototype",
-    "tool.prototype_artifact",
   ]) {
     assert.match(main, new RegExp(viewType.replace(".", "\\.")));
-    assert.match(catalog, new RegExp(viewType.replace(".", "\\.")));
   }
+
+  assert.doesNotMatch(main, /<AmbientColumn title="Toolsmith"/);
+  assert.doesNotMatch(main, /<AmbientColumn title="Language"/);
+  assert.doesNotMatch(main, /Build Tool Artifacts/);
 
   const chromeTasks = readFileSync("apps/chrome-acp/packages/chrome-extension/src/components/TasksView.tsx", "utf8");
   const chromeInfoMcp = readFileSync("apps/chrome-acp/packages/proxy-server/src/mcp/info-handler.ts", "utf8");

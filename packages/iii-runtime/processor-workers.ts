@@ -1,8 +1,10 @@
-import { ProcessorRuntime, createSurfaceStateProcessor } from "@info/processor-runtime";
+import { ProcessorRuntime, createSurfaceStateProcessor, type ProcessorDefinition } from "@info/processor-runtime";
 import type { ContextStore, StoredContextRecord } from "@info/core";
+import { createYouTubeLearningProcessor } from "@info/views";
 
 export const III_PROCESSOR_FUNCTIONS = {
   surfaceState: "processor::surface_state",
+  youtubeLearning: "processor::youtube_learning",
 } as const;
 
 export type ProcessorWorkerDefinition = {
@@ -12,29 +14,40 @@ export type ProcessorWorkerDefinition = {
 };
 
 export function createProcessorWorkerDefinitions(store: ContextStore): ProcessorWorkerDefinition[] {
-  return [{
-    function_id: III_PROCESSOR_FUNCTIONS.surfaceState,
-    triggers: ["info.processor.surface_state.requested", "info.observation.ingested"],
+  return [
+    processorWorker(store, III_PROCESSOR_FUNCTIONS.surfaceState, createSurfaceStateProcessor()),
+    processorWorker(store, III_PROCESSOR_FUNCTIONS.youtubeLearning, createYouTubeLearningProcessor()),
+  ];
+}
+
+function processorWorker(
+  store: ContextStore,
+  functionId: string,
+  processor: ProcessorDefinition,
+): ProcessorWorkerDefinition {
+  return {
+    function_id: functionId,
+    triggers: [`info.processor.${processor.id.replace(/^processor\./, "")}.requested`, "info.observation.ingested"],
     handler: async (input: unknown) => {
       const record = resolveRecord(input, store);
       if (!record) {
         return {
           ok: false,
-          function_id: III_PROCESSOR_FUNCTIONS.surfaceState,
+          function_id: functionId,
           error: "No source observation found. Pass record_id or record.",
         };
       }
       const runtime = new ProcessorRuntime({
         store,
-        processors: [createSurfaceStateProcessor()],
+        processors: [processor],
       });
       const result = await runtime.processObservation(record, normalizePayload(input));
       return {
         ...result,
-        function_id: III_PROCESSOR_FUNCTIONS.surfaceState,
+        function_id: functionId,
       };
     },
-  }];
+  };
 }
 
 function resolveRecord(input: unknown, store: ContextStore): StoredContextRecord | undefined {

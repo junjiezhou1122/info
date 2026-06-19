@@ -1,13 +1,15 @@
-import type { ActivityTimelineResponse, ContextViewSummary, FeedbackResponse, MemoryCandidateContent, MemoryGateDecision, ProjectCurrentContent, ProcessorRun, RuntimeSettings, RuntimeSettingsResponse, RuntimeTickResponse, ViewCatalogResponse, ViewFamiliesResponse, ViewListResponse, WorkFocusSetContent } from "./types";
+import type { ActivityTimelineResponse, ActivityTimelineWatermarkResponse, AudioTranscriptResponse, ContextRecordSummary, ContextViewInput, ContextViewSummary, ContextViewUpdateInput, FeedbackResponse, MemoryCandidateContent, MemoryGateDecision, ProcessorDefinitionSummary, ProcessorListResponse, ProcessorRun, ProcessorRunResponse, ProjectCurrentContent, RuntimeSettings, RuntimeSettingsResponse, RuntimeTickResponse, ViewCatalogResponse, ViewFamiliesResponse, ViewListResponse, ViewStatus, WorkFocusSetContent } from "./types";
 
 const API_BASE = import.meta.env.VITE_CONTEXT_API_BASE ?? "http://localhost:3111";
 const DEFAULT_TIMEOUT_MS = 8_000;
+const VIEW_FAMILIES_TIMEOUT_MS = 3_000;
+const VIEW_CATALOG_TIMEOUT_MS = 2_000;
 
 export function screenpipeFrameUrl(frameId: string | number): string {
   return `${API_BASE}/screenpipe/frames/${encodeURIComponent(String(frameId))}`;
 }
 
-export async function syncScreenpipe(windowMinutes = 15): Promise<RuntimeTickResponse> {
+export async function syncScreenpipe(windowMinutes = 15, screenpipeLimit = screenpipeSyncLimit(windowMinutes)): Promise<RuntimeTickResponse> {
   const res = await fetchWithTimeout(`${API_BASE}/runtime/tick`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -18,9 +20,9 @@ export async function syncScreenpipe(windowMinutes = 15): Promise<RuntimeTickRes
       force: true,
       window_minutes: windowMinutes,
       compile_views: false,
-      screenpipe_limit: 60,
+      screenpipe_limit: screenpipeLimit,
     }),
-  }, 12_000);
+  }, windowMinutes > 120 ? 30_000 : 12_000);
   if (!res.ok) throw new Error(`screenpipe sync failed: ${res.status}`);
   return res.json();
 }
@@ -51,36 +53,88 @@ export async function saveRuntimeSettings(settings: RuntimeSettings): Promise<Ru
   return res.json();
 }
 
-export async function fetchActivityTimeline(options: { minutes?: number; limit?: number; bucketMinutes?: number; includeLowLevelScreenpipe?: boolean; dedupe?: boolean; bucketItemLimit?: number | false; summarizeHeartbeats?: boolean; sourceFilter?: "screenpipe" | "browser" | "runtime" | "all"; mergeContinuous?: boolean; mergeGapMinutes?: number } = {}): Promise<ActivityTimelineResponse> {
-  const minutes = options.minutes ?? 180;
+export async function fetchActivityTimeline(options: { minutes?: number; startTime?: string; endTime?: string; limit?: number; bucketMinutes?: number; includeLowLevelScreenpipe?: boolean; dedupe?: boolean; bucketItemLimit?: number | false; summarizeHeartbeats?: boolean; sourceFilter?: "screenpipe" | "browser" | "runtime" | "all"; mergeContinuous?: boolean; mergeGapMinutes?: number; write?: boolean; includeRuntimeEvents?: boolean } = {}): Promise<ActivityTimelineResponse> {
+  const minutes = options.minutes ?? 90;
   const sourceFilter = options.sourceFilter ?? "all";
   const debugMode = options.includeLowLevelScreenpipe === true;
+  const timeoutMs = sourceFilter === "screenpipe" && debugMode ? 60_000 : minutes > 240 ? 20_000 : 8_000;
   const res = await fetchWithTimeout(`${API_BASE}/timeline/activity/compile`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       minutes,
+      start_time: options.startTime,
+      end_time: options.endTime,
       limit: options.limit ?? timelineRecordLimit(minutes, sourceFilter),
       bucket_minutes: options.bucketMinutes ?? 10,
       include_low_level_screenpipe: options.includeLowLevelScreenpipe ?? false,
-      include_runtime_events: false,
+      include_runtime_events: options.includeRuntimeEvents ?? false,
       dedupe: options.dedupe ?? !debugMode,
       bucket_item_limit: options.bucketItemLimit ?? (debugMode ? false : 50),
       summarize_heartbeats: options.summarizeHeartbeats ?? !debugMode,
       source_filter: sourceFilter,
       merge_continuous: options.mergeContinuous ?? true,
       merge_gap_minutes: options.mergeGapMinutes ?? 3,
-      write: false,
+      write: options.write ?? true,
     }),
-  });
+  }, timeoutMs);
   if (!res.ok) throw new Error(`timeline compile failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchActivityTimelineWatermark(options: { minutes?: number; startTime?: string; endTime?: string; sourceFilter?: "screenpipe" | "browser" | "runtime" | "all"; includeRuntimeEvents?: boolean } = {}): Promise<ActivityTimelineWatermarkResponse> {
+  const range = new URLSearchParams({
+    minutes: String(options.minutes ?? 24 * 60),
+    source_filter: options.sourceFilter ?? "all",
+  });
+  if (options.startTime) range.set("start_time", options.startTime);
+  if (options.endTime) range.set("end_time", options.endTime);
+  if (options.includeRuntimeEvents) range.set("include_runtime_events", "true");
+  const res = await fetchWithTimeout(`${API_BASE}/timeline/activity/watermark?${range.toString()}`, undefined, 5_000);
+  if (!res.ok) throw new Error(`timeline watermark failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchLatestActivityTimelineView(): Promise<ActivityTimelineResponse | null> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=timeline.activity&active_only=true&limit=1&summary_only=false`, undefined, 2_000);
+  if (!res.ok) throw new Error(`timeline view fetch failed: ${res.status}`);
+  const body = await res.json();
+  const view = body.views?.[0] as ContextViewSummary | undefined;
+  const buckets = Array.isArray(view?.content?.buckets) ? view.content.buckets as ActivityTimelineResponse["buckets"] : [];
+  if (!view || !buckets.length) return null;
+  return {
+    ok: true,
+    compiler_id: typeof view.compiler === "object" ? view.compiler?.id ?? "cached.timeline.activity" : view.compiler ?? "cached.timeline.activity",
+    records_used: typeof view.metadata?.record_count === "number" ? view.metadata.record_count : buckets.reduce((sum, bucket) => sum + bucket.count, 0),
+    events_used: typeof view.metadata?.runtime_event_count === "number" ? view.metadata.runtime_event_count : 0,
+    buckets,
+    view: {
+      id: view.id,
+      view_type: view.view_type,
+      title: view.title ?? "Activity Timeline",
+      summary: view.summary ?? "",
+      content: view.content as ActivityTimelineResponse["view"]["content"],
+      metadata: view.metadata,
+      updated_at: view.updated_at,
+    },
+  };
+}
+
+export async function fetchLiveActivityTimeline(options: { limit?: number; bucketMinutes?: number; sourceFilter?: "screenpipe" | "browser" | "runtime" | "all" } = {}): Promise<ActivityTimelineResponse> {
+  const params = new URLSearchParams({
+    limit: String(options.limit ?? 120),
+    bucket_minutes: String(options.bucketMinutes ?? 15),
+    source_filter: options.sourceFilter ?? "all",
+  });
+  const res = await fetchWithTimeout(`${API_BASE}/timeline/activity/live?${params.toString()}`, undefined, 2_000);
+  if (!res.ok) throw new Error(`live timeline failed: ${res.status}`);
   return res.json();
 }
 
 export async function fetchViewFamilies(): Promise<ViewFamiliesResponse> {
   const catalog = await fetchViewCatalog();
   const familyOrder = catalog.order;
-  const res = await fetchWithTimeout(`${API_BASE}/context/views/families?view_types=${familyOrder.join(",")}&active_only=true`, undefined, 8_000);
+  const res = await fetchWithTimeout(`${API_BASE}/context/views/families?view_types=${familyOrder.join(",")}&active_only=true`, undefined, VIEW_FAMILIES_TIMEOUT_MS);
   if (!res.ok) throw new Error(`view families fetch failed: ${res.status}`);
   const body = await res.json();
   const returned = Array.isArray(body.families) ? body.families : [];
@@ -101,21 +155,32 @@ export async function fetchViewFamilies(): Promise<ViewFamiliesResponse> {
 }
 
 export async function fetchViewCatalog(): Promise<ViewCatalogResponse> {
-  const res = await fetchWithTimeout(`${API_BASE}/context/views/catalog`, undefined, 8_000);
+  const res = await fetchWithTimeout(`${API_BASE}/context/views/catalog`, undefined, VIEW_CATALOG_TIMEOUT_MS);
   if (!res.ok) throw new Error(`view catalog fetch failed: ${res.status}`);
   return res.json();
 }
 
-export async function fetchViewsByType(viewType: string, options: { limit?: number; cursor?: string } = {}): Promise<ViewListResponse> {
+export async function fetchViewsByType(viewType: string, options: { limit?: number; cursor?: string; includeCandidates?: boolean; activeOnly?: boolean } = {}): Promise<ViewListResponse> {
   const params = new URLSearchParams({
     view_types: viewType,
     limit: String(options.limit ?? 80),
-    active_only: "true",
-    summary_only: "true",
+    summary_only: viewType === "audio" ? "false" : "true",
   });
+  if (options.activeOnly !== false && !options.includeCandidates) params.set("active_only", "true");
   if (options.cursor) params.set("updated_after", options.cursor);
   const res = await fetchWithTimeout(`${API_BASE}/context/views?${params.toString()}`, undefined, 8_000);
   if (!res.ok) throw new Error(`${viewType} views fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchAudioTranscripts(options: { minutes?: number; limit?: number } = {}): Promise<AudioTranscriptResponse> {
+  const params = new URLSearchParams({
+    minutes: String(options.minutes ?? 120),
+    limit: String(options.limit ?? 400),
+    _: String(Date.now()),
+  });
+  const res = await fetchWithTimeout(`${API_BASE}/screenpipe/audio/transcripts?${params.toString()}`, undefined, 25_000);
+  if (!res.ok) throw new Error(`audio transcripts fetch failed: ${res.status}`);
   return res.json();
 }
 
@@ -136,6 +201,67 @@ export async function fetchContextView(viewId: string): Promise<ContextViewSumma
   if (!res.ok) throw new Error(`view fetch failed: ${res.status}`);
   const body = await res.json();
   return body.view;
+}
+
+export async function fetchRecentRecords(limit = 80): Promise<ContextRecordSummary[]> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/recent?limit=${encodeURIComponent(String(limit))}`, undefined, 8_000);
+  if (!res.ok) throw new Error(`recent records fetch failed: ${res.status}`);
+  const body = await res.json();
+  return (body.records ?? []) as ContextRecordSummary[];
+}
+
+export async function fetchProcessors(options: { sourceKind?: "observation" | "view"; sourceType?: string } = {}): Promise<ProcessorListResponse> {
+  const params = new URLSearchParams();
+  if (options.sourceKind) params.set("source_kind", options.sourceKind);
+  if (options.sourceType) params.set("source_type", options.sourceType);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const res = await fetchWithTimeout(`${API_BASE}/processors${suffix}`, undefined, 8_000);
+  if (!res.ok) throw new Error(`processors fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function createDynamicProcessor(processor: Partial<ProcessorDefinitionSummary> & { id: string; runtime_config?: Record<string, unknown> }): Promise<ProcessorDefinitionSummary> {
+  const runtime = processor.runtime_config ?? { kind: processor.runtime };
+  const res = await fetchWithTimeout(`${API_BASE}/processors`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ processor: { ...processor, runtime } }),
+  }, 12_000);
+  if (!res.ok) throw new Error(`processor create failed: ${res.status} ${await responseErrorText(res)}`);
+  const body = await res.json();
+  return body.processor as ProcessorDefinitionSummary;
+}
+
+export async function runProcessor(input: { processor_id: string; record_id?: string; view_id?: string; payload?: Record<string, unknown> }): Promise<ProcessorRunResponse> {
+  const res = await fetchWithTimeout(`${API_BASE}/processors/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  }, 60_000);
+  if (!res.ok) throw new Error(`processor run failed: ${res.status} ${await responseErrorText(res)}`);
+  return res.json();
+}
+
+export async function createContextView(input: ContextViewInput): Promise<ContextViewSummary> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?source=manual`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  }, 12_000);
+  if (!res.ok) throw new Error(`view create failed: ${res.status} ${await responseErrorText(res)}`);
+  const body = await res.json();
+  return body.view as ContextViewSummary;
+}
+
+export async function updateContextView(viewId: string, input: ContextViewUpdateInput): Promise<ContextViewSummary> {
+  const res = await fetchWithTimeout(`${API_BASE}/context/views/${encodeURIComponent(viewId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  }, 12_000);
+  if (!res.ok) throw new Error(`view update failed: ${res.status} ${await responseErrorText(res)}`);
+  const body = await res.json();
+  return body.view as ContextViewSummary;
 }
 
 export async function submitViewFeedback(input: { view_id: string; type: "analysis.useful" | "analysis.dismissed" | "output.edited"; value?: unknown; reason?: string; payload?: Record<string, unknown> }): Promise<FeedbackResponse> {
@@ -211,7 +337,7 @@ export async function fetchProcessorTraces(): Promise<Array<{
 }
 
 export async function fetchProactiveSuggestions(): Promise<ContextViewSummary[]> {
-  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=advice.research,draft.writing_continuation,opportunity.tool,draft.tool_prototype&active_only=true&limit=80`, undefined, 8_000);
+  const res = await fetchWithTimeout(`${API_BASE}/context/views?view_types=advice.research,draft.writing_continuation&active_only=true&limit=80`, undefined, 8_000);
   if (!res.ok) throw new Error(`proactive suggestions fetch failed: ${res.status}`);
   const body = await res.json();
   return (body.views ?? []) as ContextViewSummary[];
@@ -219,16 +345,9 @@ export async function fetchProactiveSuggestions(): Promise<ContextViewSummary[]>
 
 export async function patchViewStatus(
   viewId: string,
-  status: "active" | "candidate" | "archived" | "rejected",
+  status: ViewStatus,
 ): Promise<ContextViewSummary> {
-  const res = await fetchWithTimeout(`${API_BASE}/context/views/${encodeURIComponent(viewId)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status }),
-  }, 8_000);
-  if (!res.ok) throw new Error(`view patch failed: ${res.status}`);
-  const body = await res.json();
-  return body.view as ContextViewSummary;
+  return updateContextView(viewId, { status });
 }
 
 async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS) {
@@ -244,8 +363,17 @@ async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit, ti
   }
 }
 
+async function responseErrorText(res: Response) {
+  const text = await res.text().catch(() => "");
+  return text ? text.slice(0, 500) : "";
+}
+
 function timelineRecordLimit(minutes: number, sourceFilter: "screenpipe" | "browser" | "runtime" | "all") {
   const samplesPerMinute = sourceFilter === "runtime" ? 2 : sourceFilter === "browser" ? 10 : sourceFilter === "screenpipe" ? 12 : 16;
   const minimum = sourceFilter === "runtime" ? 200 : 900;
   return Math.min(12_000, Math.max(minimum, Math.ceil(minutes * samplesPerMinute)));
+}
+
+function screenpipeSyncLimit(minutes: number) {
+  return Math.min(4_000, Math.max(80, Math.ceil(minutes * 3)));
 }

@@ -69,10 +69,94 @@ test("runtimeTick writes WorkThread state and Views without episode candidate Re
   assert.ok(store.recent(20).some(record => record.schema.name === "observation.route_candidate"));
   assert.ok(store.listViews({ view_types: ["work.focus_set"], limit: 5 })[0]);
   assert.ok(store.listViews({ view_types: ["project.current"], limit: 5 })[0]);
+  assert.ok(store.listViews({ view_types: ["memory.daily"], limit: 5 })[0]);
+  assert.ok(store.listViews({ view_types: ["summary.project_work_episode"], limit: 5 })[0]);
   assert.ok(result.compiled_views.some(view => view.view_type === "work.focus_set"));
   assert.ok(result.compiled_views.some(view => view.view_type === "project.current"));
   assert.ok(result.compiled_views.some(view => view.view_type === "state.surface"));
+  assert.ok(result.compiled_views.some(view => view.view_type === "memory.daily"));
+  assert.ok(result.compiled_views.some(view => view.view_type === "summary.project_work_episode"));
   assert.equal(store.getRuntimeState("active_thread")?.value?.thread_id, result.written_threads[0]);
+}));
+
+test("runtimeTick without iii keeps compiled state.surface and writes local episode summary", async () => withStore(async (store) => {
+  const record = store.insertRecord({
+    id: "record:runtime-tick-no-iii-browser",
+    schema: { name: "observation.browser_page_snapshot", version: 1 },
+    source: { type: "browser", connector: "chrome-extension" },
+    scope: { project: "info", project_path: "/Users/junjie/info", domain: "github.com", app: "chrome" },
+    content: {
+      title: "Runtime no iii",
+      url: "https://github.com/example/info",
+      text: "Runtime tick should keep local surface and episode views when iii is absent.",
+    },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  store.upsertWorkThread({
+    id: "thread:runtime-tick-no-iii",
+    title: "Runtime no iii episode",
+    status: "candidate",
+    confidence: 0.72,
+    evidence_records: [record.id],
+    projects: ["info"],
+    apps: ["chrome"],
+    reasons: ["browser evidence should compile into a local episode summary"],
+  });
+
+  const { runtimeTick } = await import("@info/runtime/runtime.js");
+  const result = await runtimeTick({
+    include_screenpipe: false,
+    include_ai_sessions: false,
+    include_git: false,
+    compile_views: true,
+    force: true,
+    window_minutes: 60,
+    min_score: 0.2,
+  }, store);
+
+  assert.equal(result.ok, true);
+  assert.ok(result.compiled_views.some(view => view.view_type === "state.surface" && view.view_count === 1));
+  assert.ok(result.compiled_views.some(view => view.view_type === "summary.project_work_episode" && view.view_count === 1));
+  assert.ok(result.compiled_views.some(view => view.view_type === "iii_runtime"));
+  assert.ok(store.listViews({ view_types: ["state.surface"], limit: 5 })[0]);
+  assert.ok(store.listViews({ view_types: ["summary.project_work_episode"], limit: 5 })[0]);
+}));
+
+test("runtimeTick writes automation.outcome views from agent action events", async () => withStore(async (store) => {
+  store.appendRuntimeEvent({
+    id: "event:runtime-action-outcome",
+    event_type: "agent_task.completed",
+    actor: "agent",
+    status: "completed",
+    subject_type: "action",
+    subject_id: "task:agent:runtime-action",
+    plugin_id: "capability.agent_task.submit",
+    related_views: ["task:agent:runtime-action"],
+    payload: {
+      request_id: "task:agent:runtime-action",
+      action_type: "agent_task",
+      reason: "completed by local mock",
+      started_at: "2026-05-25T01:00:00.000Z",
+      finished_at: "2026-05-25T01:00:02.000Z",
+    },
+  });
+
+  const { runtimeTick } = await import("@info/runtime/runtime.js");
+  const result = await runtimeTick({
+    include_screenpipe: false,
+    include_ai_sessions: false,
+    include_git: false,
+    compile_views: true,
+    force: true,
+    window_minutes: 60,
+  }, store);
+
+  const outcome = store.getView("automation:outcome:event:runtime-action-outcome");
+  assert.ok(result.compiled_views.some(view => view.view_type === "automation.outcome" && view.view_count === 1));
+  assert.ok(outcome);
+  assert.equal(outcome.view_type, "automation.outcome");
+  assert.equal(outcome.content?.request_id, "task:agent:runtime-action");
+  assert.equal((outcome.content?.outcome as Record<string, unknown>)?.ok, true);
 }));
 
 test("runtimeTick dry run does not persist memory candidates or durable memories", async () => withStore(async (store) => {

@@ -13,8 +13,8 @@ const scenarioSpecs: ViewSpec[] = [
     consumes: { observations: ["observation.codex.message", "observation.browser_page_snapshot"] },
   },
   {
-    view_type: "writing.advice",
-    title: "Writing Advice",
+    view_type: "advice.writing_assist",
+    title: "Writing Assist",
     purpose: "Inline-safe writing suggestion or critique.",
     lifecycle: "ephemeral",
     producers: [{ id: "processor.writing_ambient", kind: "processor" }],
@@ -29,7 +29,7 @@ const scenarioSpecs: ViewSpec[] = [
     consumes: { observations: ["observation.youtube.caption_state", "observation.youtube.caption_fragment"] },
   },
   {
-    view_type: "research.brief",
+    view_type: "brief.research",
     title: "Research Brief",
     purpose: "Synthesis from browser research sources.",
     lifecycle: "session",
@@ -65,11 +65,11 @@ const scenarioSpecs: ViewSpec[] = [
 test("view-system registers diverse scenarios without core schema changes", () => {
   const registry = createViewRegistry(scenarioSpecs);
 
-  assert.deepEqual(registry.namespaces(), ["automation", "learning", "memory", "project", "research", "state", "writing"]);
+  assert.deepEqual(registry.namespaces(), ["advice", "automation", "brief", "learning", "memory", "project", "state"]);
   assert.equal(registry.get("project.current")?.subject?.examples?.[0]?.name, "info");
-  assert.equal(registry.get("writing.advice")?.lifecycle, "ephemeral");
+  assert.equal(registry.get("advice.writing_assist")?.lifecycle, "ephemeral");
   assert.equal(registry.get("learning.youtube_fragment")?.consumes?.observations?.includes("observation.youtube.caption_fragment"), true);
-  assert.equal(registry.get("research.brief")?.purpose, "Synthesis from browser research sources.");
+  assert.equal(registry.get("brief.research")?.purpose, "Synthesis from browser research sources.");
   assert.equal(registry.get("memory.preferences")?.lifecycle, "long_term");
   assert.equal(registry.get("state.surface")?.producers?.[0]?.id, "processor.surface_state");
   assert.equal(registry.get("automation.outcome")?.consumes?.observations?.includes("feedback.automation_result"), true);

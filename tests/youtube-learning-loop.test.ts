@@ -7,12 +7,10 @@ import { ContextStore } from "@info/core";
 import { ProcessorRuntime } from "@info/processor-runtime";
 import {
   createYouTubeLearningProcessor,
-  generateReviewQueue,
   YOUTUBE_FRAGMENT_VIEW_TYPE,
-  YOUTUBE_REVIEW_QUEUE_VIEW_TYPE,
-  DIFFICULT_SEGMENTS_VIEW_TYPE,
   YOUTUBE_CAPTION_STATE_SCHEMA,
   YOUTUBE_CAPTION_FRAGMENT_SCHEMA,
+  LANGUAGE_LEARNING_PACK_VIEW_TYPE,
   YOUTUBE_PAUSED_SCHEMA,
   YOUTUBE_PLAYED_SCHEMA,
 } from "@info/views";
@@ -147,71 +145,7 @@ test("duplicate fragment handling deduplicates identical fragments", async () =>
   }
 }));
 
-test("review queue is generated from fragments and difficult segments", async () => withStore(async (store) => {
-  // Insert fragment views manually
-  store.upsertView({
-    id: "frag:1",
-    view_type: YOUTUBE_FRAGMENT_VIEW_TYPE,
-    title: "Fragment 1",
-    content: {
-      video_id: "vid-a",
-      video_title: "Video A",
-      start_seconds: 10,
-      end_seconds: 20,
-      caption_text: "Hello world",
-    },
-    confidence: 0.8,
-    privacy: { level: "private", retention: "normal" },
-  });
-
-  store.upsertView({
-    id: "frag:2",
-    view_type: YOUTUBE_FRAGMENT_VIEW_TYPE,
-    title: "Fragment 2",
-    content: {
-      video_id: "vid-b",
-      video_title: "Video B",
-      start_seconds: 120,
-      end_seconds: 135,
-      caption_text: "Another fragment",
-    },
-    confidence: 0.85,
-    privacy: { level: "private", retention: "normal" },
-  });
-
-  // Insert a difficult segment view
-  store.upsertView({
-    id: "diff:1",
-    view_type: DIFFICULT_SEGMENTS_VIEW_TYPE,
-    title: "Difficult 1",
-    content: {
-      video_id: "vid-a",
-      video_title: "Video A",
-      start_seconds: 15,
-      end_seconds: 18,
-      difficulty_reason: "fast speech",
-    },
-    confidence: 0.9,
-    privacy: { level: "private", retention: "normal" },
-  });
-
-  const fragments = store.listViews({ view_types: [YOUTUBE_FRAGMENT_VIEW_TYPE], active_only: true, limit: 100 });
-  const difficultSegments = store.listViews({ view_types: [DIFFICULT_SEGMENTS_VIEW_TYPE], active_only: true, limit: 100 });
-
-  const queueDraft = generateReviewQueue(fragments, difficultSegments);
-
-  assert.equal(queueDraft.type, YOUTUBE_REVIEW_QUEUE_VIEW_TYPE);
-  assert.equal(queueDraft.content?.item_count, 3);
-  assert.ok(Array.isArray(queueDraft.content?.items));
-  assert.equal(queueDraft.content?.items.length, 3);
-  // Items should be sorted by video_id then start_seconds
-  const items = queueDraft.content?.items as Array<Record<string, unknown>>;
-  assert.equal(items[0].video_id, "vid-a");
-  assert.equal(items[1].video_id, "vid-a");
-  assert.equal(items[2].video_id, "vid-b");
-}));
-
-test("difficult segment view is created on pause with is_difficult flag", async () => withStore(async (store) => {
+test("pause difficult flag stays diagnostic-only", async () => withStore(async (store) => {
   const processor = createYouTubeLearningProcessor();
   const runtime = new ProcessorRuntime({ store, processors: [processor] });
 
@@ -219,9 +153,9 @@ test("difficult segment view is created on pause with is_difficult flag", async 
   const result = await runtime.processObservation(pauseObs);
 
   assert.equal(result.ok, true);
-  // The pause handler produces a difficult segment view when is_difficult is true
   const run = result.runs[0];
   assert.equal(run.diagnostics?.is_difficult, true);
+  assert.equal(result.views_written.length, 0);
 }));
 
 test("pause without prior play does not produce a fragment", async () => withStore(async (store) => {
@@ -275,4 +209,50 @@ test("fragment from caption fragment observation has correct content", async () 
   assert.equal(view?.content?.end_seconds, 146);
   assert.equal(view?.content?.caption_text, "This is the caption text.");
   assert.equal(view?.content?.duration_seconds, 26);
+}));
+
+test("comprehension gap observation creates a compact language learning pack", async () => withStore(async (store) => {
+  const processor = createYouTubeLearningProcessor();
+  const runtime = new ProcessorRuntime({ store, processors: [processor] });
+  const obs = store.insertRecord({
+    id: "obs:youtube:gap",
+    schema: { name: "observation.youtube.comprehension_gap", version: 1 },
+    source: { type: "browser", connector: "chrome-acp" },
+    scope: { app: "chrome", domain: "youtube.com" },
+    payload: {
+      gap: {
+        fragment_id: "gap-fragment-1",
+        video_id: "english-demo",
+        video_title: "English Demo",
+        video_url: "https://www.youtube.com/watch?v=english-demo",
+        start_seconds: 12,
+        end_seconds: 18,
+        transcript_samples: ["I want to review this sentence."],
+      },
+    },
+    privacy: { level: "private", retention: "normal" },
+  });
+
+  const result = await runtime.processObservation(obs);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.views_written.length, 1);
+  assert.equal(result.runs[0].diagnostics?.retained_as_observation, true);
+  assert.equal(result.runs[0].diagnostics?.generated_views, 1);
+
+  const view = store.getView(result.views_written[0]);
+  assert.equal(view?.view_type, LANGUAGE_LEARNING_PACK_VIEW_TYPE);
+  assert.deepEqual(view?.source_records, [obs.id]);
+  assert.equal(view?.content?.source, "youtube.comprehension_gap");
+  assert.equal(view?.content?.video_id, "english-demo");
+  assert.deepEqual(view?.content?.sentences, ["I want to review this sentence."]);
+  assert.deepEqual(view?.content?.focus_words, ["review", "sentence"]);
+  assert.deepEqual(view?.content?.examples, [
+    { word: "review", sentence: "I want to review this sentence.", record_id: obs.id },
+    { word: "sentence", sentence: "I want to review this sentence.", record_id: obs.id },
+  ]);
+
+  const writtenTypes = result.views_written.map(id => store.getView(id)?.view_type);
+  assert.equal(writtenTypes.includes("learning.review_queue"), false);
+  assert.equal(writtenTypes.includes("memory.language.difficult_segments"), false);
 }));

@@ -1,5 +1,20 @@
-import type { LegacyViewFamilyDefinition, ViewSpec } from "./spec.js";
-import { legacyViewFamilyToSpec } from "./spec.js";
+import type { LegacyViewFamilyDefinition, ViewGraphOperation, ViewSpec } from "./spec.js";
+import { legacyViewFamilyToSpec, normalizeViewSpec } from "./spec.js";
+
+export const DEFAULT_VIEW_GRAPH_OPERATIONS: readonly ViewGraphOperation[] = [
+  "create",
+  "update",
+  "fork",
+  "archive",
+  "merge",
+  "split",
+  "promote",
+  "demote",
+  "supersede",
+  "diff",
+  "retain",
+  "retire",
+];
 
 // Legacy catalog entries not yet superseded by a named ViewSpec above.
 // These are kept for backwards compatibility with older UI and server routes.
@@ -16,10 +31,10 @@ const LEGACY_CATALOG_DEFINITIONS: readonly LegacyViewFamilyDefinition[] = [
   { view_type: "memory", label: "MemoryView", purpose: "Durable agent/app-consumable memory.", category: "memory", producers: ["compiler", "program", "manual", "agent"], default_page_size: 60, manual_create: true },
   { view_type: "thread.active_work", label: "Active Work", purpose: "Current work focus from project/context signals.", category: "project", producers: ["program"], default_page_size: 60 },
   { view_type: "project.current_context", label: "Project Context", purpose: "Current project state and relevant context.", category: "project", producers: ["program", "manual"], default_page_size: 60, manual_create: true },
-  { view_type: "brief.research", label: "Research Brief", purpose: "Research synthesis for a topic, resource, or active work thread.", category: "ambient", producers: ["program", "agent", "manual"], default_page_size: 60, manual_create: true },
+  { view_type: "brief.research", label: "Research Brief", purpose: "Research synthesis for a topic, resource, or active work thread.", category: "ambient", producers: ["program", "agent", "manual"], default_page_size: 60, manual_create: true, aliases: ["research.brief"], graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS },
   { view_type: "brief.background_research", label: "Background Research", purpose: "Background research prepared from proactive task delegation.", category: "ambient", producers: ["agent", "runtime"], default_page_size: 80 },
   { view_type: "advice.research", label: "Research Advice", purpose: "Lightweight research suggestion surfaced at the right time.", category: "ambient", producers: ["program"], default_page_size: 80 },
-  { view_type: "advice.writing_assist", label: "Writing Assist", purpose: "Inline-safe writing advice for active text editing.", category: "ambient", producers: ["program", "agent"], default_page_size: 80 },
+  { view_type: "advice.writing_assist", label: "Writing Assist", purpose: "Inline-safe writing advice for active text editing.", category: "ambient", producers: ["program", "agent"], default_page_size: 80, aliases: ["writing.advice"], graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS },
   { view_type: "task.background_research", label: "Research Task", purpose: "Proactive background research task for an agent runtime.", category: "ambient", producers: ["program", "manual"], default_page_size: 80, manual_create: true },
   { view_type: "draft.writing_continuation", label: "Writing Draft", purpose: "Editable writing continuation or draft.", category: "ambient", producers: ["program", "agent"], default_page_size: 80 },
   { view_type: "opportunity.tool", label: "Tool Opportunity", purpose: "Detected workflow improvement or small-tool opportunity.", category: "ambient", producers: ["program", "manual"], default_page_size: 80, manual_create: true },
@@ -31,6 +46,13 @@ const LEGACY_CATALOG_DEFINITIONS: readonly LegacyViewFamilyDefinition[] = [
   { view_type: "project_timeline", label: "Project Timeline", purpose: "Project-scoped timeline with records, events, and work threads.", category: "runtime", producers: ["runtime"], default_page_size: 60 },
   { view_type: "summary.project_work_episode", label: "Project Episode", purpose: "Episode summary for a work thread.", category: "runtime", producers: ["runtime"], default_page_size: 60 },
 ];
+
+const COMMON_SPEC_METADATA = {
+  viewgraph: {
+    doctrine: "Views arise from observations and can be forked, rewritten, merged, split, promoted, demoted, retained, or retired as future-task needs change.",
+    source: "docs/view-first-proactive-agent-os.md",
+  },
+};
 
 export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
   {
@@ -53,6 +75,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     },
     default_query: { view_types: ["state.surface"], limit: 1 },
     tags: ["surface", "current", "core"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "core", default_page_size: 40 },
     examples: [{
       view_type: "state.surface",
       title: "Current surface: browser page",
@@ -79,6 +103,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     },
     default_query: { view_types: ["work.focus_set"], limit: 5 },
     tags: ["work", "router", "focus", "hybrid"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "core", default_page_size: 40 },
     examples: [{
       view_type: "work.focus_set",
       content: {
@@ -105,6 +131,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     },
     default_query: { view_types: ["project.current"], limit: 5 },
     tags: ["project", "dogfood"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "project", default_page_size: 40 },
     examples: [{
       view_type: "project.current",
       content: {
@@ -125,10 +153,12 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     producers: [{ id: "processor.project_inbox", kind: "processor" }],
     consumes: {
       observations: ["observation.browser_page_snapshot", "observation.codex.message"],
-      views: ["research.brief", "writing.advice"],
+      views: ["brief.research", "advice.writing_assist", "research.brief", "writing.advice"],
     },
     default_query: { view_types: ["project.inbox"], limit: 20 },
     tags: ["project", "inbox"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "project", default_page_size: 40 },
     examples: [{
       view_type: "project.inbox",
       content: { items: [{ title: "Review ViewSpec API", reason: "Blocks CLI and processor reporting" }] },
@@ -150,6 +180,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     },
     default_query: { view_types: ["project.memory"], limit: 20 },
     tags: ["project", "memory"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "memory", default_page_size: 40, manual_create: true },
     examples: [{
       view_type: "project.memory",
       content: { principles: ["Core owns protocols, not categories."] },
@@ -164,6 +196,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     consumes: { views: ["project.current", "project.inbox"], observations: ["observation.codex.message"] },
     default_query: { view_types: ["project.tasks"], limit: 20 },
     tags: ["project", "tasks"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "project", default_page_size: 40 },
     examples: [{
       view_type: "project.tasks",
       content: { tasks: [{ title: "Implement mf view CLI", status: "open" }] },
@@ -178,6 +212,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     consumes: { observations: ["observation.codex.message", "observation.claude.message"], views: ["project.current"] },
     default_query: { view_types: ["project.decisions"], limit: 20 },
     tags: ["project", "decisions"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "project", default_page_size: 40, manual_create: true },
     examples: [{
       view_type: "project.decisions",
       content: { decisions: [{ title: "Project is a built-in view family, not a kernel object.", source_count: 3 }] },
@@ -192,6 +228,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     consumes: { views: ["task.background_research", "task.toolsmith_prototype"] },
     default_query: { view_types: ["agent.task_list"], limit: 1 },
     tags: ["agent", "tasks", "queue"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "ambient", default_page_size: 20 },
     examples: [{ view_type: "agent.task_list", content: { item_count: 2, counts: { queued: 1, completed: 1 }, items: [] } }],
   },
   {
@@ -210,6 +248,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     },
     default_query: { view_types: ["view.promotion_candidates"], limit: 10 },
     tags: ["viewgraph", "promotion", "task-discovery", "adaptive-memory"],
+    graph_operations: ["create", "update", "archive", "fork", "promote", "demote", "retain", "retire"],
+    metadata: { ...COMMON_SPEC_METADATA, category: "runtime", default_page_size: 30 },
     examples: [{
       view_type: "view.promotion_candidates",
       content: {
@@ -234,12 +274,20 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
       { id: "manual.memory_daily_edit", kind: "manual" },
       { id: "agent.memory_daily_edit", kind: "agent" },
     ],
+    storage: {
+      kind: "markdown",
+      content_key: "markdown",
+      path_template: "memory/daily/{date}.md",
+      description: "Canonical daily memory body lives as markdown, with path and summary mirrored in View content.",
+    },
     consumes: {
       observations: ["observation.*", "feedback.*"],
       views: ["state.surface", "work.focus_set", "project.current", "timeline.activity"],
     },
     default_query: { view_types: ["memory.daily"], limit: 14 },
     tags: ["memory", "daily", "markdown", "core"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "memory", default_page_size: 30, manual_create: true },
     examples: [{
       view_type: "memory.daily",
       content: {
@@ -260,9 +308,17 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
       { id: "manual.memory_profile_edit", kind: "manual" },
       { id: "agent.memory_profile_edit", kind: "agent" },
     ],
+    storage: {
+      kind: "markdown",
+      content_key: "markdown",
+      path_template: "memory/profile/{subject}.md",
+      description: "Canonical profile body lives as editable markdown, with durable facts mirrored in View content.",
+    },
     consumes: { observations: ["feedback.*"], views: ["memory.daily"] },
     default_query: { view_types: ["memory.profile"], limit: 5 },
     tags: ["memory", "profile", "markdown", "core"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "memory", default_page_size: 30, manual_create: true },
     examples: [{ view_type: "memory.profile", content: { markdown_path: "memory/profile/user.md", summary: "Prefers architecture-first, issue-managed execution." } }],
   },
   {
@@ -275,6 +331,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     consumes: { observations: ["feedback.view.dismissed", "feedback.output.edited", "observation.codex.message"] },
     default_query: { view_types: ["memory.preferences"], limit: 20 },
     tags: ["memory", "preferences"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "memory", default_page_size: 40, manual_create: true },
     examples: [{ view_type: "memory.preferences", content: { preference: "Prefer inbox/side-panel over intrusive popups.", evidence_count: 4 } }],
   },
   {
@@ -287,6 +345,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     consumes: { observations: ["observation.codex.message", "feedback.automation_result"], views: ["automation.outcome", "project.tasks"] },
     default_query: { view_types: ["memory.workflow_patterns"], limit: 20 },
     tags: ["memory", "workflow"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "memory", default_page_size: 40, manual_create: true },
     examples: [{ view_type: "memory.workflow_patterns", content: { pattern: "Plan with issues, branch, PR, then merge." } }],
   },
   {
@@ -299,6 +359,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     consumes: { views: ["learning.review_queue", "learning.youtube_fragment"], observations: ["feedback.review_result"] },
     default_query: { view_types: ["memory.skill_gaps"], limit: 20 },
     tags: ["memory", "learning"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "memory", default_page_size: 40, manual_create: true },
     examples: [{ view_type: "memory.skill_gaps", content: { skill: "English listening fragments", evidence_count: 4 } }],
   },
   {
@@ -311,6 +373,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     consumes: { observations: ["feedback.output.edited", "observation.codex.message"] },
     default_query: { view_types: ["memory.agent_collaboration_style"], limit: 20 },
     tags: ["memory", "agent"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "memory", default_page_size: 40, manual_create: true },
     examples: [{ view_type: "memory.agent_collaboration_style", content: { style: "Challenge weak assumptions; keep momentum." } }],
   },
   {
@@ -323,6 +387,8 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     consumes: { observations: ["feedback.automation_result", "feedback.output.edited"], views: ["memory.daily", "automation.outcome"] },
     default_query: { view_types: ["agent.case_memory"], limit: 20 },
     tags: ["memory", "agent", "case"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "memory", default_page_size: 40, manual_create: true },
     examples: [{ view_type: "agent.case_memory", content: { case: "Use DOM tools before vision fallback on current Chrome pages." } }],
   },
   {
@@ -332,9 +398,11 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     lifecycle: "session",
     subject: { description: "Any video segment; no core enum is required.", examples: [{ type: "video", title: "Agent skills talk" }] },
     producers: [{ id: "processor.youtube_learning", kind: "processor" }],
-    consumes: { observations: ["observation.youtube.caption_state", "observation.youtube.caption_fragment"] },
+    consumes: { observations: ["observation.youtube.caption_state", "observation.youtube.caption_fragment", "observation.youtube.comprehension_gap"] },
     default_query: { view_types: ["learning.youtube_fragment"], limit: 50 },
     tags: ["learning", "youtube", "scenario"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "learning", default_page_size: 50 },
     examples: [{ view_type: "learning.youtube_fragment", content: { start_seconds: 120, end_seconds: 146, caption_text: "Example caption text." } }],
   },
   {
@@ -352,6 +420,9 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     },
     default_query: { view_types: ["learning.review_queue"], limit: 10 },
     tags: ["learning", "youtube", "review"],
+    aliases: ["app.language.review_queue"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "learning", default_page_size: 20 },
     examples: [{ view_type: "learning.review_queue", content: { item_count: 5, items: [] } }],
   },
   {
@@ -364,31 +435,9 @@ export const CORE_VIEW_SPECS: readonly ViewSpec[] = [
     consumes: { views: ["learning.youtube_fragment"] },
     default_query: { view_types: ["memory.language.difficult_segments"], limit: 50 },
     tags: ["memory", "language", "difficult_segments"],
+    graph_operations: DEFAULT_VIEW_GRAPH_OPERATIONS,
+    metadata: { ...COMMON_SPEC_METADATA, category: "memory", default_page_size: 50, manual_create: true },
     examples: [{ view_type: "memory.language.difficult_segments", content: { video_id: "abc123", start_seconds: 120, end_seconds: 135, difficulty_reason: "fast speech" } }],
-  },
-  {
-    view_type: "writing.advice",
-    title: "Writing Advice",
-    purpose: "Inline-safe advice for active text editing that can be dismissed or inserted by the user.",
-    lifecycle: "ephemeral",
-    subject: { description: "Focused editor/input context.", examples: [{ type: "editor", element: "textarea" }] },
-    producers: [{ id: "processor.writing_ambient", kind: "processor" }],
-    consumes: { observations: ["observation.editor.text_changed"], views: ["state.surface"] },
-    default_query: { view_types: ["writing.advice"], limit: 20 },
-    tags: ["writing", "scenario"],
-    examples: [{ view_type: "writing.advice", content: { advice: "Tighten the second sentence.", action: "insert_optional" } }],
-  },
-  {
-    view_type: "research.brief",
-    title: "Research Brief",
-    purpose: "Purpose-shaped synthesis from browser pages, selections, and background research.",
-    lifecycle: "session",
-    subject: { description: "Any research topic/resource subject metadata.", examples: [{ type: "topic", name: "view systems" }] },
-    producers: [{ id: "processor.research_brief", kind: "processor" }, { id: "agent.background_research", kind: "agent" }],
-    consumes: { observations: ["observation.browser_page_snapshot", "observation.browser_text_selected"], views: ["state.surface"] },
-    default_query: { view_types: ["research.brief"], limit: 20 },
-    tags: ["research", "scenario"],
-    examples: [{ view_type: "research.brief", content: { summary: "Open view registries allow new domains without core schema edits." } }],
   },
 ];
 
@@ -399,5 +448,5 @@ export const LEGACY_VIEW_SPECS: readonly ViewSpec[] = LEGACY_CATALOG_DEFINITIONS
   .map(legacyViewFamilyToSpec);
 
 export function builtinViewSpecs(): ViewSpec[] {
-  return [...CORE_VIEW_SPECS, ...LEGACY_VIEW_SPECS];
+  return [...CORE_VIEW_SPECS, ...LEGACY_VIEW_SPECS].map(normalizeViewSpec);
 }

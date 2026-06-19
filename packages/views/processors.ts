@@ -14,6 +14,7 @@ import { compileObservationTimeline } from "./timeline/timeline.js";
 import { compileWorkThreadView } from "./timeline/work-thread-view.js";
 import { compileActivityTimeline } from "./timeline/activity-timeline.js";
 import { compileProjectTimeline } from "./timeline/project-timeline.js";
+import { compileProjectWorkEpisode, compileProjectWorkEpisodeForThread } from "./timeline/episode-summary.js";
 import { compileWorkFocusSet } from "./work-router/index.js";
 import { compileProjectCurrent } from "./project/index.js";
 
@@ -36,20 +37,26 @@ export const VIEW_PROCESSOR_FUNCTIONS = {
   observationTimeline: "view::timeline_observations_compile",
   activityTimeline: "view::timeline_activity_compile",
   projectTimeline: "view::project_timeline_compile",
+  projectWorkEpisode: "view::summary_project_work_episode_compile",
 } as const;
 
 export type ViewProcessorInput = {
   write?: boolean;
   minutes?: number;
+  start_time?: string;
+  end_time?: string;
   limit?: number;
   llm?: LlmOptions;
   vision_llm?: LlmOptions;
   visual_frame_limit?: number;
   visual_frame_concurrency?: number;
   visual_frame_sample_seconds?: number;
+  force?: boolean;
   work_thread_minutes?: number;
   activity_timeline_minutes?: number;
   project_timeline_minutes?: number;
+  thread_id?: string;
+  thread_ids?: string[];
   project_path?: string;
   project?: string;
   plugin_id?: string;
@@ -115,6 +122,7 @@ export function createViewProcessorDefinitions(): ViewProcessorDefinition[] {
     processor(VIEW_PROCESSOR_FUNCTIONS.observationTimeline, "timeline.observations", ["info.observation.ingested", "info.schedule.tick", "info.view.requested"], compileObservationTimelineProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.activityTimeline, "timeline.activity", ["info.observation.ingested", "info.runtime.event.written", "info.schedule.tick", "info.view.requested"], compileActivityTimelineProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.projectTimeline, "project_timeline", ["info.view.work_thread.written", "info.schedule.tick", "info.view.requested"], compileProjectTimelineProcessor),
+    processor(VIEW_PROCESSOR_FUNCTIONS.projectWorkEpisode, "summary.project_work_episode", ["info.view.work_thread.written", "info.view.project_timeline.written", "info.schedule.tick", "info.view.requested"], compileProjectWorkEpisodeProcessor),
   ];
 }
 
@@ -165,6 +173,7 @@ async function compileVisualFrameProcessor(input: ViewProcessorInput, context: V
   const evidenceViews = viewsByIdOrType(context.store, input.source_view_ids, ["evidence"], input.visual_frame_limit ?? input.limit);
   const result = await compileVisualFrameViews({
     write: input.write ?? true,
+    force: input.force,
     limit: input.visual_frame_limit ?? input.limit,
     concurrency: input.visual_frame_concurrency,
     sampleIntervalSeconds: input.visual_frame_sample_seconds,
@@ -378,6 +387,8 @@ async function compileObservationTimelineProcessor(input: ViewProcessorInput, co
 async function compileActivityTimelineProcessor(input: ViewProcessorInput, context: ViewProcessorContext) {
   const result = compileActivityTimeline({
     minutes: input.activity_timeline_minutes ?? input.minutes ?? 240,
+    startTime: input.start_time,
+    endTime: input.end_time,
     limit: input.limit ?? 400,
     eventLimit: input.event_limit ?? 120,
     bucketMinutes: input.bucket_minutes,
@@ -425,6 +436,36 @@ async function compileProjectTimelineProcessor(input: ViewProcessorInput, contex
     buckets: result.buckets.length,
     work_threads: result.work_threads.length,
   });
+}
+
+async function compileProjectWorkEpisodeProcessor(input: ViewProcessorInput, context: ViewProcessorContext) {
+  const explicitIds = [...(input.thread_id ? [input.thread_id] : []), ...(input.thread_ids ?? [])];
+  const threads = explicitIds.length
+    ? explicitIds.map(id => context.store.getWorkThread(id)).filter((thread): thread is NonNullable<ReturnType<ContextStore["getWorkThread"]>> => Boolean(thread))
+    : context.store.listWorkThreads("candidate").slice(0, input.limit ?? 6);
+  const views = [];
+  const diagnostics = {
+    threads_scanned: threads.length,
+    threads_summarized: 0,
+    skipped_threads: [] as Array<{ thread_id: string; reason: string }>,
+  };
+  for (const thread of threads) {
+    const records = context.store.recordsForThread(thread.id, 200);
+    if (!records.length) {
+      diagnostics.skipped_threads.push({ thread_id: thread.id, reason: "no thread evidence records" });
+      continue;
+    }
+    const result = input.write ?? true
+      ? compileProjectWorkEpisode(thread, records, { write: true, store: context.store })
+      : compileProjectWorkEpisodeForThread(thread.id, { write: false, store: context.store });
+    if (!result.ok) {
+      diagnostics.skipped_threads.push({ thread_id: thread.id, reason: result.error });
+      continue;
+    }
+    views.push(result.view);
+    diagnostics.threads_summarized += 1;
+  }
+  return viewResult(VIEW_PROCESSOR_FUNCTIONS.projectWorkEpisode, "summary.project_work_episode", new Date().toISOString(), storedViews(views), diagnostics);
 }
 
 function processor(

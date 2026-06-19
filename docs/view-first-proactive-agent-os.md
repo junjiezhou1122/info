@@ -154,9 +154,9 @@ project.current
 task.background_research
 result.browser_action
 feedback.analysis.useful
-writing.advice
+advice.writing_assist
 learning.youtube_fragment
-research.brief
+brief.research
 memory.daily
 memory.profile
 automation.outcome
@@ -340,8 +340,8 @@ This leaves room for non-programmer domains without changing the kernel:
 
 ```text
 learning.youtube_fragment
-writing.advice
-research.brief
+advice.writing_assist
+brief.research
 automation.outcome
 ```
 
@@ -370,9 +370,9 @@ project-only by accident.
 | Scenario | Example observations | Example processors | Example views |
 |---|---|---|---|
 | Project / coding | `observation.codex.message`, `observation.browser_page_snapshot` | project context builder, decision extractor | `project.current`, `project.decisions`, `project.tasks` |
-| Writing | `observation.editor.text_changed` | writing ambient processor | `writing.advice`, `draft.writing_continuation` |
+| Writing | `observation.editor.text_changed` | writing ambient processor | `advice.writing_assist`, `draft.writing_continuation` |
 | YouTube learning | `observation.youtube.caption_state`, `observation.youtube.caption_fragment` | caption segmenter, review queue builder | `learning.youtube_fragment`, `learning.review_queue`, `memory.skill_gaps` |
-| Web research | `observation.browser_page_snapshot`, `observation.browser_text_selected` | source extractor, brief builder | `research.source`, `research.brief`, `research.open_questions` |
+| Web research | `observation.browser_page_snapshot`, `observation.browser_text_selected` | source extractor, brief builder | `research.source`, `brief.research`, `research.open_questions` |
 | Personal memory | `feedback.output.edited`, `observation.codex.message` | preference updater, workflow pattern miner | `memory.preferences`, `memory.workflow_patterns`, `memory.agent_collaboration_style` |
 | Current surface | `observation.browser_page_heartbeat`, `observation.screenpipe_frame` | surface state fusion | `state.surface` |
 | Automation | `task.browser_action`, `feedback.automation_result` | automation planner, outcome recorder | `automation.plan`, `automation.outcome`, `memory.workflow_patterns` |

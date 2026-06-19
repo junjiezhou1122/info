@@ -4,13 +4,29 @@ import { basename, resolve } from "node:path";
 import { homedir } from "node:os";
 import { ContextStore } from "@info/core";
 import type { LlmOptions } from "@info/core";
-import type { ContextRecord, StoredContextRecord, StoredWorkThread } from "@info/core";
+import type { ContextRecord, StoredContextRecord, StoredContextView, StoredWorkThread } from "@info/core";
 import { fetchScreenpipeActivitySummary, fetchScreenpipeInputEvents, fetchScreenpipeRecords, fetchScreenpipeWorkspaceSignals } from "@info/sensors";
 import { aiSessionRefToRecord, locateAiSessions, type AiSessionTool } from "@info/sensors";
 import { buildCandidateThreads, type CandidateThread } from "@info/views/timeline/correlation.js";
+import { compileProjectWorkEpisodeForThread } from "@info/views/timeline/episode-summary.js";
 import { buildLocalProjectSnapshotRecord } from "@info/sensors";
 import { buildThreadEvidenceMap } from "@info/views/threads/thread-evidence.js";
-import { buildCandidateRoutes, buildRouteCandidateRecord, buildSurfaceStateView, createSurfaceStateProcessor, extractRouteFeatures, ProcessorRuntime } from "@info/processor-runtime";
+import {
+  buildCandidateRoutes,
+  buildRouteCandidateRecord,
+  buildSurfaceStateView,
+  createDurableMemoryMinerProcessor,
+  createMemoryDailyUpdateProcessor,
+  createMemoryProfileUpdateProcessor,
+  createProjectDecisionExtractorProcessor,
+  createProjectInboxProcessor,
+  createProjectTasksProcessor,
+  createSurfaceStateProcessor,
+  createViewPromotionEngineProcessor,
+  extractRouteFeatures,
+  ProcessorRuntime,
+} from "@info/processor-runtime";
+import { createDefaultProgramRuntime } from "@info/programs/registry.js";
 import { processAmbientBackgroundTasks } from "./background-tasks.js";
 import type { AmbientBackgroundTaskMode } from "./background-tasks.js";
 import { processToolsmithSandboxArtifacts } from "./toolsmith-artifacts.js";
@@ -35,6 +51,7 @@ const VIEW_WORKER_FUNCTIONS = {
   observationTimeline: "view::timeline_observations_compile",
   activityTimeline: "view::timeline_activity_compile",
   projectTimeline: "view::project_timeline_compile",
+  projectWorkEpisode: "view::summary_project_work_episode_compile",
 } as const;
 
 export type RuntimeIiiClient = {
@@ -497,6 +514,7 @@ export async function runtimeTick(req: RuntimeTickRequest = {}, store = new Cont
       visualFrameLimit: req.visual_frame_limit ?? settings.visual_frame_limit,
       visualFrameConcurrency: req.visual_frame_concurrency ?? settings.visual_frame_concurrency,
       visualFrameSampleSeconds: req.visual_frame_sample_seconds ?? settings.visual_frame_sample_seconds,
+      force,
       workThreadMinutes: req.work_thread_view_minutes,
       activityMinutes: req.activity_timeline_minutes,
       projectMinutes: req.project_timeline_minutes,
@@ -601,6 +619,7 @@ async function compileRuntimeViews(input: {
   visualFrameLimit?: number;
   visualFrameConcurrency?: number;
   visualFrameSampleSeconds?: number;
+  force?: boolean;
   workThreadMinutes?: number;
   activityMinutes?: number;
   projectMinutes?: number;
@@ -608,7 +627,12 @@ async function compileRuntimeViews(input: {
   const out: RuntimeTickResult["compiled_views"] = [];
   const surface = await compileSurfaceStateView(input.store, input.records ?? [], input.windowMinutes, input.write);
   out.push(surface);
-  if (!input.iii) return [{ view_type: "iii_runtime", skipped: "iii runtime client required for view compilation" }];
+  out.push(...compileAutomationOutcomeViews(input.store, { write: input.write, minutes: Math.max(input.windowMinutes, 240) }));
+  out.push(...compileProjectWorkEpisodeSummaries(input.store, { write: input.write, limit: 6 }));
+  if (!input.iii) {
+    out.push({ view_type: "iii_runtime", skipped: "iii runtime client required for remote view compilation" });
+    return out;
+  }
   const iii = input.iii;
   try {
     const compiled = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.evidence, {
@@ -643,6 +667,7 @@ async function compileRuntimeViews(input: {
         visual_frame_limit: input.visualFrameLimit,
         visual_frame_concurrency: input.visualFrameConcurrency,
         visual_frame_sample_seconds: input.visualFrameSampleSeconds,
+        force: input.force,
       });
       out.push({ view_type: "visual_frame", view_count: visualFrames.views.length, title: "AI VisualFrame Views" });
 
@@ -735,6 +760,14 @@ async function compileRuntimeViews(input: {
       view_count: projectCurrent.views.length,
     });
 
+    out.push(...await runLocalViewProducers({
+      store: input.store,
+      write: input.write,
+      records: input.records ?? [],
+      sourceViewIds: [...compiled.views_written, ...projectCurrent.views_written],
+      windowMinutes: input.windowMinutes,
+    }));
+
     const memoryCandidates = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.memoryCandidate, {
       write: input.write,
       source_record_ids: input.records?.map(record => record.id),
@@ -798,6 +831,22 @@ async function compileRuntimeViews(input: {
     }
   } else {
     out.push({ view_type: "project_timeline", skipped: "no active workspace" });
+  }
+
+  try {
+    const compiled = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.projectWorkEpisode, {
+      limit: 6,
+      write: input.write,
+    });
+    out.push({
+      view_type: "summary.project_work_episode",
+      view_id: compiled.views[0]?.id,
+      title: compiled.views[0]?.title,
+      view_count: compiled.views.length,
+      records_used: numberValue(compiled.diagnostics.threads_summarized),
+    });
+  } catch (error) {
+    out.push({ view_type: "summary.project_work_episode", skipped: error instanceof Error ? error.message : String(error) });
   }
   return out;
 }
@@ -874,11 +923,14 @@ type RuntimeViewWorkerPayload = {
   visual_frame_limit?: number;
   visual_frame_concurrency?: number;
   visual_frame_sample_seconds?: number;
+  force?: boolean;
   project_path?: string;
   project?: string;
   plugin_id?: string;
   source_record_ids?: string[];
   source_view_ids?: string[];
+  thread_id?: string;
+  thread_ids?: string[];
 };
 
 type RuntimeViewWorkerResult = {
@@ -891,6 +943,135 @@ type RuntimeViewWorkerResult = {
   diagnostics: Record<string, unknown>;
 };
 
+type LocalViewProducerResult = {
+  view_type: string;
+  view_id?: string;
+  title?: string;
+  view_count?: number;
+  records_used?: number;
+  skipped?: string;
+};
+
+function compileProjectWorkEpisodeSummaries(
+  store: ContextStore,
+  options: { write: boolean; limit: number },
+): RuntimeTickResult["compiled_views"] {
+  const threads = store.listWorkThreads("candidate").slice(0, options.limit);
+  if (!threads.length) return [{ view_type: "summary.project_work_episode", skipped: "no candidate work threads" }];
+  const summaries: RuntimeTickResult["compiled_views"] = [];
+  for (const thread of threads) {
+    const evidenceCount = store.recordsForThread(thread.id, 1).length;
+    if (!evidenceCount) {
+      summaries.push({ view_type: "summary.project_work_episode", skipped: `no evidence records for ${thread.id}` });
+      continue;
+    }
+    const result = compileProjectWorkEpisodeForThread(thread.id, { write: options.write, store });
+    if (!result.ok) {
+      summaries.push({ view_type: "summary.project_work_episode", skipped: result.error });
+      continue;
+    }
+    summaries.push({
+      view_type: "summary.project_work_episode",
+      view_id: options.write ? result.written : result.view.id,
+      title: result.view.title,
+      records_used: result.summary.record_count,
+      view_count: 1,
+    });
+  }
+  return summaries;
+}
+
+function compileAutomationOutcomeViews(
+  store: ContextStore,
+  options: { write: boolean; minutes: number },
+): RuntimeTickResult["compiled_views"] {
+  const events = store.listRuntimeEvents({ limit: 80, timeWindow: { minutes: options.minutes } })
+    .filter(isActionOutcomeEvent);
+  if (!events.length) return [{ view_type: "automation.outcome", skipped: "no recent action outcome events" }];
+  const views = events.map(event => buildAutomationOutcomeView(event));
+  const stored = options.write ? views.map(view => store.upsertView(view)) : views;
+  return [{
+    view_type: "automation.outcome",
+    view_id: stored[0]?.id,
+    title: stored[0]?.title,
+    view_count: stored.length,
+  }];
+}
+
+function isActionOutcomeEvent(event: { event_type: string; actor: string; status?: string; plugin_id?: string }): boolean {
+  if (!["completed", "failed", "denied"].includes(event.status ?? "")) return false;
+  if (event.event_type.startsWith("agent_task.")) return true;
+  if (event.event_type.startsWith("browser_action.")) return true;
+  if (event.event_type.startsWith("tool.")) return true;
+  if (event.event_type.startsWith("capability.run.") && /agent_task|browser|tool/i.test(event.plugin_id ?? event.event_type)) return true;
+  return false;
+}
+
+function buildAutomationOutcomeView(event: {
+  id: string;
+  event_type: string;
+  actor: "user" | "system" | "connector" | "plugin" | "agent";
+  status?: "started" | "completed" | "failed" | "denied";
+  subject_type?: "record" | "view" | "thread" | "plugin" | "query" | "runtime" | "action";
+  subject_id?: string;
+  plugin_id?: string;
+  related_records?: string[];
+  related_views?: string[];
+  related_threads?: string[];
+  payload?: Record<string, unknown>;
+  created_at: string;
+}): StoredContextView {
+  const status = event.status ?? (event.event_type.endsWith(".failed") ? "failed" : "completed");
+  const actionType = stringValue(event.payload?.action_type) ?? event.plugin_id ?? event.event_type;
+  const requestId = stringValue(event.payload?.request_id) ?? event.subject_id ?? event.id;
+  const ok = status === "completed";
+  return {
+    id: `automation:outcome:${event.id}`,
+    view_type: "automation.outcome",
+    title: `Automation outcome: ${actionType}`,
+    summary: `${actionType} ${status}`,
+    status: status === "failed" || status === "denied" ? "candidate" : "accepted",
+    source_records: event.related_records ?? [],
+    source_views: event.related_views ?? [],
+    compiler: { id: "runtime.automation_outcome", version: "1", mode: "deterministic" },
+    purpose: "Unified outcome record for agent task, browser action, and tool automation loops.",
+    scope: { app: stringValue(event.payload?.app), plugin_id: event.plugin_id },
+    content: {
+      request_id: requestId,
+      action_type: actionType,
+      status,
+      ok,
+      event_id: event.id,
+      event_type: event.event_type,
+      actor: event.actor,
+      subject_type: event.subject_type,
+      subject_id: event.subject_id,
+      plugin_id: event.plugin_id,
+      outcome: {
+        ok,
+        request_id: requestId,
+        action_type: actionType,
+        status,
+        error: stringValue(event.payload?.error),
+        reason: stringValue(event.payload?.reason),
+        output_views: event.related_views ?? [],
+        output_records: event.related_records ?? [],
+        diagnostics: event.payload,
+        started_at: stringValue(event.payload?.started_at) ?? event.created_at,
+        finished_at: stringValue(event.payload?.finished_at) ?? event.created_at,
+      },
+      created_at: event.created_at,
+    },
+    confidence: ok ? 0.82 : 0.9,
+    stability: "session",
+    lossiness: "medium",
+    privacy: { level: "private", retention: "normal", allow_embedding: false, allow_llm_summary: true, allow_external_llm: false, allow_external_reader: false },
+    metadata: { source_event_id: event.id, source_event_type: event.event_type, related_threads: event.related_threads ?? [] },
+    created_at: event.created_at,
+    updated_at: event.created_at,
+  };
+}
+
 async function triggerViewWorker(iii: RuntimeIiiClient, functionId: string, payload: RuntimeViewWorkerPayload): Promise<RuntimeViewWorkerResult> {
   const result = await iii.trigger({ function_id: functionId, payload });
   if (!isRecord(result) || result.ok !== true || !Array.isArray(result.views)) {
@@ -901,6 +1082,178 @@ async function triggerViewWorker(iii: RuntimeIiiClient, functionId: string, payl
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
+}
+
+async function runLocalViewProducers(input: {
+  store: ContextStore;
+  write: boolean;
+  records: StoredContextRecord[];
+  sourceViewIds: string[];
+  windowMinutes: number;
+}): Promise<LocalViewProducerResult[]> {
+  const processors = [
+    createProjectInboxProcessor({ limit: 30 }),
+    createProjectTasksProcessor({ limit: 30 }),
+    createProjectDecisionExtractorProcessor({ limit: 30 }),
+    createMemoryDailyUpdateProcessor({ recordLimit: 120, viewLimit: 40 }),
+    createDurableMemoryMinerProcessor({ recordLimit: 160, viewLimit: 60 }),
+    createMemoryProfileUpdateProcessor({ dailyLimit: 14, feedbackLimit: 60 }),
+  ];
+  const promotionProcessor = createViewPromotionEngineProcessor({ windowMinutes: Math.max(input.windowMinutes, 12 * 60) });
+  if (!input.write) {
+    return [...processors, promotionProcessor].flatMap(processor => (processor.produces.views ?? []).map(viewType => ({
+      view_type: viewType,
+      skipped: "dry-run local processor wiring",
+    })));
+  }
+
+  const runtime = new ProcessorRuntime({ store: input.store, processors });
+  const seeds = localViewProducerSeeds(input.store, input.records, input.sourceViewIds);
+  const writtenByType = new Map<string, string[]>();
+  const skipped = new Map<string, string>();
+
+  for (const seed of seeds) {
+    const result = seed.kind === "record"
+      ? await runtime.processObservation(seed.value)
+      : await runtime.processView(seed.value);
+    for (const run of result.runs) {
+      const processor = processors.find(item => item.id === run.processor_id);
+      if (!processor) continue;
+      if (!run.ok) {
+        for (const viewType of processor.produces.views ?? []) skipped.set(viewType, run.error ?? "processor failed");
+        continue;
+      }
+      for (const id of run.views_written) {
+        const view = input.store.getView(id);
+        if (!view) continue;
+        const ids = writtenByType.get(view.view_type) ?? [];
+        ids.push(id);
+        writtenByType.set(view.view_type, ids);
+      }
+    }
+  }
+
+  const localSummaries = processors.flatMap(processor => processor.produces.views ?? []).map(viewType => {
+    const ids = [...new Set(writtenByType.get(viewType) ?? [])];
+    const view = ids.length ? input.store.getView(ids[0]) : undefined;
+    return {
+      view_type: viewType,
+      view_id: view?.id,
+      title: view?.title,
+      view_count: ids.length,
+      skipped: ids.length ? undefined : skipped.get(viewType) ?? "no matching seed produced this view",
+    };
+  });
+
+  const promotionSummary = await runViewPromotionProducer(input.store, promotionProcessor, seeds);
+  const languageSummaries = await runLanguageLearningProducer(input.store, seeds, input.write);
+  return [...localSummaries, promotionSummary, ...languageSummaries];
+}
+
+async function runViewPromotionProducer(
+  store: ContextStore,
+  processor: ReturnType<typeof createViewPromotionEngineProcessor>,
+  seeds: Array<{ kind: "record"; value: StoredContextRecord } | { kind: "view"; value: StoredContextView }>,
+): Promise<LocalViewProducerResult> {
+  const seed = seeds.find(item => item.kind === "record") ?? seeds[0];
+  if (!seed) return { view_type: "view.promotion_candidates", view_count: 0, skipped: "no local producer seed" };
+  const runtime = new ProcessorRuntime({ store, processors: [processor] });
+  const result = seed.kind === "record"
+    ? await runtime.processObservation(seed.value)
+    : await runtime.processView(seed.value);
+  const ids = result.runs.flatMap(run => run.views_written);
+  const view = ids.length ? store.getView(ids[0]) : undefined;
+  return {
+    view_type: "view.promotion_candidates",
+    view_id: view?.id,
+    title: view?.title,
+    view_count: ids.length,
+    skipped: ids.length ? undefined : result.runs.find(run => !run.ok)?.error ?? "no promotion candidate view written",
+  };
+}
+
+function localViewProducerSeeds(
+  store: ContextStore,
+  records: StoredContextRecord[],
+  sourceViewIds: string[],
+): Array<{ kind: "record"; value: StoredContextRecord } | { kind: "view"; value: StoredContextView }> {
+  const recordSeeds = [
+    ...records,
+    ...store.recent(80).filter(record =>
+      record.schema.name === "observation.codex.message" ||
+      record.schema.name === "observation.claude.message" ||
+      record.schema.name.startsWith("feedback.") ||
+      record.schema.name === "observation.route_candidate" ||
+      record.schema.name === "observation.youtube.comprehension_gap",
+    ),
+  ];
+  const recordById = new Map(recordSeeds.map(record => [record.id, record]));
+  const viewIds = new Set([
+    ...sourceViewIds,
+    ...store.listViews({
+      view_types: ["project.current", "project.inbox", "project.decisions", "memory.daily", "work.focus_set"],
+      active_only: true,
+      limit: 24,
+    }).map(view => view.id),
+  ]);
+  return [
+    ...[...recordById.values()]
+      .sort((a, b) => recordTimeMs(b) - recordTimeMs(a))
+      .slice(0, 80)
+      .map(value => ({ kind: "record" as const, value })),
+    ...[...viewIds]
+      .map(id => store.getView(id))
+      .filter((view): view is StoredContextView => Boolean(view))
+      .map(value => ({ kind: "view" as const, value })),
+  ];
+}
+
+async function runLanguageLearningProducer(
+  store: ContextStore,
+  seeds: Array<{ kind: "record"; value: StoredContextRecord } | { kind: "view"; value: StoredContextView }>,
+  write: boolean,
+): Promise<LocalViewProducerResult[]> {
+  if (!write) {
+    return [
+      { view_type: "app.language.learning_pack", skipped: "dry-run local program wiring" },
+      { view_type: "memory.language.vocabulary_exposure", skipped: "dry-run local program wiring" },
+    ];
+  }
+
+  const runtime = createDefaultProgramRuntime(store);
+  const languageSeeds = seeds
+    .filter((seed): seed is { kind: "record"; value: StoredContextRecord } => seed.kind === "record")
+    .filter(seed => seed.value.schema.name.startsWith("feedback.language."))
+    .slice(0, 12);
+  const writtenIds: string[] = [];
+  for (const seed of languageSeeds) {
+    const result = await runtime.processObject(seed.value, {
+      program_id: "program.language_learning",
+      max_programs: 1,
+      speed: "background",
+      autonomy: "draft",
+    });
+    writtenIds.push(...result.runs.flatMap(run => run.written_views));
+  }
+  const byType = new Map<string, string[]>();
+  for (const id of writtenIds) {
+    const view = store.getView(id);
+    if (!view) continue;
+    const ids = byType.get(view.view_type) ?? [];
+    ids.push(id);
+    byType.set(view.view_type, ids);
+  }
+  return ["app.language.learning_pack", "memory.language.vocabulary_exposure"].map(viewType => {
+    const ids = [...new Set(byType.get(viewType) ?? [])];
+    const view = ids.length ? store.getView(ids[0]) : undefined;
+    return {
+      view_type: viewType,
+      view_id: view?.id,
+      title: view?.title,
+      view_count: ids.length,
+      skipped: ids.length ? undefined : "no recent language feedback seed",
+    };
+  });
 }
 
 export function resolveWorkspaceCandidates(input: { project_hints?: string[]; records: StoredContextRecord[]; fallback_paths?: string[] }): WorkspaceCandidate[] {

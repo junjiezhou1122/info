@@ -38,6 +38,7 @@ export type ActivityTimelineResponse = {
   records_used: number;
   events_used: number;
   buckets: TimelineBucket[];
+  plugin_id?: string;
   view: {
     id: string;
     view_type: string;
@@ -55,7 +56,20 @@ export type ActivityTimelineResponse = {
       };
     };
     metadata?: Record<string, unknown>;
+    updated_at?: string;
   };
+};
+
+export type ActivityTimelineWatermarkResponse = {
+  ok: true;
+  record_count: number;
+  latest_observed_at?: string;
+  latest_record_created_at?: string;
+  latest_record_id?: string;
+  event_count?: number;
+  latest_event_created_at?: string;
+  latest_event_id?: string;
+  watermark: string;
 };
 
 export type RuntimeTickResponse = {
@@ -138,6 +152,25 @@ export type RuntimeSettingsResponse = {
   settings: RuntimeSettings;
 };
 
+export type AudioTranscriptItem = {
+  id: string;
+  observed_at?: string;
+  text?: string;
+  speaker_label?: string;
+  device_name?: string;
+  chunk_id?: string | number;
+  start_time?: number;
+  end_time?: number;
+  source?: string;
+};
+
+export type AudioTranscriptResponse = {
+  ok: true;
+  count: number;
+  transcripts: AudioTranscriptItem[];
+  query?: Record<string, string>;
+};
+
 export type FeedbackResponse = {
   ok: true;
   record?: {
@@ -168,6 +201,34 @@ export type ContextViewSummary = {
   updated_at?: string;
 };
 
+export type ViewStatus = "candidate" | "accepted" | "archived" | "rejected";
+
+export type ContextViewInput = {
+  id?: string;
+  view_type: string;
+  title?: string;
+  summary?: string;
+  status?: ViewStatus;
+  source_records?: string[];
+  source_views?: string[];
+  compiler?: { id: string; version?: string; mode?: "deterministic" | "llm" | "hybrid" };
+  purpose?: string;
+  scope?: Record<string, unknown>;
+  content?: Record<string, unknown>;
+  confidence?: number;
+  stability?: "ephemeral" | "session" | "project" | "long_term";
+  lossiness?: "none" | "low" | "medium" | "high";
+  privacy?: Record<string, unknown>;
+  validity?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+};
+
+export type ContextViewUpdateInput = Partial<Omit<ContextViewInput, "id" | "view_type">> & {
+  view_type?: string;
+  content_patch?: Record<string, unknown>;
+  metadata_patch?: Record<string, unknown>;
+};
+
 export type ViewFamilySummary = {
   family: string;
   count: number;
@@ -189,8 +250,18 @@ export type ViewFamilyDefinition = {
   purpose: string;
   category: string;
   producers: string[];
+  consumes?: {
+    observations?: string[];
+    views?: string[];
+  };
+  producer_ids?: string[];
   default_page_size?: number;
   manual_create?: boolean;
+  lifecycle?: "ephemeral" | "session" | "project" | "long_term";
+  tags?: string[];
+  aliases?: string[];
+  alias_of?: string;
+  graph_operations?: string[];
 };
 
 export type ViewCatalogResponse = {
@@ -284,6 +355,65 @@ export type ProcessorRun = {
   observations_written?: string[];
   diagnostics: Record<string, unknown>;
   error?: string;
+};
+
+export type ProcessorDefinitionSummary = {
+  id: string;
+  title?: string;
+  version?: string;
+  description?: string;
+  runtime: "local" | "llm" | "agent_task" | "http" | "cli";
+  runtime_config?: Record<string, unknown>;
+  consumes: {
+    observations?: string[];
+    views?: string[];
+  };
+  produces: {
+    views?: string[];
+    observations?: string[];
+    events?: string[];
+  };
+  policy?: {
+    speed?: string;
+    autonomy?: string;
+    privacy?: string;
+  };
+  compatible?: boolean;
+};
+
+export type ProcessorListResponse = {
+  ok: true;
+  processors: ProcessorDefinitionSummary[];
+};
+
+export type ProcessorRunResponse = {
+  ok: true;
+  result: {
+    ok: true;
+    generated_at: string;
+    source: ProcessorRun["source"];
+    processors_matched: string[];
+    runs: ProcessorRun[];
+    views_written: string[];
+    observations_written?: string[];
+  };
+  views: ContextViewSummary[];
+  observations?: ContextRecordSummary[];
+};
+
+export type ContextRecordSummary = {
+  id: string;
+  schema: { name: string; version: number };
+  source: { type: string; connector?: string };
+  title?: string;
+  text?: string;
+  url?: string;
+  path?: string;
+  payload?: Record<string, unknown>;
+  content?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+  time?: { observed_at?: string; captured_at?: string };
 };
 
 export type ProcessorTracesResponse = {

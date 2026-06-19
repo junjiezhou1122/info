@@ -14,7 +14,6 @@ let activeSelectionPayload: any = null;
 let selectionRequestSeq = 0;
 let writingTimer: number | undefined;
 let lastWritingText = "";
-let activeWritingElement: Element | null = null;
 let assistBubble: HTMLDivElement | null = null;
 let assistElement: Element | null = null;
 let pendingInsertedDraftEdit: {
@@ -290,12 +289,7 @@ function editableElement(target: EventTarget | null) {
 
 function attachWritingWidget(element: Element) {
   if (sensitiveEditable(element)) return;
-  activeWritingElement = element;
-  if (!assistBubble || assistElement !== element) {
-    showWritingIdle(element);
-    return;
-  }
-  positionAssistBubble(element);
+  if (assistBubble && assistElement === element) positionAssistBubble(element);
 }
 
 function editableText(element: Element) {
@@ -347,7 +341,6 @@ function sensitiveEditable(element: Element) {
 function sendWritingInput(element: Element, text: string, fullText = text) {
   const rect = element.getBoundingClientRect();
   const requestSeq = ++writingRequestSeq;
-  showWritingPending(element, requestSeq);
   chrome.runtime.sendMessage({
     type: "context.capture.writing_input",
     payload: {
@@ -362,6 +355,7 @@ function sendWritingInput(element: Element, text: string, fullText = text) {
       field_role: element.getAttribute("role") || undefined,
       field_placeholder: element.getAttribute("placeholder") || undefined,
       viewport: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      page_context: pageWritingContext(),
       changed_at: new Date().toISOString(),
       metadata: metadata(),
       text_quality: textQuality(text),
@@ -370,86 +364,8 @@ function sendWritingInput(element: Element, text: string, fullText = text) {
     if (showWritingAssist(result, element)) return;
     await pollWritingAssist(element, text, result, requestSeq);
   }).catch(() => {
-    showWritingError(element, requestSeq, "Could not reach writing assist.");
+    // Writing ambient is advisory; backend failures should not interrupt the editor.
   });
-}
-
-function showWritingPending(element: Element, requestSeq: number) {
-  removeAssistBubble();
-  assistElement = element;
-  assistBubble = document.createElement("div");
-  assistBubble.id = "info-writing-assist";
-  assistBubble.className = "is-collapsed is-pending";
-  assistBubble.dataset.requestSeq = String(requestSeq);
-  const trigger = document.createElement("button");
-  trigger.type = "button";
-  trigger.className = "info-writing-trigger";
-  trigger.title = "Writing suggestion is generating";
-  trigger.textContent = "Info...";
-  assistBubble.append(trigger);
-  document.documentElement.append(assistBubble);
-  positionAssistBubble(element);
-}
-
-function showWritingIdle(element: Element) {
-  removeAssistBubble();
-  assistElement = element;
-  assistBubble = document.createElement("div");
-  assistBubble.id = "info-writing-assist";
-  assistBubble.className = "is-collapsed is-idle";
-  const trigger = document.createElement("button");
-  trigger.type = "button";
-  trigger.className = "info-writing-trigger";
-  trigger.title = "Writing assist is ready";
-  trigger.textContent = "Info";
-  assistBubble.append(trigger);
-  document.documentElement.append(assistBubble);
-  positionAssistBubble(element);
-}
-
-function showWritingError(element: Element, requestSeq: number, message: string) {
-  if (assistBubble?.dataset.requestSeq && assistBubble.dataset.requestSeq !== String(requestSeq)) return;
-  removeAssistBubble();
-  assistElement = element;
-  assistBubble = document.createElement("div");
-  assistBubble.id = "info-writing-assist";
-  assistBubble.className = "is-collapsed is-error";
-  assistBubble.dataset.requestSeq = String(requestSeq);
-  const trigger = document.createElement("button");
-  trigger.type = "button";
-  trigger.className = "info-writing-trigger";
-  trigger.title = "Writing suggestion failed";
-  trigger.textContent = "Info!";
-  const panel = document.createElement("div");
-  panel.className = "info-writing-panel";
-  const title = document.createElement("div");
-  title.className = "info-writing-title";
-  title.textContent = "Info writing";
-  const body = document.createElement("div");
-  body.className = "info-writing-body";
-  body.textContent = message;
-  const actions = document.createElement("div");
-  actions.className = "info-writing-actions";
-  const close = document.createElement("button");
-  close.type = "button";
-  close.textContent = "Dismiss";
-  close.addEventListener("click", () => removeAssistBubble());
-  actions.append(close);
-  panel.append(title, body, actions);
-  assistBubble.append(trigger, panel);
-  document.documentElement.append(assistBubble);
-  trigger.addEventListener("click", () => {
-    assistBubble?.classList.toggle("is-collapsed");
-    positionAssistBubble(element);
-  });
-  positionAssistBubble(element);
-}
-
-function removePendingAssist(requestSeq: number) {
-  if (assistBubble?.classList.contains("is-pending") && assistBubble.dataset.requestSeq === String(requestSeq)) {
-    if (activeWritingElement?.isConnected) showWritingIdle(activeWritingElement);
-    else removeAssistBubble();
-  }
 }
 
 function showWritingAssist(result: any, element: Element) {
@@ -463,15 +379,9 @@ function showWritingAssist(result: any, element: Element) {
   assistElement = element;
   assistBubble = document.createElement("div");
   assistBubble.id = "info-writing-assist";
-  assistBubble.className = "is-collapsed";
-  const trigger = document.createElement("button");
-  trigger.type = "button";
-  trigger.className = "info-writing-trigger";
-  trigger.title = "Show writing suggestion";
-  trigger.textContent = view.view_type === "draft.writing_continuation" ? "Info draft" : "Info";
   const title = document.createElement("div");
   title.className = "info-writing-title";
-  title.textContent = view.view_type === "draft.writing_continuation" ? "Info draft" : "Info writing";
+  title.textContent = view.view_type === "draft.writing_continuation" ? "Draft" : "Suggestion";
   const panel = document.createElement("div");
   panel.className = "info-writing-panel";
   const body = document.createElement("div");
@@ -548,16 +458,8 @@ function showWritingAssist(result: any, element: Element) {
     actions.append(inbox);
   }
   panel.append(title, body, actions);
-  assistBubble.append(trigger, panel);
+  assistBubble.append(panel);
   document.documentElement.append(assistBubble);
-  trigger.addEventListener("click", () => {
-    assistBubble?.classList.toggle("is-collapsed");
-    positionAssistBubble(element);
-  });
-  assistBubble.addEventListener("mouseenter", () => {
-    assistBubble?.classList.remove("is-collapsed");
-    positionAssistBubble(element);
-  });
   positionAssistBubble(element);
   return true;
 }
@@ -565,14 +467,12 @@ function showWritingAssist(result: any, element: Element) {
 async function pollWritingAssist(element: Element, text: string, result: any, requestSeq: number) {
   const sourceRecordId = result?.record_id;
   if (!sourceRecordId) {
-    showWritingError(element, requestSeq, result?.error || result?.posted?.body?.error || "Writing assist did not return a request id.");
     return;
   }
   for (let attempt = 0; attempt < WRITING_ASSIST_POLL_ATTEMPTS; attempt += 1) {
     await delay(attempt === 0 ? 900 : WRITING_ASSIST_POLL_INTERVAL_MS);
     const currentText = focusedWritingText(element, editableText(element));
     if (requestSeq !== writingRequestSeq || !element.isConnected || normalizeWriting(currentText) !== normalizeWriting(text)) {
-      removePendingAssist(requestSeq);
       return;
     }
     const polled = await chrome.runtime.sendMessage({
@@ -584,7 +484,6 @@ async function pollWritingAssist(element: Element, text: string, result: any, re
     }).catch(() => undefined);
     if (showWritingAssist(polled, element)) return;
   }
-  showWritingError(element, requestSeq, "Writing assist timed out.");
 }
 
 function writingViewFromResult(result: any) {
@@ -605,6 +504,18 @@ function draftTextFromView(view: any) {
 function suggestionsFromView(view: any) {
   const value = view?.content?.suggestions;
   return Array.isArray(value) ? value.filter(item => typeof item === "string" && item.trim()) : [];
+}
+
+function pageWritingContext() {
+  const pageText = visibleText();
+  return {
+    title: document.title,
+    url: location.href,
+    domain: location.hostname,
+    selected_text: String(window.getSelection?.() ?? "").trim().slice(0, 2000) || undefined,
+    excerpt: pageText.slice(0, 6000),
+    text_quality: textQuality(pageText),
+  };
 }
 
 function submitWritingFeedback(view: any, input: any) {
@@ -697,13 +608,11 @@ function positionAssistBubble(element: Element) {
   if (!assistBubble) return;
   const rect = editablePositionRect(element);
   const bubbleRect = assistBubble.getBoundingClientRect();
-  const collapsed = assistBubble.classList.contains("is-collapsed");
-  const width = collapsed ? Math.max(92, bubbleRect.width || 92) : Math.max(318, bubbleRect.width || 318);
-  const height = collapsed ? Math.max(32, bubbleRect.height || 32) : Math.max(128, bubbleRect.height || 128);
-  const collapsedLeft = rect.right + 8;
+  const width = Math.max(318, bubbleRect.width || 318);
+  const height = Math.max(128, bubbleRect.height || 128);
   const panelLeft = Math.min(rect.left, rect.right - width);
   const top = Math.max(12, Math.min(window.innerHeight - height - 12, rect.bottom + 8));
-  const left = Math.max(12, Math.min(window.innerWidth - width - 12, collapsed ? collapsedLeft : panelLeft));
+  const left = Math.max(12, Math.min(window.innerWidth - width - 12, panelLeft));
   assistBubble.style.top = `${top + window.scrollY}px`;
   assistBubble.style.left = `${left + window.scrollX}px`;
 }
@@ -960,39 +869,6 @@ const TOOLBAR_STYLE = `
     color: #2f2f2f;
     font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  #info-writing-assist.is-collapsed {
-    width: auto;
-  }
-  #info-writing-assist .info-writing-trigger {
-    display: none;
-    height: 30px;
-    border: 1px solid rgba(47, 47, 47, 0.2);
-    border-radius: 999px;
-    background: #2f2f2f;
-    color: #fff;
-    box-shadow: 0 8px 24px rgba(20, 20, 20, 0.14);
-    padding: 0 10px;
-    font: 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    cursor: pointer;
-    user-select: none;
-  }
-  #info-writing-assist.is-idle .info-writing-trigger {
-    background: #ffffff;
-    color: #2f2f2f;
-  }
-  #info-writing-assist.is-pending .info-writing-trigger {
-    opacity: .74;
-  }
-  #info-writing-assist.is-error .info-writing-trigger {
-    background: #ffffff;
-    color: #8a1f17;
-    border-color: rgba(138, 31, 23, .34);
-  }
-  #info-writing-assist.is-collapsed .info-writing-trigger {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
   #info-writing-assist .info-writing-panel {
     border: 1px solid rgba(47, 47, 47, 0.16);
     border-radius: 8px;
@@ -1002,9 +878,6 @@ const TOOLBAR_STYLE = `
     padding: 10px;
     width: 318px;
     max-width: calc(100vw - 24px);
-  }
-  #info-writing-assist.is-collapsed .info-writing-panel {
-    display: none;
   }
   #info-writing-assist .info-writing-title {
     color: #6f6f6f;
@@ -1060,14 +933,13 @@ style.textContent = TOOLBAR_STYLE;
 document.documentElement.append(style);
 
 // ---------------------------------------------------------------------------
-// Ambient: silent trigger + floating analyze button
+// Ambient: silent trigger
 // ---------------------------------------------------------------------------
 // The user's request: while they are reading or interacting with a page, we
 // quietly fire an ambient analysis request so a task shows up in the side
 // panel Tasks tab. We never mutate the page or interrupt the user; this
 // module only reads signals and posts a single fire-and-forget message.
 
-const AMBIENT_FAB_ID = "info-ambient-fab";
 const AMBIENT_DWELL_MS = 30_000;          // 30s dwell
 const AMBIENT_SCROLL_THRESHOLD = 0.5;     // 50% scroll depth
 const AMBIENT_SELECTION_MIN = 20;         // any 20+ char selection
@@ -1075,7 +947,6 @@ const AMBIENT_DEDUPE_KEY_PREFIX = "info.ambient.lastFiredAt:";
 
 let ambientLastFiredAt = 0;
 let ambientDwellTimer: number | undefined;
-let ambientFabEl: HTMLButtonElement | null = null;
 let ambientDwellFired = false;
 let ambientSelectionFired = false;
 
@@ -1116,7 +987,7 @@ async function ambientFire(reason: string): Promise<void> {
     if (now - lastForUrl < 10 * 60_000) return;
     await chrome.storage.session?.set?.({ [dedupeKey]: now }).catch(() => undefined);
   } catch {
-    // storage.session is unavailable in some contexts — fall back to time-only dedupe.
+    // storage.session is unavailable in some contexts; fall back to time-only dedupe.
   }
   ambientLastFiredAt = now;
   try {
@@ -1138,60 +1009,6 @@ function ambientScheduleDwellCheck(): void {
   }, 5_000);
 }
 
-function ambientMountFab(): void {
-  if (document.getElementById(AMBIENT_FAB_ID)) return;
-  const btn = document.createElement("button");
-  btn.id = AMBIENT_FAB_ID;
-  btn.type = "button";
-  btn.setAttribute("aria-label", "Analyze this page with info ambient");
-  btn.title = "Analyze this page with info ambient";
-  btn.innerHTML =
-    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg><span>Analyze</span>';
-  btn.style.cssText = [
-    "position: fixed",
-    "right: 16px",
-    "bottom: 16px",
-    "z-index: 2147483646",
-    "display: inline-flex",
-    "align-items: center",
-    "gap: 6px",
-    "padding: 6px 10px",
-    "border-radius: 9999px",
-    "border: 1px solid rgba(0,0,0,0.12)",
-    "background: rgba(255,255,255,0.92)",
-    "color: #1f1f1f",
-    "font: 12px/1 system-ui, -apple-system, sans-serif",
-    "box-shadow: 0 6px 20px rgba(0,0,0,0.18)",
-    "cursor: pointer",
-    "backdrop-filter: blur(6px)",
-    "transition: opacity .2s, transform .2s",
-    "opacity: 0.85",
-  ].join(";");
-  btn.addEventListener("mouseenter", () => {
-    btn.style.opacity = "1";
-  });
-  btn.addEventListener("mouseleave", () => {
-    btn.style.opacity = "0.85";
-  });
-  btn.addEventListener("click", () => {
-    btn.disabled = true;
-    btn.textContent = "Queued…";
-    chrome.runtime
-      .sendMessage({ type: "trigger-ambient", reason: "Manual FAB click" })
-      .catch(() => undefined)
-      .finally(() => {
-        window.setTimeout(() => {
-          btn.disabled = false;
-          btn.innerHTML =
-            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg><span>Analyze</span>';
-        }, 1500);
-      });
-  });
-  // Insert at the very end of <html> so we don't disturb page semantics.
-  (document.body ?? document.documentElement).appendChild(btn);
-  ambientFabEl = btn;
-}
-
 // Wire the silent ambient trigger to existing page signals. The scroll and
 // selectionchange listeners above already update the module-level counters
 // (maxScrollDepth / scrollEvents / selectionCount); we just add a dedicated
@@ -1206,7 +1023,6 @@ window.addEventListener("scroll", () => {
 }, { passive: true });
 
 ambientScheduleDwellCheck();
-ambientMountFab();
 
 // ---------------------------------------------------------------------------
 // YouTube comprehension gap capture (Stage 5)
@@ -1261,6 +1077,8 @@ let ytCaptionOnSince: number | null = null;
 let ytFlushTimer: number | undefined;
 let ytSendTimer: number | undefined;
 let ytLastRecentWriteAt = 0;
+let ytLastPlayedSentAt = 0;
+let ytLastPausedSentAt = 0;
 
 function ytIsWatchPage(): boolean {
   return (location.hostname === "youtube.com" || location.hostname.endsWith(".youtube.com"))
@@ -1334,6 +1152,22 @@ function ytSubtitleText(gap: YtGap): string {
     .map(sample => sample.text.replace(/\s+/g, " ").trim())
     .filter(Boolean);
   return Array.from(new Set(lines)).join("\n");
+}
+
+function ytSendCanonicalObservation(schemaName: string, payload: Record<string, unknown>): void {
+  chrome.runtime.sendMessage({
+    type: "youtube-observation",
+    schemaName,
+    payload: {
+      video_id: ytVideoId,
+      video_title: ytVideoTitle ?? ytExtractVideoTitle(),
+      video_url: location.href,
+      video_current_seconds: ytGetPlayerTime(),
+      video_duration_seconds: ytGetVideoDuration(),
+      observed_at: new Date().toISOString(),
+      ...payload,
+    },
+  }).catch(() => undefined);
 }
 
 function ytStartFreshGap(): void {
@@ -1444,6 +1278,12 @@ function ytSendGap(gap: YtGap | null): void {
       fragment_ended_at: gap.endedAt,
       observed_at: gap.startedAt,
     };
+    ytSendCanonicalObservation("observation.youtube.caption_fragment", {
+      ...payload,
+      caption_text: payload.subtitle_text,
+      caption_lang: document.documentElement.lang || undefined,
+      observed_at: payload.fragment_ended_at || payload.observed_at,
+    });
     void rememberRecentCaptionGap(payload, "sent");
     void chrome.runtime.sendMessage({
       type: "youtube-comprehension-gap",
@@ -1536,6 +1376,13 @@ async function rememberRecentCaptionGap(gap: any, status: "active" | "sent"): Pr
 function ytApplyCaptionState(nextOn: boolean, reason: "keyboard" | "button" | "poll"): void {
   if (nextOn === ytCaptionOn) return;
   ytCaptionOn = nextOn;
+  ytSendCanonicalObservation("observation.youtube.caption_state", {
+    enabled: ytCaptionOn,
+    captions_enabled: ytCaptionOn,
+    current_time: ytGetPlayerTime(),
+    trigger_reason: reason,
+    caption_text: ytReadCaptionText(),
+  });
   if (ytCaptionOn) {
     if (!ytIsPlayerPaused()) ytStartCaptionFragment(reason);
   } else {
@@ -1547,6 +1394,24 @@ function ytApplyPlaybackState(): void {
   const paused = ytIsPlayerPaused();
   if (paused === ytVideoPaused) return;
   ytVideoPaused = paused;
+  const now = Date.now();
+  if (paused && now - ytLastPausedSentAt > 500) {
+    ytLastPausedSentAt = now;
+    ytSendCanonicalObservation("observation.youtube.paused", {
+      current_time: ytGetPlayerTime(),
+      caption_text: ytReadCaptionText(),
+      captions_enabled: ytCaptionOn,
+      is_difficult: ytCaptionOn,
+      difficulty_reason: ytCaptionOn ? "paused while captions were enabled" : undefined,
+    });
+  } else if (!paused && now - ytLastPlayedSentAt > 500) {
+    ytLastPlayedSentAt = now;
+    ytSendCanonicalObservation("observation.youtube.played", {
+      current_time: ytGetPlayerTime(),
+      caption_text: ytReadCaptionText(),
+      captions_enabled: ytCaptionOn,
+    });
+  }
   if (!ytCaptionOn) return;
   if (paused) {
     ytFinishCaptionFragment("pause");

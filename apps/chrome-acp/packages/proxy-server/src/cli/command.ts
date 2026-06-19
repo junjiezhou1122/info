@@ -1,5 +1,49 @@
 import { buildCommand, numberParser } from "@stricli/core";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { LocalContext } from "./context.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const CHROME_ACP_ROOT = resolve(__dirname, "../../../..");
+
+function loadEnvFile(file: string): void {
+  if (!existsSync(file)) return;
+  const text = readFileSync(file, "utf8");
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    const key = match[1];
+    const rawValue = match[2];
+    if (!key || rawValue === undefined) continue;
+    if (process.env[key] !== undefined) continue;
+    process.env[key] = unquoteEnvValue(rawValue.trim());
+  }
+}
+
+function unquoteEnvValue(value: string): string {
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function loadChromeAcpEnv(cwd: string): void {
+  const files = [
+    join(cwd, ".env"),
+    join(cwd, ".env.local"),
+    join(cwd, "apps/chrome-acp/.env"),
+    join(cwd, "apps/chrome-acp/.env.local"),
+    join(CHROME_ACP_ROOT, ".env"),
+    join(CHROME_ACP_ROOT, ".env.local"),
+  ];
+  for (const file of [...new Set(files.map(file => resolve(file)))]) {
+    loadEnvFile(file);
+  }
+}
 
 export const command = buildCommand({
   docs: {
@@ -83,6 +127,10 @@ export const command = buildCommand({
     const cliCwd = flags.cwd;
     const [command, ...agentArgs] = args;
     const cwd = cliCwd ?? process.cwd();
+
+    loadChromeAcpEnv(cwd);
+    const { applyMidsceneEnvDefaults } = await import("../mcp/midscene-config.js");
+    applyMidsceneEnvDefaults();
 
     // Determine auth token
     // Priority: ACP_AUTH_TOKEN env var > auto-generate (unless --no-auth)

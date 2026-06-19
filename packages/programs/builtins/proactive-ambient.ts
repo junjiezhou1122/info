@@ -334,6 +334,7 @@ function buildToolPrototypeAgentTask(source: StoredContextView, opportunity: Con
 function buildWritingAgentTask(record: StoredContextRecord, buildContextPack: BuildContextPack) {
   const text = String(record.content?.text ?? "");
   const topic = writingTopic(record);
+  const surface = writingSurfaceContext(record);
   const goal = [
     "You are helping Info act as an ambient inline writing assistant.",
     `Current writing surface: ${topic}.`,
@@ -341,9 +342,13 @@ function buildWritingAgentTask(record: StoredContextRecord, buildContextPack: Bu
     "Keep the answer concise enough for an inline bubble.",
     "Do not claim to have edited the user's text. Do not include actions, tool plans, or file edits.",
     "Prefer preserving the user's tone and language.",
+    "Use the current page and field context when it clarifies intent, but do not summarize the page unless it helps the user's draft.",
     "",
     "Current text:",
     text.slice(0, 4000),
+    "",
+    "Current surface context:",
+    surface,
   ].join("\n");
   const pack = buildContextPack({
     goal,
@@ -387,6 +392,7 @@ async function generateWritingViewsWithLlm(record: StoredContextRecord, buildCon
   const text = String(record.content?.text ?? "").trim();
   if (text.length < 12) return { ok: false, reason: "writing text too short", views: [] };
   const topic = writingTopic(record);
+  const surface = writingSurfaceContext(record);
   const pack = buildContextPack({
     goal: `Inline writing assistance for ${topic}`,
     mode: "thread",
@@ -406,9 +412,14 @@ async function generateWritingViewsWithLlm(record: StoredContextRecord, buildCon
     "- Do not say you edited the text.",
     "- Do not include tool calls, markdown fences, file edits, or action plans.",
     "- draft_text must be 500 characters or less.",
+    "- Treat the current page, field, selection, and full editor text as context for the writing surface.",
+    "- Keep the suggestion local to what the user appears to be writing right now.",
     "",
-    "Current writing context:",
+    "Focused writing text:",
     text.slice(0, 4000),
+    "",
+    "Current surface context:",
+    surface,
     "",
     "Relevant Info context:",
     pack.markdown.slice(0, 4000),
@@ -450,6 +461,36 @@ async function generateWritingViewsWithLlm(record: StoredContextRecord, buildCon
     model: completion.model,
     base_url: completion.base_url,
   };
+}
+
+function writingSurfaceContext(record: StoredContextRecord): string {
+  const payload = record.payload && typeof record.payload === "object" ? record.payload as Record<string, unknown> : {};
+  const page = payload.page_context && typeof payload.page_context === "object" ? payload.page_context as Record<string, unknown> : {};
+  const lines = [
+    fieldLine("Title", stringValue(record.content?.title) || stringValue(page.title)),
+    fieldLine("URL", stringValue(record.content?.url) || stringValue(page.url)),
+    fieldLine("Domain", stringValue(record.scope?.domain) || stringValue(page.domain)),
+    fieldLine("Field", writingFieldDescription(payload)),
+    fieldLine("Selected text", stringValue(page.selected_text).slice(0, 1200)),
+    fieldLine("Full editor text", stringValue(payload.full_text).slice(0, 2500)),
+    fieldLine("Visible page excerpt", stringValue(page.excerpt).slice(0, 2500)),
+  ].filter(Boolean);
+  return lines.length ? lines.join("\n") : "No extra surface context.";
+}
+
+function fieldLine(label: string, value: string): string {
+  return value ? `${label}: ${value}` : "";
+}
+
+function writingFieldDescription(payload: Record<string, unknown>): string {
+  const parts = [
+    stringValue(payload.field_tag).toLowerCase(),
+    stringValue(payload.field_role) ? `role=${stringValue(payload.field_role)}` : "",
+    stringValue(payload.field_placeholder) ? `placeholder=${stringValue(payload.field_placeholder).slice(0, 180)}` : "",
+    stringValue(payload.field_id) ? `id=${stringValue(payload.field_id).slice(0, 80)}` : "",
+    stringValue(payload.field_name) ? `name=${stringValue(payload.field_name).slice(0, 80)}` : "",
+  ].filter(Boolean);
+  return parts.join(", ");
 }
 
 function buildLlmWritingAdviceView(record: StoredContextRecord, input: { suggestions: string[]; rationale?: string; model: string; base_url: string }): ContextView {

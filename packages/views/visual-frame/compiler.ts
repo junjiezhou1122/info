@@ -37,6 +37,7 @@ export type VisualFrameAnalyzer = (request: VisualFrameAnalyzerRequest) => Promi
 
 export type CompileVisualFrameViewsOptions = {
   write?: boolean;
+  force?: boolean;
   llm?: LlmOptions;
   model?: string;
   limit?: number;
@@ -72,7 +73,7 @@ export async function compileVisualFrameViews(options: CompileVisualFrameViewsOp
     const frameId = candidate.frame_id;
     const frameStartedAt = Date.now();
     const sourceViews = candidate.views.map(view => view.id).filter(isString);
-    if (existingFrameIds.has(frameId)) {
+    if (!options.force && existingFrameIds.has(frameId)) {
       return {
         frame_id: frameId,
         skipped: "existing_visual_frame",
@@ -300,4 +301,3 @@ export function frameIdsOf(view: ContextView | StoredContextView): string[] {
 // isLowValueVisualEvidence and visualEvidenceScore live in shared.js (single source);
 // re-exported here to preserve the visual-frame barrel's public surface.
 export { isLowValueVisualEvidence, visualEvidenceScore };
-

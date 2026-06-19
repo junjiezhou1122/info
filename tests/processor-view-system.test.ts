@@ -5,8 +5,8 @@ import { buildProcessorViewReport, createSurfaceStateProcessor, createViewPromot
 
 const scenarioSpecs: ViewSpec[] = [
   {
-    view_type: "writing.advice",
-    title: "Writing Advice",
+    view_type: "advice.writing_assist",
+    title: "Writing Assist",
     purpose: "Inline-safe writing suggestion or critique.",
     lifecycle: "ephemeral",
   },
@@ -58,7 +58,7 @@ const declarationProcessors: ProcessorDefinition[] = [
   {
     id: "processor.writing_ambient",
     consumes: { observations: ["observation.editor.text_changed"] },
-    produces: { views: ["writing.advice", "draft.writing_continuation"] },
+    produces: { views: ["advice.writing_assist", "draft.writing_continuation"] },
     runtime: { kind: "llm", provider: "configured" },
     policy: { speed: "glance", autonomy: "suggest", privacy: "private" },
   },
@@ -102,7 +102,7 @@ test("processor report maps declarations to registered view specs", () => {
 
   const writing = report.processors.find(processor => processor.id === "processor.writing_ambient");
   assert.deepEqual(writing?.consumes.observations, ["observation.editor.text_changed"]);
-  assert.deepEqual(writing?.produces.views, ["writing.advice", "draft.writing_continuation"]);
+  assert.deepEqual(writing?.produces.views, ["advice.writing_assist", "draft.writing_continuation"]);
 
   const automation = report.processors.find(processor => processor.id === "processor.browser_automation");
   assert.equal(automation?.runtime, "agent_task");

@@ -161,9 +161,11 @@ test("Browser content script captures writing input and renders inline writing a
   assert.match(content, /document\.addEventListener\("keyup"/);
   assert.match(content, /document\.addEventListener\("compositionend"/);
   assert.match(content, /id = "info-writing-assist"/);
-  assert.match(content, /showWritingIdle/);
-  assert.match(content, /showWritingPending/);
-  assert.match(content, /showWritingError/);
+  assert.doesNotMatch(content, /showWritingIdle/);
+  assert.doesNotMatch(content, /showWritingPending/);
+  assert.doesNotMatch(content, /showWritingError/);
+  assert.match(content, /pageWritingContext/);
+  assert.doesNotMatch(content, /info-writing-trigger/);
   assert.match(content, /editablePositionRect/);
   assert.match(content, /insertDraft/);
   assert.match(content, /submitWritingFeedback/);
@@ -174,6 +176,7 @@ test("Browser content script captures writing input and renders inline writing a
   assert.match(content, /rememberInsertedDraftForEdit/);
   assert.match(content, /focusedWritingText/);
   assert.match(content, /full_text/);
+  assert.match(content, /page_context/);
   assert.match(content, /pollWritingAssist/);
   assert.match(content, /sourceRecordId/);
   assert.match(content, /WRITING_ASSIST_POLL_ATTEMPTS\s*=\s*45/);
@@ -239,9 +242,10 @@ test("Chrome ACP extension carries browser observations and inline writing assis
   assert.match(content, /document\.addEventListener\("keyup"/);
   assert.match(content, /document\.addEventListener\("compositionend"/);
   assert.match(content, /id = "info-writing-assist"/);
-  assert.match(content, /showWritingIdle/);
-  assert.match(content, /showWritingPending/);
-  assert.match(content, /showWritingError/);
+  assert.doesNotMatch(content, /showWritingIdle/);
+  assert.doesNotMatch(content, /showWritingPending/);
+  assert.doesNotMatch(content, /showWritingError/);
+  assert.doesNotMatch(content, /info-writing-trigger/);
   assert.match(content, /editablePositionRect/);
   assert.match(content, /Insert/);
   assert.match(content, /Dismiss/);
@@ -288,6 +292,22 @@ test("Chrome ACP exposes optional gated Browser Debugger tools", () => {
   assert.match(browserTool, /Advanced Browser Control is disabled/);
   assert.match(browserTool, /Domain is not allowlisted/);
   assert.match(browserTool, /blocked on sensitive domain/);
+});
+
+test("Chrome ACP proxy loads Midscene Bridge env before exposing tools", () => {
+  const cliCommand = readFileSync("apps/chrome-acp/packages/proxy-server/src/cli/command.ts", "utf8");
+  const midsceneConfig = readFileSync("apps/chrome-acp/packages/proxy-server/src/mcp/midscene-config.ts", "utf8");
+  const proxyTypes = readFileSync("apps/chrome-acp/packages/proxy-server/src/mcp/types.ts", "utf8");
+
+  assert.match(cliCommand, /loadChromeAcpEnv\(cwd\)/);
+  assert.match(cliCommand, /apps\/chrome-acp\/\.env/);
+  assert.match(cliCommand, /applyMidsceneEnvDefaults/);
+  assert.match(midsceneConfig, /VISION_LLM_BASE_URL/);
+  assert.match(midsceneConfig, /VISION_LLM_API_KEY/);
+  assert.match(midsceneConfig, /inferModelFamily/);
+  assert.match(proxyTypes, /BROWSER_CURRENT_VISION_ACT_TOOL/);
+  assert.match(proxyTypes, /BROWSER_VISION_ACT_TOOL/);
+  assert.match(proxyTypes, /isMidsceneToolExposed\(\)/);
 });
 
 test("Chrome ACP current browser act can accept direct selectors for fast-path automation", () => {
@@ -369,6 +389,11 @@ test("Chrome ACP Tasks and Language tabs render readable ambient state", () => {
   assert.match(content, /ytApplyPlaybackState/);
   assert.match(content, /ytFinishCaptionFragment/);
   assert.match(content, /ytSendGap/);
+  assert.match(content, /youtube-observation/);
+  assert.match(content, /observation\.youtube\.caption_state/);
+  assert.match(content, /observation\.youtube\.caption_fragment/);
+  assert.match(content, /observation\.youtube\.played/);
+  assert.match(content, /observation\.youtube\.paused/);
   assert.match(content, /current_caption:\s*ytReadCaptionText\(\)/);
   assert.match(content, /location\.hostname\.endsWith\("\.youtube\.com"\)/);
   assert.match(content, /Plain C is YouTube's native subtitle shortcut/);
@@ -377,6 +402,11 @@ test("Chrome ACP Tasks and Language tabs render readable ambient state", () => {
   assert.match(background, /language\.caption_gap\.recent/);
   assert.match(background, /fragmentKey/);
   assert.match(background, /chrome\.storage\?\.session\?\.set/);
+  const infoCapture = readFileSync("apps/chrome-acp/packages/chrome-extension/src/lib/info-capture.ts", "utf8");
+  assert.match(infoCapture, /youtube-observation/);
+  assert.match(infoCapture, /sendYouTubeObservation/);
+  assert.match(infoCapture, /postRecord\(record, \{ process: true, cascadeViews: true \}\)/);
+  assert.match(infoCapture, /observation\.youtube\.caption_fragment/);
 });
 
 test("Browser ambient builds a View query from current tab context", () => {

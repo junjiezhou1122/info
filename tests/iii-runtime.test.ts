@@ -77,6 +77,9 @@ test("@info/iii-runtime exposes a unified worker catalog", async () => withStore
   assert.equal(byId.get(III_PROCESSOR_FUNCTIONS.surfaceState)?.kind, "processor");
   assert.ok(byId.get(III_PROCESSOR_FUNCTIONS.surfaceState)?.subscribes.observations?.includes("observation.screenpipe_*"));
   assert.deepEqual(byId.get(III_PROCESSOR_FUNCTIONS.surfaceState)?.produces.views, ["state.surface"]);
+  assert.equal(byId.get(III_PROCESSOR_FUNCTIONS.youtubeLearning)?.kind, "processor");
+  assert.ok(byId.get(III_PROCESSOR_FUNCTIONS.youtubeLearning)?.subscribes.observations?.includes("observation.youtube.caption_fragment"));
+  assert.ok(byId.get(III_PROCESSOR_FUNCTIONS.youtubeLearning)?.produces.views?.includes("learning.youtube_fragment"));
   assert.ok(byId.get("program::writing_ambient")?.subscribes.observations?.includes("observation.editor.text_changed"));
   assert.ok(byId.get("program::writing_ambient")?.produces.views?.includes("advice.writing_assist"));
   assert.ok(byId.get("program::browser_ambient")?.subscribes.observations?.includes("observation.browser_page_snapshot"));
@@ -111,6 +114,45 @@ test("@info/iii-runtime can compile current surface state from an Observation", 
   assert.equal(view?.view_type, "state.surface");
   assert.equal(view?.content?.surface_kind, "terminal");
   assert.equal((view?.content?.screen as any)?.screenshot_path, "/tmp/surface.jpg");
+}));
+
+test("@info/iii-runtime writes YouTube learning fragments during ingest cascade", async () => withStore(async (store) => {
+  const iii = new InProcessIiiRuntimeClient();
+  await registerInfoIiiRuntime(iii, { store });
+
+  const result = await iii.functions.get(III_CONTEXT_FUNCTIONS.ingest)?.({
+    record: {
+      id: "record:iii-youtube-caption-fragment",
+      schema: { name: "observation.youtube.caption_fragment", version: 1 },
+      source: { type: "browser", connector: "chrome-acp" },
+      scope: { app: "chrome", domain: "youtube.com" },
+      content: {
+        title: "English listening demo - YouTube",
+        text: "This is the sentence the learner wants to review.",
+        url: "https://www.youtube.com/watch?v=english-demo",
+      },
+      payload: {
+        video_id: "english-demo",
+        video_title: "English listening demo",
+        video_url: "https://www.youtube.com/watch?v=english-demo",
+        start_seconds: 42,
+        end_seconds: 49,
+        caption_text: "This is the sentence the learner wants to review.",
+        caption_lang: "en",
+      },
+      privacy: { level: "private", retention: "normal" },
+    },
+    cascade: true,
+    max_depth: 2,
+  });
+  const fragments = store.listViews({ view_types: ["learning.youtube_fragment"], active_only: true, limit: 10 });
+
+  assert.equal(result?.ok, true);
+  assert.ok(result?.cascade?.steps.some((step: any) => step.function_id === III_PROCESSOR_FUNCTIONS.youtubeLearning));
+  assert.equal(fragments.length, 1);
+  assert.equal(fragments[0].content?.caption_text, "This is the sentence the learner wants to review.");
+  assert.equal(fragments[0].content?.start_seconds, 42);
+  assert.ok(result?.cascade?.views_written.includes(fragments[0].id));
 }));
 
 test("direct capability iii workers preserve ProgramRuntime capability provenance events", async () => withStore(async (store) => {

@@ -109,7 +109,7 @@ function taskClusterCandidates(evidence: EvidenceWindow): PromotionCandidate[] {
   }
   for (const [routeKey, records] of routeGroups) {
     if (records.length < 3) continue;
-    const targetViewType = routeKey.startsWith("project:") ? "project.current" : routeKey.startsWith("topic:") ? "research.brief" : "work.focus_set";
+    const targetViewType = routeKey.startsWith("project:") ? "project.current" : routeKey.startsWith("topic:") ? "brief.research" : "work.focus_set";
     if (hasFreshView(evidence.views, targetViewType, routeKey)) continue;
     candidates.push({
       id: candidateId("create_view", targetViewType, routeKey),
@@ -315,4 +315,3 @@ function candidateId(action: string, target: string, evidence: string): string {
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
 }
-

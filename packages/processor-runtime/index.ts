@@ -1,4 +1,5 @@
 export * from "./types.js";
+export * from "./builtins.js";
 export * from "./registry.js";
 export * from "./router.js";
 export * from "./runtime.js";
@@ -14,7 +15,9 @@ export * from "./builtins/screenpipe-surface-processor.js";
 export * from "./builtins/view-promotion-engine.js";
 export * from "./builtins/work-router-batch.js";
 export * from "./builtins/project-current.js";
+export * from "./builtins/memory-daily-update.js";
 export * from "./builtins/memory-profile-update.js";
+export * from "./builtins/durable-memory-miner.js";
 export * from "./builtins/project-inbox.js";
 export * from "./builtins/project-tasks.js";
 export * from "./builtins/project-decision-extractor.js";

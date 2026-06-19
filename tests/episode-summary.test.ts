@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextStore } from "@info/core";
 import { compileProjectWorkEpisode } from "@info/views/timeline/episode-summary.js";
+import { createViewProcessorDefinitions, VIEW_PROCESSOR_FUNCTIONS } from "@info/views/processors.js";
 
 function withStore(fn: (store: ContextStore) => Promise<void> | void) {
   const dir = mkdtempSync(join(tmpdir(), "info-episode-summary-test-"));
@@ -71,4 +72,34 @@ test("Project work episode can be persisted without writing an episode Record", 
   assert.ok(view);
   assert.equal(view.view_type, "summary.project_work_episode");
   assert.equal(store.recent(10).filter(item => item.schema.name === "episode.project_work").length, 0);
+}));
+
+test("Project work episode processor summarizes candidate threads", () => withStore(async (store) => {
+  const record = store.insertRecord({
+    id: "record:episode-summary-processor-evidence",
+    schema: { name: "observation.terminal.command", version: 1 },
+    source: { type: "terminal", connector: "shell" },
+    scope: { project: "info", project_path: "/Users/junjie/info", app: "terminal" },
+    time: { observed_at: "2026-05-25T01:00:00.000Z" },
+    content: { title: "pnpm test", text: "episode processor evidence" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  store.upsertWorkThread({
+    id: "thread:episode-summary-processor",
+    title: "Episode Processor",
+    status: "candidate",
+    confidence: 0.7,
+    evidence_records: [record.id],
+    projects: ["info"],
+  });
+
+  const processor = createViewProcessorDefinitions().find(item => item.function_id === VIEW_PROCESSOR_FUNCTIONS.projectWorkEpisode);
+  assert.ok(processor);
+  const result = await processor.process({ write: true, limit: 4 }, { store });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.view_type, "summary.project_work_episode");
+  assert.equal(result.views.length, 1);
+  assert.equal(result.diagnostics.threads_summarized, 1);
+  assert.ok(store.getView("summary:project-work-episode:thread:episode-summary-processor"));
 }));

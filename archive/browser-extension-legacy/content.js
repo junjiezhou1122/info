@@ -257,11 +257,7 @@ function editableElement(target) {
 function attachWritingWidget(element) {
   if (sensitiveEditable(element)) return;
   activeWritingElement = element;
-  if (!assistBubble || assistElement !== element) {
-    showWritingIdle(element);
-    return;
-  }
-  positionAssistBubble(element);
+  if (assistBubble && assistElement === element) positionAssistBubble(element);
 }
 
 function editableText(element) {
@@ -313,7 +309,6 @@ function sensitiveEditable(element) {
 function sendWritingInput(element, text, fullText = text) {
   const rect = element.getBoundingClientRect();
   const requestSeq = ++writingRequestSeq;
-  showWritingPending(element, requestSeq);
   chrome.runtime.sendMessage({
     type: "context.capture.writing_input",
     payload: {
@@ -328,6 +323,7 @@ function sendWritingInput(element, text, fullText = text) {
       field_role: element.getAttribute("role") || undefined,
       field_placeholder: element.getAttribute("placeholder") || undefined,
       viewport: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      page_context: pageWritingContext(),
       changed_at: new Date().toISOString(),
       metadata: metadata(),
       text_quality: textQuality(text),
@@ -336,86 +332,8 @@ function sendWritingInput(element, text, fullText = text) {
     if (showWritingAssist(result, element)) return;
     await pollWritingAssist(element, text, result, requestSeq);
   }).catch(() => {
-    showWritingError(element, requestSeq, "Could not reach writing assist.");
+    // Writing ambient is advisory; backend failures should not interrupt the editor.
   });
-}
-
-function showWritingPending(element, requestSeq) {
-  removeAssistBubble();
-  assistElement = element;
-  assistBubble = document.createElement("div");
-  assistBubble.id = "info-writing-assist";
-  assistBubble.className = "is-collapsed is-pending";
-  assistBubble.dataset.requestSeq = String(requestSeq);
-  const trigger = document.createElement("button");
-  trigger.type = "button";
-  trigger.className = "info-writing-trigger";
-  trigger.title = "Writing suggestion is generating";
-  trigger.textContent = "Info...";
-  assistBubble.append(trigger);
-  document.documentElement.append(assistBubble);
-  positionAssistBubble(element);
-}
-
-function showWritingIdle(element) {
-  removeAssistBubble();
-  assistElement = element;
-  assistBubble = document.createElement("div");
-  assistBubble.id = "info-writing-assist";
-  assistBubble.className = "is-collapsed is-idle";
-  const trigger = document.createElement("button");
-  trigger.type = "button";
-  trigger.className = "info-writing-trigger";
-  trigger.title = "Writing assist is ready";
-  trigger.textContent = "Info";
-  assistBubble.append(trigger);
-  document.documentElement.append(assistBubble);
-  positionAssistBubble(element);
-}
-
-function showWritingError(element, requestSeq, message) {
-  if (assistBubble?.dataset.requestSeq && assistBubble.dataset.requestSeq !== String(requestSeq)) return;
-  removeAssistBubble();
-  assistElement = element;
-  assistBubble = document.createElement("div");
-  assistBubble.id = "info-writing-assist";
-  assistBubble.className = "is-collapsed is-error";
-  assistBubble.dataset.requestSeq = String(requestSeq);
-  const trigger = document.createElement("button");
-  trigger.type = "button";
-  trigger.className = "info-writing-trigger";
-  trigger.title = "Writing suggestion failed";
-  trigger.textContent = "Info!";
-  const panel = document.createElement("div");
-  panel.className = "info-writing-panel";
-  const title = document.createElement("div");
-  title.className = "info-writing-title";
-  title.textContent = "Info writing";
-  const body = document.createElement("div");
-  body.className = "info-writing-body";
-  body.textContent = message;
-  const actions = document.createElement("div");
-  actions.className = "info-writing-actions";
-  const close = document.createElement("button");
-  close.type = "button";
-  close.textContent = "Dismiss";
-  close.addEventListener("click", () => removeAssistBubble());
-  actions.append(close);
-  panel.append(title, body, actions);
-  assistBubble.append(trigger, panel);
-  document.documentElement.append(assistBubble);
-  trigger.addEventListener("click", () => {
-    assistBubble?.classList.toggle("is-collapsed");
-    positionAssistBubble(element);
-  });
-  positionAssistBubble(element);
-}
-
-function removePendingAssist(requestSeq) {
-  if (assistBubble?.classList.contains("is-pending") && assistBubble.dataset.requestSeq === String(requestSeq)) {
-    if (activeWritingElement?.isConnected) showWritingIdle(activeWritingElement);
-    else removeAssistBubble();
-  }
 }
 
 function showWritingAssist(result, element) {
@@ -427,16 +345,9 @@ function showWritingAssist(result, element) {
   assistElement = element;
   assistBubble = document.createElement("div");
   assistBubble.id = "info-writing-assist";
-  assistBubble.className = "is-collapsed";
-  assistBubble.innerHTML = "";
-  const trigger = document.createElement("button");
-  trigger.type = "button";
-  trigger.className = "info-writing-trigger";
-  trigger.title = "Show writing suggestion";
-  trigger.textContent = view.view_type === "draft.writing_continuation" ? "Info draft" : "Info";
   const title = document.createElement("div");
   title.className = "info-writing-title";
-  title.textContent = view.view_type === "draft.writing_continuation" ? "Info draft" : "Info writing";
+  title.textContent = view.view_type === "draft.writing_continuation" ? "Draft" : "Suggestion";
   const panel = document.createElement("div");
   panel.className = "info-writing-panel";
   const body = document.createElement("div");
@@ -488,33 +399,19 @@ function showWritingAssist(result, element) {
     actions.append(insert);
   }
   panel.append(title, body, actions);
-  assistBubble.append(trigger, panel);
+  assistBubble.append(panel);
   document.documentElement.append(assistBubble);
-  trigger.addEventListener("click", () => {
-    assistBubble?.classList.toggle("is-collapsed");
-    positionAssistBubble(element);
-  });
-  assistBubble.addEventListener("mouseenter", () => {
-    assistBubble?.classList.remove("is-collapsed");
-    positionAssistBubble(element);
-  });
   positionAssistBubble(element);
   return true;
 }
 
 async function pollWritingAssist(element, text, result, requestSeq) {
   const sourceRecordId = result?.record_id;
-  if (!sourceRecordId) {
-    showWritingError(element, requestSeq, result?.error || result?.posted?.body?.error || "Writing assist did not return a request id.");
-    return;
-  }
+  if (!sourceRecordId) return;
   for (let attempt = 0; attempt < WRITING_ASSIST_POLL_ATTEMPTS; attempt += 1) {
     await delay(attempt === 0 ? 900 : WRITING_ASSIST_POLL_INTERVAL_MS);
     const currentText = focusedWritingText(element, editableText(element));
-    if (requestSeq !== writingRequestSeq || !element.isConnected || normalizeWriting(currentText) !== normalizeWriting(text)) {
-      removePendingAssist(requestSeq);
-      return;
-    }
+    if (requestSeq !== writingRequestSeq || !element.isConnected || normalizeWriting(currentText) !== normalizeWriting(text)) return;
     const polled = await chrome.runtime.sendMessage({
       type: "poll-context-views",
       viewTypes: WRITING_VIEW_TYPES,
@@ -524,7 +421,6 @@ async function pollWritingAssist(element, text, result, requestSeq) {
     }).catch(() => undefined);
     if (showWritingAssist(polled, element)) return;
   }
-  showWritingError(element, requestSeq, "Writing assist timed out.");
 }
 
 function writingViewFromResult(result) {
@@ -545,6 +441,18 @@ function draftTextFromView(view) {
 function suggestionsFromView(view) {
   const value = view?.content?.suggestions;
   return Array.isArray(value) ? value.filter(item => typeof item === "string" && item.trim()) : [];
+}
+
+function pageWritingContext() {
+  const pageText = visibleText();
+  return {
+    title: document.title,
+    url: location.href,
+    domain: location.hostname,
+    selected_text: String(window.getSelection?.() ?? "").trim().slice(0, 2000) || undefined,
+    excerpt: pageText.slice(0, 6000),
+    text_quality: textQuality(pageText),
+  };
 }
 
 function submitWritingFeedback(view, input) {
@@ -646,13 +554,11 @@ function positionAssistBubble(element) {
   if (!assistBubble) return;
   const rect = editablePositionRect(element);
   const bubbleRect = assistBubble.getBoundingClientRect();
-  const collapsed = assistBubble.classList.contains("is-collapsed");
-  const width = collapsed ? Math.max(92, bubbleRect.width || 92) : Math.max(318, bubbleRect.width || 318);
-  const height = collapsed ? Math.max(32, bubbleRect.height || 32) : Math.max(128, bubbleRect.height || 128);
-  const collapsedLeft = rect.right + 8;
+  const width = Math.max(318, bubbleRect.width || 318);
+  const height = Math.max(128, bubbleRect.height || 128);
   const panelLeft = Math.min(rect.left, rect.right - width);
   const top = Math.max(12, Math.min(window.innerHeight - height - 12, rect.bottom + 8));
-  const left = Math.max(12, Math.min(window.innerWidth - width - 12, collapsed ? collapsedLeft : panelLeft));
+  const left = Math.max(12, Math.min(window.innerWidth - width - 12, panelLeft));
   assistBubble.style.top = `${top + window.scrollY}px`;
   assistBubble.style.left = `${left + window.scrollX}px`;
 }
@@ -885,39 +791,6 @@ style.textContent = `
     color: #2f2f2f;
     font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  #info-writing-assist.is-collapsed {
-    width: auto;
-  }
-  #info-writing-assist .info-writing-trigger {
-    display: none;
-    height: 30px;
-    border: 1px solid rgba(47, 47, 47, 0.2);
-    border-radius: 999px;
-    background: #2f2f2f;
-    color: #fff;
-    box-shadow: 0 8px 24px rgba(20, 20, 20, 0.14);
-    padding: 0 10px;
-    font: 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    cursor: pointer;
-    user-select: none;
-  }
-  #info-writing-assist.is-idle .info-writing-trigger {
-    background: #ffffff;
-    color: #2f2f2f;
-  }
-  #info-writing-assist.is-pending .info-writing-trigger {
-    opacity: .74;
-  }
-  #info-writing-assist.is-error .info-writing-trigger {
-    background: #ffffff;
-    color: #8a1f17;
-    border-color: rgba(138, 31, 23, .34);
-  }
-  #info-writing-assist.is-collapsed .info-writing-trigger {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
   #info-writing-assist .info-writing-panel {
     border: 1px solid rgba(47, 47, 47, 0.16);
     border-radius: 8px;
@@ -925,9 +798,6 @@ style.textContent = `
     color: #2f2f2f;
     box-shadow: 0 12px 32px rgba(20, 20, 20, 0.14);
     padding: 10px;
-  }
-  #info-writing-assist.is-collapsed .info-writing-panel {
-    display: none;
   }
   #info-writing-assist .info-writing-title {
     color: #6f6f6f;

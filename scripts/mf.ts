@@ -8,17 +8,7 @@ import { buildAgentTaskList, queueOrProcessAgentTasks } from "@info/runtime/agen
 import {
   buildProcessorViewReport,
   ProcessorRuntime,
-  createCurrentPageRouterProcessor,
-  createMemoryProfileUpdateProcessor,
-  createProjectCurrentProcessor,
-  createProjectDecisionExtractorProcessor,
-  createProjectInboxProcessor,
-  createProjectTasksProcessor,
-  createRouteCandidateProcessor,
-  createScreenpipeSurfaceProcessor,
-  createSurfaceStateProcessor,
-  createViewPromotionEngineProcessor,
-  createWorkRouterBatchProcessor,
+  builtInProcessors,
   type ProcessorDefinition,
 } from "@info/processor-runtime";
 import { compileMemoryGate as compileMemoryGateView } from "@info/views";
@@ -270,22 +260,6 @@ async function main(argv: string[]): Promise<void> {
   }
 
   fail("unknown command", "UNKNOWN_COMMAND");
-}
-
-function builtInProcessors(): ProcessorDefinition[] {
-  return [
-    createSurfaceStateProcessor(),
-    createRouteCandidateProcessor(),
-    createCurrentPageRouterProcessor(),
-    createScreenpipeSurfaceProcessor(),
-    createViewPromotionEngineProcessor(),
-    createWorkRouterBatchProcessor(),
-    createProjectCurrentProcessor(),
-    createMemoryProfileUpdateProcessor(),
-    createProjectInboxProcessor(),
-    createProjectTasksProcessor(),
-    createProjectDecisionExtractorProcessor(),
-  ];
 }
 
 function printProcessorList(): void {

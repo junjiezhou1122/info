@@ -1,5 +1,6 @@
 import { AgentOverChromeBridge } from "@midscene/web/bridge-mode";
 import type { McpToolCallResult } from "./types.js";
+import { midsceneEnabled, missingMidsceneEnv } from "./midscene-config.js";
 
 type VisionActArgs = {
   intent?: string;
@@ -12,31 +13,28 @@ type VisionActArgs = {
 let agent: AgentOverChromeBridge | null = null;
 let visionActQueue: Promise<unknown> = Promise.resolve();
 
-function midsceneEnabled(): boolean {
-  return process.env.CHROME_ACP_MIDSCENE === "1" || process.env.CHROME_ACP_MIDSCENE === "true";
-}
-
 function requireMidsceneEnv(): void {
   if (!midsceneEnabled()) {
     throw new Error("Midscene is disabled. Start proxy with CHROME_ACP_MIDSCENE=1 and MIDSCENE_MODEL_* env vars.");
   }
-  for (const name of ["MIDSCENE_MODEL_BASE_URL", "MIDSCENE_MODEL_API_KEY", "MIDSCENE_MODEL_NAME", "MIDSCENE_MODEL_FAMILY"]) {
-    if (!process.env[name]) throw new Error(`Missing ${name} for Midscene vision automation.`);
+  for (const name of missingMidsceneEnv()) {
+    throw new Error(`Missing ${name} for Midscene vision automation.`);
   }
 }
 
 async function ensureBridgeAgent(): Promise<AgentOverChromeBridge> {
   requireMidsceneEnv();
-  if (!agent) {
-    agent = new AgentOverChromeBridge({
-      closeConflictServer: true,
-      serverListeningTimeout: 20_000,
-    });
-  }
+  // Always destroy any existing agent before creating a new one to connect to the current active tab
+  await resetBridgeAgent();
+  agent = new AgentOverChromeBridge({
+    closeConflictServer: true,
+    serverListeningTimeout: 20_000,
+  });
   try {
     await agent.connectCurrentTab({ forceSameTabNavigation: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    await resetBridgeAgent();
     throw new Error(
       `Midscene Bridge could not connect to the current Chrome tab: ${message}. ` +
       "Open the Midscene Chrome extension, enable Bridge Mode, allow current-tab control, then retry.",
@@ -94,12 +92,17 @@ async function executeMidsceneVisionActNow(args: VisionActArgs): Promise<McpTool
   let instance = await ensureBridgeAgent();
   let result: unknown;
   try {
-    result = await callAgent(instance, args);
-  } catch (error) {
-    if (!shouldReconnectAfterError(error)) throw error;
+    try {
+      result = await callAgent(instance, args);
+    } catch (error) {
+      if (!shouldReconnectAfterError(error)) throw error;
+      await resetBridgeAgent();
+      instance = await ensureBridgeAgent();
+      result = await callAgent(instance, args);
+    }
+  } finally {
+    // Reset/destroy the agent after execution is complete to release the active tab lock
     await resetBridgeAgent();
-    instance = await ensureBridgeAgent();
-    result = await callAgent(instance, args);
   }
   return {
     content: [

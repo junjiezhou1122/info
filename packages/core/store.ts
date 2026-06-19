@@ -84,6 +84,7 @@ export class ContextStore {
       );
 
       create index if not exists idx_context_records_created_at on context_records(created_at);
+      create index if not exists idx_context_records_updated_at on context_records(updated_at);
       create index if not exists idx_context_records_schema on context_records(schema_name, schema_version);
       create index if not exists idx_context_records_source on context_records(source_type);
       create index if not exists idx_context_records_url on context_records(url);
@@ -603,23 +604,28 @@ export class ContextStore {
     const families = options.view_types?.length
       ? options.view_types
       : (this.db.prepare(`select distinct view_type as family from context_views order by view_type`).all() as Array<{ family: string }>).map(row => row.family);
+    if (!families.length) return [];
+    const placeholders = families.map(() => "?").join(", ");
+    const activeClause = options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : "";
+    const counts = new Map((this.db.prepare(`
+      select view_type as family, count(*) as count
+      from context_views
+      where view_type in (${placeholders})${activeClause}
+      group by view_type
+    `).all(...families) as Array<{ family: string; count: number }>).map(row => [row.family, Number(row.count ?? 0)]));
+    const latestStatement = this.db.prepare(`
+      select id, view_type, title, summary, status, compiler_json, confidence, stability, lossiness, created_at, updated_at
+      from context_views indexed by idx_context_views_type_updated_created_id
+      where view_type = ?${activeClause}
+      order by updated_at desc, created_at desc, id desc
+      limit 1
+    `);
     return families.map(family => {
-      const countRow = this.db.prepare(`
-        select count(*) as count
-        from context_views indexed by idx_context_views_type_status_updated_at
-        where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""}
-      `).get(family) as { count?: number } | undefined;
-      const latest = this.db.prepare(`
-        select id, view_type, title, summary, status, compiler_json, confidence, stability, lossiness, created_at, updated_at
-        from context_views indexed by idx_context_views_type_updated_created_id
-        where view_type = ?${options.active_only ? " and (status is null or status not in ('archived', 'rejected'))" : ""}
-        order by updated_at desc, created_at desc, id desc
-        limit 1
-      `).get(family) as any;
-      const kinds = options.include_kinds ? this.kindsForViewType(family, options.active_only) : [];
+      const latest = counts.get(family) ? latestStatement.get(family) as any : undefined;
+      const kinds = options.include_kinds && counts.get(family) ? this.kindsForViewType(family, options.active_only) : [];
       return {
         family,
-        count: Number(countRow?.count ?? 0),
+        count: counts.get(family) ?? 0,
         latest: latest ? rowToViewSummary(latest) : undefined,
         kinds,
       };
@@ -684,7 +690,10 @@ export class ContextStore {
       options.scope ||
       options.timeWindow,
     );
-    const sql = `select * from context_views${where} order by updated_at desc, created_at desc, id desc${unbounded ? "" : " limit ?"}`;
+    const fromClause = options.view_types?.length === 1 && !options.view_type_prefix
+      ? "context_views indexed by idx_context_views_type_updated_created_id"
+      : "context_views";
+    const sql = `select * from ${fromClause}${where} order by updated_at desc, created_at desc, id desc${unbounded ? "" : " limit ?"}`;
     if (!unbounded) params.push(needsPostFilterOverfetch ? Math.max(limit * 8, limit) : limit);
     const rows = this.db.prepare(sql).all(...params) as any[];
     const filtered = rows
@@ -700,6 +709,75 @@ export class ContextStore {
       .filter(view => scopeMatches({ scope: view.scope } as StoredContextRecord, options.scope))
       .filter(view => viewTimeMatches(view, options.timeWindow));
     return unbounded ? filtered : filtered.slice(0, limit);
+  }
+
+  listViewSummaries(options: {
+    view_types?: string[];
+    view_type_prefix?: string;
+    limit?: number;
+    active_only?: boolean;
+    status?: ContextView["status"];
+    updated_after?: string;
+  } = {}): StoredContextView[] {
+    const limit = options.limit ?? 50;
+    const unbounded = options.limit !== undefined && options.limit <= 0;
+    const clauses: string[] = [];
+    const params: SQLInputValue[] = [];
+    if (options.view_types?.length) {
+      clauses.push(`view_type in (${options.view_types.map(() => "?").join(", ")})`);
+      params.push(...options.view_types);
+    }
+    if (options.view_type_prefix) {
+      clauses.push(`view_type >= ? and view_type < ?`);
+      params.push(options.view_type_prefix, nextStringPrefix(options.view_type_prefix));
+    }
+    if (options.status) {
+      clauses.push(`status = ?`);
+      params.push(options.status);
+    } else if (options.active_only) {
+      clauses.push(`(status is null or status not in ('archived', 'rejected'))`);
+    }
+    if (options.updated_after) {
+      clauses.push(`updated_at > ?`);
+      params.push(options.updated_after);
+    }
+    if (options.view_types && options.view_types.length > 1 && !options.view_type_prefix) {
+      const perTypeLimit = unbounded ? 50 : Math.max(1, Math.ceil(limit / options.view_types.length) + 4);
+      const rows = options.view_types.flatMap(viewType => {
+        const typeClauses = [...clauses.filter(clause => !clause.startsWith("view_type in "))];
+        const typeParams = params.slice(options.view_types?.length ?? 0);
+        typeClauses.unshift("view_type = ?");
+        typeParams.unshift(viewType);
+        if (!unbounded) typeParams.push(perTypeLimit);
+        const typeWhere = ` where ${typeClauses.join(" and ")}`;
+        return this.db.prepare(`
+          select id, view_type, title, summary, status, source_records_json, source_views_json,
+            compiler_json, purpose, scope_json, content_json, confidence, stability, lossiness,
+            privacy_json, validity_json, metadata_json, created_at, updated_at
+          from context_views indexed by idx_context_views_type_updated_created_id
+          ${typeWhere}
+          order by updated_at desc, created_at desc, id desc${unbounded ? "" : " limit ?"}
+        `).all(...typeParams) as any[];
+      });
+      return rows
+        .map(rowToViewSummary)
+        .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at) || b.id.localeCompare(a.id))
+        .slice(0, unbounded ? undefined : limit);
+    }
+    const where = clauses.length ? ` where ${clauses.join(" and ")}` : "";
+    const fromClause = options.view_types?.length === 1 && !options.view_type_prefix
+      ? "context_views indexed by idx_context_views_type_updated_created_id"
+      : "context_views";
+    const sql = `
+      select id, view_type, title, summary, status, source_records_json, source_views_json,
+        compiler_json, purpose, scope_json, content_json, confidence, stability, lossiness,
+        privacy_json, validity_json, metadata_json, created_at, updated_at
+      from ${fromClause}${where}
+      order by updated_at desc, created_at desc, id desc${unbounded ? "" : " limit ?"}
+    `;
+    if (!unbounded) params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as any[];
+    return rows.map(rowToViewSummary);
   }
 
   queryRecords(query: ContextQuery): StoredContextRecord[] {
@@ -892,21 +970,139 @@ export class ContextStore {
     return row ? rowToRecord(row) : undefined;
   }
 
+  recentByUpdatedAt(limit = 50): StoredContextRecord[] {
+    const rows = this.db.prepare(`
+      select *
+      from context_records indexed by idx_context_records_updated_at
+      order by updated_at desc, created_at desc, id desc
+      limit ?
+    `).all(Math.max(1, limit)) as any[];
+    return rows.map(rowToRecord);
+  }
+
   recent(limit = 50, scope?: ContextRecord["scope"], timeWindow?: ContextPackRequest["time_window"]): StoredContextRecord[] {
-    const all = this.db.prepare(`select * from context_records order by created_at desc limit ?`).all(Math.max(limit * 8, limit)) as any[];
+    const normalizedWindow = normalizeTimeWindow(timeWindow);
+    const clauses: string[] = [];
+    const args: SQLInputValue[] = [];
+    if (normalizedWindow?.start_time) {
+      clauses.push(`coalesce(json_extract(time_json, '$.observed_at'), created_at) >= ?`);
+      args.push(normalizedWindow.start_time);
+    }
+    if (normalizedWindow?.end_time) {
+      clauses.push(`coalesce(json_extract(time_json, '$.observed_at'), created_at) <= ?`);
+      args.push(normalizedWindow.end_time);
+    }
+    args.push(Math.max(limit * 8, limit));
+    const where = clauses.length ? `where ${clauses.join(" and ")}` : "";
+    const all = this.db.prepare(`
+      select * from context_records
+      ${where}
+      order by coalesce(json_extract(time_json, '$.observed_at'), created_at) desc, created_at desc
+      limit ?
+    `).all(...args) as any[];
     return all.map(rowToRecord).filter(r => scopeMatches(r, scope)).filter(r => timeMatches(r, timeWindow)).slice(0, limit);
   }
 
   recentBySourceFilter(sourceFilter: "screenpipe" | "browser" | "runtime" | "all", limit = 50, scope?: ContextRecord["scope"], timeWindow?: ContextPackRequest["time_window"]): StoredContextRecord[] {
     if (sourceFilter === "all") return this.recent(limit, scope, timeWindow);
     const predicate = sourceFilterPredicate(sourceFilter);
+    const normalizedWindow = normalizeTimeWindow(timeWindow);
+    const clauses = [predicate.sql];
+    const args: SQLInputValue[] = [...predicate.params];
+    if (normalizedWindow?.start_time) {
+      clauses.push(`coalesce(json_extract(time_json, '$.observed_at'), created_at) >= ?`);
+      args.push(normalizedWindow.start_time);
+    }
+    if (normalizedWindow?.end_time) {
+      clauses.push(`coalesce(json_extract(time_json, '$.observed_at'), created_at) <= ?`);
+      args.push(normalizedWindow.end_time);
+    }
+    args.push(Math.max(limit * 8, limit));
     const rows = this.db.prepare(`
       select * from context_records
-      where ${predicate.sql}
-      order by created_at desc
+      where ${clauses.join(" and ")}
+      order by coalesce(json_extract(time_json, '$.observed_at'), created_at) desc, created_at desc
       limit ?
-    `).all(...predicate.params, Math.max(limit * 8, limit)) as any[];
+    `).all(...args) as any[];
     return rows.map(rowToRecord).filter(r => scopeMatches(r, scope)).filter(r => timeMatches(r, timeWindow)).slice(0, limit);
+  }
+
+  activityTimelineWatermark(options: {
+    timeWindow?: ContextPackRequest["time_window"];
+    sourceFilter?: "screenpipe" | "browser" | "runtime" | "all";
+    includeRuntimeEvents?: boolean;
+  } = {}) {
+    const normalizedWindow = normalizeTimeWindow(options.timeWindow);
+    const candidateRows = this.db.prepare(`
+      select *
+      from context_records
+      order by updated_at desc, created_at desc, id desc
+      limit ?
+    `).all(2_000) as any[];
+    const sourceFilter = options.sourceFilter ?? "all";
+    const latestRecord = candidateRows
+      .map(rowToRecord)
+      .find(record => activityWatermarkRecordVisible(record) && recordWatermarkMatchesSourceFilter(record, sourceFilter) && timeMatches(record, normalizedWindow));
+
+    let event_count = 0;
+    let latest_event_created_at: string | undefined;
+    let latest_event_id: string | undefined;
+    if (options.includeRuntimeEvents) {
+      const eventClauses = [
+        "event_type not in ('view_compiled', 'runtime_tick_completed')",
+      ];
+      const eventArgs: SQLInputValue[] = [];
+      if (normalizedWindow?.start_time) {
+        eventClauses.push("created_at >= ?");
+        eventArgs.push(normalizedWindow.start_time);
+      }
+      if (normalizedWindow?.end_time) {
+        eventClauses.push("created_at <= ?");
+        eventArgs.push(normalizedWindow.end_time);
+      }
+      eventArgs.push(200);
+      const eventWhere = `where ${eventClauses.join(" and ")}`;
+      const latestEvent = (this.db.prepare(`
+        select *
+        from runtime_events
+        ${eventWhere}
+        order by created_at desc, id desc
+        limit ?
+      `).all(...eventArgs) as any[]).map(rowToRuntimeEvent)[0];
+      event_count = latestEvent ? 1 : 0;
+      latest_event_created_at = latestEvent?.created_at;
+      latest_event_id = latestEvent?.id;
+    }
+
+    const record_count = latestRecord ? 1 : 0;
+    const latest_observed_at = latestRecord?.time?.observed_at ?? latestRecord?.created_at;
+    const latest_record_created_at = latestRecord?.created_at;
+    const latest_record_updated_at = latestRecord?.updated_at;
+    const latest_record_id = latestRecord?.id;
+    const watermark = [
+      "records",
+      record_count,
+      latest_observed_at ?? "",
+      latest_record_created_at ?? "",
+      latest_record_updated_at ?? "",
+      latest_record_id ?? "",
+      "events",
+      event_count,
+      latest_event_created_at ?? "",
+      latest_event_id ?? "",
+    ].join(":");
+
+    return {
+      record_count,
+      latest_observed_at,
+      latest_record_created_at,
+      latest_record_updated_at,
+      latest_record_id,
+      event_count,
+      latest_event_created_at,
+      latest_event_id,
+      watermark,
+    };
   }
 
   search(query: string, limit = 50, scope?: ContextRecord["scope"], timeWindow?: ContextPackRequest["time_window"]): StoredContextRecord[] {
@@ -1081,6 +1277,22 @@ function sourceFilterPredicate(sourceFilter: "screenpipe" | "browser" | "runtime
   };
 }
 
+function activityWatermarkRecordVisible(record: StoredContextRecord): boolean {
+  if (record.schema.name.startsWith("derived.")) return false;
+  if (record.schema.name.startsWith("episode.")) return false;
+  if (record.schema.name === "observation.route_candidate") return false;
+  if (record.schema.name === "observation.screenpipe_workspace_signal") return false;
+  if (record.schema.name === "observation.screenpipe_input_event") return false;
+  if (record.privacy?.retention === "do_not_store") return false;
+  return true;
+}
+
+function recordWatermarkMatchesSourceFilter(record: StoredContextRecord, filter: "screenpipe" | "browser" | "runtime" | "all"): boolean {
+  if (filter === "all") return true;
+  const hay = `${record.source.type} ${record.source.connector ?? ""} ${record.schema.name}`.toLowerCase();
+  return hay.includes(filter);
+}
+
 function timeMatches(record: StoredContextRecord, timeWindow?: ContextPackRequest["time_window"]): boolean {
   const normalized = normalizeTimeWindow(timeWindow);
   if (!normalized?.start_time && !normalized?.end_time) return true;
@@ -1221,13 +1433,13 @@ function rowToWorkThread(row: any): StoredWorkThread {
     title: row.title,
     status: row.status,
     confidence: row.confidence ?? undefined,
-    evidence_records: parseJson(row.evidence_records_json, []),
-    keywords: parseJson(row.keywords_json, []),
-    domains: parseJson(row.domains_json, []),
-    apps: parseJson(row.apps_json, []),
-    projects: parseJson(row.projects_json, []),
-    repos: parseJson(row.repos_json, []),
-    reasons: parseJson(row.reasons_json, []),
+    evidence_records: parseJsonStringArray(row.evidence_records_json),
+    keywords: parseJsonStringArray(row.keywords_json),
+    domains: parseJsonStringArray(row.domains_json),
+    apps: parseJsonStringArray(row.apps_json),
+    projects: parseJsonStringArray(row.projects_json),
+    repos: parseJsonStringArray(row.repos_json),
+    reasons: parseJsonStringArray(row.reasons_json),
     metadata: parseJson(row.metadata_json, {}),
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -1266,18 +1478,18 @@ function rowToViewSummary(row: any): StoredContextView {
     title: row.title ?? undefined,
     summary: row.summary ?? undefined,
     status: row.status ?? undefined,
-    source_records: [],
-    source_views: [],
+    source_records: parseJsonStringArray(row.source_records_json),
+    source_views: parseJsonStringArray(row.source_views_json),
     compiler: parseJson(row.compiler_json, undefined),
     purpose: row.purpose ?? undefined,
-    scope: {},
-    content: {},
+    scope: parseJson(row.scope_json, {}),
+    content: parseJson(row.content_json, {}),
     confidence: row.confidence ?? undefined,
     stability: row.stability ?? undefined,
     lossiness: row.lossiness ?? undefined,
-    privacy: {},
-    validity: {},
-    metadata: {},
+    privacy: parseJson(row.privacy_json, {}),
+    validity: parseJson(row.validity_json, {}),
+    metadata: parseJson(row.metadata_json, {}),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

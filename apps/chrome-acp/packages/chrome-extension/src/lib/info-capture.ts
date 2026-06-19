@@ -172,6 +172,10 @@ export async function handleInfoCaptureMessage(message: any, sender: chrome.runt
     });
     return postRecord(record, { process: true, cascadeViews: true });
   }
+  if (message?.type === "youtube-observation") {
+    const tab = sender.tab ?? await getActiveTab();
+    return sendYouTubeObservation(message, tab);
+  }
   if (message?.type === "get-current-status") {
     const tab = await getActiveTab();
     if (tab?.id && tab.url) await ensureVisit(tab, "status_check");
@@ -441,6 +445,8 @@ async function sendWritingInput(payload: any, tab?: chrome.tabs.Tab) {
     payload: {
       ...payload,
       text: text.slice(0, 4000),
+      full_text: String(payload?.full_text ?? "").slice(0, 8000) || undefined,
+      page_context: sanitizeWritingPageContext(payload?.page_context),
       text_length: text.length,
       tab_id: tab?.id,
       window_id: tab?.windowId,
@@ -462,6 +468,23 @@ async function sendWritingInput(payload: any, tab?: chrome.tabs.Tab) {
   };
 }
 
+function sanitizeWritingPageContext(value: unknown) {
+  if (!value || typeof value !== "object") return undefined;
+  const input = value as Record<string, unknown>;
+  const text = (key: string, limit: number) => {
+    const raw = input[key];
+    return typeof raw === "string" && raw.trim() ? raw.trim().slice(0, limit) : undefined;
+  };
+  return {
+    title: text("title", 300),
+    url: text("url", 1000),
+    domain: text("domain", 200),
+    selected_text: text("selected_text", 2000),
+    excerpt: text("excerpt", 6000),
+    text_quality: typeof input.text_quality === "object" && input.text_quality ? input.text_quality : undefined,
+  };
+}
+
 async function sendLifecycleEvent(state: TabState, event: string) {
   return postRecord({
     schema: { name: "observation.browser_lifecycle", version: 1 },
@@ -474,6 +497,60 @@ async function sendLifecycleEvent(state: TabState, event: string) {
     privacy: state.privacy ?? privacyForUrl(state.url, await getSettings()),
     payload: { visit_id: state.visitId, event, dwell_seconds: Math.round((Date.now() - state.startedAt) / 1000) },
   });
+}
+
+async function sendYouTubeObservation(message: any, tab?: chrome.tabs.Tab) {
+  if (!tab?.id || !tab.url) return { ok: false, error: "no active tab" };
+  const schemaName = youtubeObservationSchema(message.schemaName);
+  if (!schemaName) return { ok: false, error: "unsupported youtube observation schema" };
+  await ensureVisit(tab, "youtube_observation");
+  const state = getTabState(tab.id, tab.url);
+  state.windowId = tab.windowId;
+  state.settings = await getSettings();
+  const page = await collectFromTab(tab.id).catch(() => basicPageFromTab(tab));
+  const payload = message.payload && typeof message.payload === "object" ? message.payload : {};
+  const text = youtubeObservationText(schemaName, payload);
+  const record = baseRecord({
+    schemaName,
+    page,
+    state,
+    contentText: text,
+    acquisitionMode: "passive",
+    reason: `YouTube ${schemaName.replace(/^observation\.youtube\./, "").replace(/_/g, " ")} observed by content script`,
+    importance: schemaName === "observation.youtube.caption_fragment" ? 0.78 : 0.48,
+    payload: {
+      ...payload,
+      visit_id: state.visitId,
+      tab_id: tab.id,
+      window_id: tab.windowId,
+    },
+  });
+  if (typeof payload.observed_at === "string") record.time.observed_at = payload.observed_at;
+  if (typeof payload.video_url === "string") record.content.url = payload.video_url;
+  if (typeof payload.video_title === "string") record.content.title = payload.video_title;
+  return postRecord(record, { process: true, cascadeViews: true });
+}
+
+function youtubeObservationSchema(value: unknown): string | undefined {
+  const schemaName = typeof value === "string" ? value : "";
+  return [
+    "observation.youtube.caption_state",
+    "observation.youtube.caption_fragment",
+    "observation.youtube.paused",
+    "observation.youtube.played",
+  ].includes(schemaName) ? schemaName : undefined;
+}
+
+function youtubeObservationText(schemaName: string, payload: Record<string, unknown>) {
+  if (schemaName === "observation.youtube.caption_fragment") {
+    return String(payload.caption_text ?? payload.subtitle_text ?? "").slice(0, 4000) || undefined;
+  }
+  if (schemaName === "observation.youtube.caption_state") {
+    return `captions ${payload.enabled || payload.captions_enabled ? "enabled" : "disabled"}`;
+  }
+  if (schemaName === "observation.youtube.paused") return `paused at ${payload.current_time ?? payload.current_seconds ?? 0}`;
+  if (schemaName === "observation.youtube.played") return `played from ${payload.current_time ?? payload.current_seconds ?? 0}`;
+  return undefined;
 }
 
 function baseRecord(input: {

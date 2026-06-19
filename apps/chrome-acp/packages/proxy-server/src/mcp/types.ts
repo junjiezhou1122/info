@@ -1,5 +1,7 @@
 // MCP (Model Context Protocol) Types for Streamable HTTP Transport
 
+import { isMidsceneToolExposed } from "./midscene-config.js";
+
 // ============================================================================
 // Browser Tool Types
 // ============================================================================
@@ -662,10 +664,7 @@ const BASE_BROWSER_TOOLS = [
 ];
 
 export function getBrowserTools(): McpTool[] {
-  const exposeVision =
-    process.env.CHROME_ACP_EXPOSE_MIDSCENE === "1" ||
-    process.env.CHROME_ACP_EXPOSE_MIDSCENE === "true";
-  return exposeVision
+  return isMidsceneToolExposed()
     ? [...BASE_BROWSER_TOOLS, BROWSER_CURRENT_VISION_ACT_TOOL, BROWSER_VISION_ACT_TOOL]
     : BASE_BROWSER_TOOLS;
 }

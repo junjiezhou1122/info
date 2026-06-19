@@ -125,6 +125,7 @@ const VIEW_FAMILY_TYPES: Record<string, string[] | undefined> = {
     "draft.tool_prototype",
     "tool.prototype_artifact",
     "app.language.learning_pack",
+    "learning.review_queue",
     "app.language.review_queue",
     "memory.language.vocabulary_exposure",
     "memory.language.difficult_segments",
@@ -133,6 +134,7 @@ const VIEW_FAMILY_TYPES: Record<string, string[] | undefined> = {
   task: ["agent.task_list", "task.background_research", "task.browser_ambient", "task.toolsmith_prototype"],
   language: [
     "app.language.learning_pack",
+    "learning.review_queue",
     "app.language.review_queue",
     "memory.language.vocabulary_exposure",
     "memory.language.difficult_segments",

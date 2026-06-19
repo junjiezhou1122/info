@@ -9,6 +9,8 @@
 .runtime/
 .tmp-info-acp-runtime-test-*/
 .firecrawl/
+.evo/keyfile
+artifacts/**/.chrome-profile/
 craft-reference/
 data/
 node_modules/

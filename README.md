@@ -14,6 +14,8 @@ Observation -> Processor -> ViewGraph -> App / Agent Action -> Feedback -> Evolu
 
 ![Metaflow architecture](assets/metaflow-architecture.svg)
 
+![Metaflow innovation](assets/metaflow-innovation.jpg)
+
 ## Why Metaflow
 
 Most memory systems store history and hope retrieval finds the right chunk

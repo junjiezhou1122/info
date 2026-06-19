@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 import { loadLocalEnv } from "./env.js";
 import { ContextStore } from "@info/core";
 import { ContextArtifactSchema, ContextConnectorSchema, ContextPackRequestSchema, ContextQuerySchema, ContextRecordSchema, ContextSchemaSchema, ContextViewSchema, FeedbackInputSchema, RuntimeEventSchema } from "@info/core";
@@ -15,6 +16,7 @@ import { buildContextPack, filterEventsForPlugin, filterRecordsForPlugin, filter
 import { listPluginManifests, readPluginManifest } from "@info/core";
 import { runLanguageLearningPlugin } from "@info/core";
 import { createDefaultProgramRuntime, listDefaultCapabilities, listDefaultPrograms } from "@info/programs/registry.js";
+import { ProcessorRuntime, matchesAny, processorCatalog, upsertDynamicProcessorSpec, type ProcessorDefinition } from "@info/processor-runtime";
 import { signalFromObject } from "@info/programs/signals.js";
 import { III_CASCADE_FUNCTIONS, III_CONTEXT_FUNCTIONS, III_PROGRAM_FUNCTIONS, III_RUNTIME_FUNCTIONS, InProcessIiiRuntimeClient, VIEW_WORKER_FUNCTIONS, registerInfoIiiRuntime, type ContextIngestResult } from "@info/iii-runtime";
 import { ingestFeedback } from "@info/runtime/feedback.js";
@@ -22,7 +24,7 @@ import { collectViewProvenance } from "@info/runtime/view-provenance.js";
 import { filterViewsByQuery } from "@info/core";
 import { rankViewsForSurfacing } from "@info/core";
 import { VIEW_FAMILY_DEFINITIONS, VIEW_FAMILY_ORDER, manualViewFamilies, viewFamilyDefinition } from "@info/views/catalog.js";
-import type { ContextArtifact, ContextPackRequest, ContextQuery, ContextRecord, ContextView, StoredContextRecord } from "@info/core";
+import type { ContextArtifact, ContextPackRequest, ContextQuery, ContextRecord, ContextView, StoredContextRecord, StoredRuntimeEvent } from "@info/core";
 import {
   artifactCandidateLimit, compactScope, contextRecordCandidateLimit, isHttpVisibleRecord, isPlainObject,
   latestViewCandidateLimit, nextViewCursor, pluginNotFoundBody, positiveInteger, readJson,
@@ -44,6 +46,9 @@ import {
 loadLocalEnv();
 
 const port = Number(process.env.CONTEXT_HTTP_PORT ?? 3111);
+const FRAME_CACHE_MAX = 80;
+const FRAME_CACHE_TTL_MS = 5 * 60_000;
+const frameImageCache = new Map<string, { contentType: string; bytes: Uint8Array; expiresAt: number }>();
 
 export function createContextHttpHandler(store: ContextStore) {
   return async (req: any, res: any) => {
@@ -68,8 +73,12 @@ export function createContextHttpHandler(store: ContextStore) {
       const pluginParam = url.searchParams.get("plugin_id");
       const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
       if (pluginParam) return send(res, 403, { ok: false, error: "plugins cannot read raw Screenpipe frames", plugin_id: pluginParam, plugin_loaded: Boolean(plugin) });
-      const result = await fetchScreenpipeFrameImage(decodeURIComponent(frameMatch[1]));
+      const frameId = decodeURIComponent(frameMatch[1]);
+      const cached = cachedFrameImage(frameId);
+      if (cached) return sendBytes(res, 200, cached.bytes, cached.contentType);
+      const result = await fetchScreenpipeFrameImage(frameId, { timeout_ms: 3_000 });
       if (!result.ok) return send(res, result.status ?? 502, { ok: false, error: result.error });
+      rememberFrameImage(frameId, result);
       return sendBytes(res, 200, result.bytes, result.contentType);
     }
 
@@ -143,7 +152,7 @@ export function createContextHttpHandler(store: ContextStore) {
       if (!record) return send(res, 500, { ok: false, error: "ingest failed" });
       if (ingest.deduped) {
         const views = store.listViews({
-          view_types: ["draft.writing_continuation", "advice.writing_assist"],
+          view_types: ["draft.writing_continuation", "advice.writing_assist", "writing.advice"],
           source_record_id: record.id,
           active_only: true,
           limit: 4,
@@ -199,6 +208,19 @@ export function createContextHttpHandler(store: ContextStore) {
       });
     }
 
+    if (req.method === "GET" && url.pathname === "/screenpipe/audio/transcripts") {
+      const limit = positiveInteger(url.searchParams.get("limit")) ?? 120;
+      const minutes = positiveInteger(url.searchParams.get("minutes")) ?? 60;
+      const result = await fetchScreenpipeAudioTranscripts({ limit, minutes });
+      if (!result.ok) return send(res, 502, { ok: false, error: result.error, query: result.query });
+      return send(res, 200, {
+        ok: true,
+        query: result.query,
+        count: result.transcripts.length,
+        transcripts: result.transcripts,
+      });
+    }
+
     if (req.method === "GET" && url.pathname.startsWith("/context/records/")) {
       const recordId = decodeURIComponent(url.pathname.slice("/context/records/".length));
       const record = store.getRecord(recordId);
@@ -209,6 +231,62 @@ export function createContextHttpHandler(store: ContextStore) {
       return send(res, allowed ? 200 : 404, allowed
         ? { ok: true, record: allowed, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined }
         : { ok: false, error: "record not found", plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
+    }
+
+    if (req.method === "GET" && url.pathname === "/processors") {
+      const sourceKind = url.searchParams.get("source_kind");
+      const sourceType = url.searchParams.get("source_type") ?? undefined;
+      const processors = processorCatalog(store)
+        .map(processor => summarizeProcessor(processor, sourceKind === "observation" || sourceKind === "view" ? { kind: sourceKind, type: sourceType } : undefined))
+        .filter(processor => processor.compatible !== false);
+      return send(res, 200, { ok: true, processors });
+    }
+
+    if (req.method === "POST" && url.pathname === "/processors") {
+      const body = await readJson(req);
+      try {
+        const processor = upsertDynamicProcessorSpec(store, body.processor ?? body);
+        store.appendRuntimeEvent({
+          event_type: "processor.registered",
+          actor: "agent",
+          status: "completed",
+          subject_type: "runtime",
+          subject_id: processor.id,
+          plugin_id: processor.id,
+          payload: { processor },
+        });
+        return send(res, 201, { ok: true, processor: summarizeProcessor(processor as ProcessorDefinition) });
+      } catch (error) {
+        return send(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    if (req.method === "POST" && url.pathname === "/processors/run") {
+      const body = await readJson(req);
+      const processorId = typeof body.processor_id === "string" ? body.processor_id : "";
+      const recordId = typeof body.record_id === "string" ? body.record_id : undefined;
+      const viewId = typeof body.view_id === "string" ? body.view_id : undefined;
+      if (!processorId) return send(res, 400, { ok: false, error: "processor_id is required" });
+      if (Boolean(recordId) === Boolean(viewId)) return send(res, 400, { ok: false, error: "provide exactly one of record_id or view_id" });
+      const processor = processorCatalog(store).find(item => item.id === processorId);
+      if (!processor) return send(res, 404, { ok: false, error: "processor not found", processor_id: processorId });
+      const runtime = new ProcessorRuntime({ store, processors: [processor] });
+      if (recordId) {
+        const record = store.getRecord(recordId);
+        if (!record || !isHttpVisibleRecord(record)) return send(res, 404, { ok: false, error: "record not found", record_id: recordId });
+        if (!matchesAny(processor.consumes.observations, record.schema.name)) {
+          return send(res, 400, { ok: false, error: "processor does not consume this observation type", processor_id: processorId, observation_type: record.schema.name });
+        }
+        const result = await runtime.processObservation(record, isPlainObject(body.payload) ? body.payload : {});
+        return sendProcessorRunResult(res, store, result);
+      }
+      const view = store.getView(viewId!);
+      if (!view) return send(res, 404, { ok: false, error: "view not found", view_id: viewId });
+      if (!matchesAny(processor.consumes.views, view.view_type)) {
+        return send(res, 400, { ok: false, error: "processor does not consume this view type", processor_id: processorId, view_type: view.view_type });
+      }
+      const result = await runtime.processView(view, isPlainObject(body.payload) ? body.payload : {});
+      return sendProcessorRunResult(res, store, result);
     }
 
     if (req.method === "POST" && url.pathname === "/context/search") {
@@ -286,6 +364,45 @@ export function createContextHttpHandler(store: ContextStore) {
       const viewInput = normalizeCreatedView(parsed.data, { plugin_id: pluginParam, source: sourceParam });
       const view = store.upsertView(viewInput);
       return send(res, 201, { ok: true, id: view.id, view, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
+    }
+
+    if ((req.method === "POST" || req.method === "PATCH" || req.method === "PUT") && url.pathname.startsWith("/context/views/")) {
+      const viewId = decodeURIComponent(url.pathname.slice("/context/views/".length));
+      if (!viewId || viewId.includes("/")) return send(res, 404, { ok: false, error: "view not found" });
+      const existing = store.getView(viewId);
+      const body = await readJson(req);
+      const pluginParam = url.searchParams.get("plugin_id") ?? (isPlainObject(body) && typeof body.plugin_id === "string" ? body.plugin_id : undefined) ?? existing?.scope?.plugin_id;
+      const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
+      if (pluginParam && !plugin) return send(res, 404, pluginNotFoundBody(pluginParam));
+      const allowedExisting = existing ? filterViewsForPlugin([existing], store, plugin)[0] : undefined;
+      if (!allowedExisting) return send(res, 404, { ok: false, error: "view not found", plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
+      const merged = mergeViewUpdate(allowedExisting, body);
+      const parsed = ContextViewSchema.safeParse(merged);
+      if (!parsed.success) return send(res, 400, { ok: false, error: parsed.error.flatten() });
+      if (pluginParam) {
+        const allowed = pluginCanWriteView(plugin, parsed.data, store);
+        if (!allowed.ok) return send(res, 403, { ok: false, error: allowed.error, plugin_id: pluginParam, plugin_loaded: Boolean(plugin) });
+      }
+      if (!viewReferencesAllowedRecords(parsed.data, store)) return send(res, 403, { ok: false, error: "view cannot reference this record", plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
+      if (!viewReferencesExistingViews(parsed.data, store)) return send(res, 403, { ok: false, error: "view cannot reference this source view", plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
+      if (!viewScopeMatchesProvenance(parsed.data, store)) return send(res, 403, { ok: false, error: "view scope conflicts with provenance", plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
+      const view = store.upsertView(parsed.data);
+      store.appendRuntimeEvent({
+        event_type: "context.view_updated",
+        actor: pluginParam ? "plugin" : "system",
+        status: "completed",
+        subject_type: "view",
+        subject_id: view.id,
+        plugin_id: pluginParam,
+        related_records: view.source_records,
+        related_views: view.source_views,
+        payload: {
+          view_type: view.view_type,
+          status: view.status,
+          patched_fields: isPlainObject(body) ? Object.keys(body).filter(key => key !== "plugin_id") : [],
+        },
+      });
+      return send(res, 200, { ok: true, id: view.id, view, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
     }
 
     if (req.method === "GET" && url.pathname === "/context/views/catalog") {
@@ -392,18 +509,28 @@ export function createContextHttpHandler(store: ContextStore) {
       const viewTypePrefix = url.searchParams.get("view_type_prefix") ?? undefined;
       const summaryOnly = requestedSummaryOnly === "true";
       const boundedSummary = Boolean(updatedAfter || viewTypePrefix || ((viewTypes?.length ?? 0) > 1 && limit > 0 && limit <= 20));
-      const listedViews = store.listViews({
-        limit: viewListCandidateLimit({ limit, query, pluginScoped: Boolean(pluginParam), summaryOnly, boundedSummary }),
-        view_types: viewTypes,
-        view_type_prefix: viewTypePrefix,
-        active_only: url.searchParams.get("active_only") === "true",
-        status: url.searchParams.get("status") as any || undefined,
-        compiler_id: url.searchParams.get("compiler_id") ?? undefined,
-        source_record_id: url.searchParams.get("source_record_id") ?? undefined,
-        source_view_id: url.searchParams.get("source_view_id") ?? undefined,
-        updated_after: updatedAfter,
-        scope: scopeFromSearchParams(url.searchParams),
-      });
+      const exactType = Boolean(viewTypes?.length && !viewTypePrefix && !query && !pluginParam && !url.searchParams.get("compiler_id") && !url.searchParams.get("source_record_id") && !url.searchParams.get("source_view_id") && !url.searchParams.get("scope") && !updatedAfter);
+      const listedViews = summaryOnly && !query && !pluginParam && !url.searchParams.get("compiler_id") && !url.searchParams.get("source_record_id") && !url.searchParams.get("source_view_id") && !url.searchParams.get("scope")
+        ? store.listViewSummaries({
+            limit: viewListCandidateLimit({ limit, query, pluginScoped: Boolean(pluginParam), summaryOnly, boundedSummary, exactType }),
+            view_types: viewTypes,
+            view_type_prefix: viewTypePrefix,
+            active_only: url.searchParams.get("active_only") === "true",
+            status: url.searchParams.get("status") as any || undefined,
+            updated_after: updatedAfter,
+          })
+        : store.listViews({
+            limit: viewListCandidateLimit({ limit, query, pluginScoped: Boolean(pluginParam), summaryOnly, boundedSummary, exactType }),
+            view_types: viewTypes,
+            view_type_prefix: viewTypePrefix,
+            active_only: url.searchParams.get("active_only") === "true",
+            status: url.searchParams.get("status") as any || undefined,
+            compiler_id: url.searchParams.get("compiler_id") ?? undefined,
+            source_record_id: url.searchParams.get("source_record_id") ?? undefined,
+            source_view_id: url.searchParams.get("source_view_id") ?? undefined,
+            updated_after: updatedAfter,
+            scope: scopeFromSearchParams(url.searchParams),
+          });
       const policyViews = filterViewsForPlugin(listedViews, store, plugin);
       const filteredViews = filterViewsByQuery(rankViewsForSurfacing(policyViews, surfacingPreferences), query);
       const views = limit <= 0 ? filteredViews : filteredViews.slice(0, limit);
@@ -841,15 +968,22 @@ export function createContextHttpHandler(store: ContextStore) {
       const limit = Number(body.limit ?? 300);
       const eventLimit = Number(body.event_limit ?? body.eventLimit ?? 80);
       const minutes = body.minutes;
+      const timeWindow = {
+        minutes,
+        start_time: body.start_time ?? body.startTime,
+        end_time: body.end_time ?? body.endTime,
+      };
       const records = pluginParam ? filterRecordsForPlugin(
-        store.recent(contextRecordCandidateLimit({ limit, pluginScoped: true }), undefined, { minutes }),
+        store.recent(contextRecordCandidateLimit({ limit, pluginScoped: true }), undefined, timeWindow),
         plugin,
       ).slice(0, limit) : undefined;
       const runtimeEvents = pluginParam
-        ? filterEventsForPlugin(store.listRuntimeEvents({ limit: runtimeEventCandidateLimit({ limit: eventLimit, pluginScoped: true }), timeWindow: { minutes } }), store, plugin).slice(0, eventLimit)
+        ? filterEventsForPlugin(store.listRuntimeEvents({ limit: runtimeEventCandidateLimit({ limit: eventLimit, pluginScoped: true }), timeWindow }), store, plugin).slice(0, eventLimit)
         : undefined;
       const result = await runIiiViewCompile(store, VIEW_WORKER_FUNCTIONS.activityTimeline, {
         minutes,
+        start_time: timeWindow.start_time,
+        end_time: timeWindow.end_time,
         limit,
         event_limit: eventLimit,
         bucket_minutes: body.bucket_minutes ?? body.bucketMinutes,
@@ -867,6 +1001,77 @@ export function createContextHttpHandler(store: ContextStore) {
         plugin_id: pluginParam,
       });
       return send(res, 200, { ...result, plugin_id: pluginParam ?? undefined, plugin_loaded: pluginParam ? Boolean(plugin) : undefined });
+    }
+
+    if (req.method === "GET" && url.pathname === "/timeline/activity/live") {
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 120), 1), 500);
+      const bucketMinutes = Math.min(Math.max(Number(url.searchParams.get("bucket_minutes") ?? url.searchParams.get("bucketMinutes") ?? 15), 1), 120);
+      const sourceFilter = url.searchParams.get("source_filter") ?? url.searchParams.get("sourceFilter") ?? "all";
+      if (!["screenpipe", "browser", "runtime", "all"].includes(sourceFilter)) return send(res, 400, { ok: false, error: "invalid source_filter" });
+      const records = store.recentByUpdatedAt(limit * 4)
+        .filter(isTimelineLiveRecord)
+        .filter(record => recordMatchesTimelineSourceFilter(record, sourceFilter as any))
+        .slice(0, limit);
+      const buckets = liveTimelineBuckets(records, bucketMinutes);
+      const latest = records[0];
+      return send(res, 200, {
+        ok: true,
+        compiler_id: "builtin.activity-timeline-live",
+        records_used: records.length,
+        events_used: 0,
+        buckets,
+        view: {
+          id: `view:timeline:activity:live:${latest?.updated_at ?? "empty"}`,
+          view_type: "timeline.activity",
+          title: "Live Activity Timeline",
+          summary: `${records.length} live records across ${buckets.length} buckets.`,
+          metadata: {
+            live: true,
+            record_count: records.length,
+            item_count: buckets.reduce((sum, bucket) => sum + bucket.count, 0),
+            latest_record_id: latest?.id,
+            latest_record_updated_at: latest?.updated_at,
+            generated_at: new Date().toISOString(),
+          },
+          updated_at: latest?.updated_at ?? new Date().toISOString(),
+        },
+      });
+    }
+
+    if (req.method === "GET" && url.pathname === "/timeline/activity/watermark") {
+      const pluginParam = url.searchParams.get("plugin_id");
+      const plugin = pluginParam ? readPluginManifest(pluginParam) : undefined;
+      if (pluginParam && !plugin) return send(res, 404, pluginNotFoundBody(pluginParam));
+      const timeWindow = {
+        minutes: url.searchParams.get("minutes") ? Number(url.searchParams.get("minutes")) : undefined,
+        start_time: url.searchParams.get("start_time") ?? url.searchParams.get("startTime") ?? undefined,
+        end_time: url.searchParams.get("end_time") ?? url.searchParams.get("endTime") ?? undefined,
+      };
+      const sourceFilter = url.searchParams.get("source_filter") ?? url.searchParams.get("sourceFilter") ?? "all";
+      if (!["screenpipe", "browser", "runtime", "all"].includes(sourceFilter)) return send(res, 400, { ok: false, error: "invalid source_filter" });
+      if (pluginParam) {
+        const limit = Math.max(Number(url.searchParams.get("limit") ?? 12_000), 1);
+        const eventLimit = Math.max(Number(url.searchParams.get("event_limit") ?? 400), 0);
+        const records = filterRecordsForPlugin(
+          store.recent(contextRecordCandidateLimit({ limit, pluginScoped: true }), undefined, timeWindow),
+          plugin,
+        ).filter(record => watermarkRecordMatchesSourceFilter(record, sourceFilter as any)).slice(0, limit);
+        const events = filterEventsForPlugin(store.listRuntimeEvents({ limit: runtimeEventCandidateLimit({ limit: eventLimit, pluginScoped: true }), timeWindow }), store, plugin)
+          .filter(event => event.event_type !== "view_compiled" && event.event_type !== "runtime_tick_completed")
+          .slice(0, eventLimit);
+        return send(res, 200, {
+          ok: true,
+          ...activityWatermarkFromRecords(records, events),
+          plugin_id: pluginParam,
+          plugin_loaded: true,
+        });
+      }
+      const watermark = store.activityTimelineWatermark({
+        timeWindow,
+        sourceFilter: sourceFilter as "screenpipe" | "browser" | "runtime" | "all",
+        includeRuntimeEvents: url.searchParams.get("include_runtime_events") === "true" || url.searchParams.get("includeRuntimeEvents") === "true",
+      });
+      return send(res, 200, { ok: true, ...watermark });
     }
 
     if (req.method === "POST" && url.pathname === "/timeline/project/compile") {
@@ -1148,6 +1353,326 @@ function httpIngestProcessingPayload(cascade: ContextIngestResult["cascade"], op
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
+}
+
+function mergeViewUpdate(existing: ContextView & { id: string }, body: unknown): ContextView {
+  if (!isPlainObject(body)) return existing;
+  const contentInput = Object.prototype.hasOwnProperty.call(body, "content") ? body.content : existing.content;
+  const metadataInput = Object.prototype.hasOwnProperty.call(body, "metadata") ? body.metadata : existing.metadata;
+  const scopeInput = Object.prototype.hasOwnProperty.call(body, "scope") ? body.scope : existing.scope;
+  const pluginId = typeof body.plugin_id === "string" ? body.plugin_id : undefined;
+  return {
+    ...existing,
+    ...pickViewUpdateFields(body),
+    id: existing.id,
+    view_type: typeof body.view_type === "string" && body.view_type.trim() ? body.view_type.trim() : existing.view_type,
+    content: mergeObjectPatch(contentInput, body.content_patch) ?? {},
+    metadata: {
+      ...(mergeObjectPatch(metadataInput, body.metadata_patch) ?? {}),
+      updated_via: "context_http_update",
+      updated_actor: pluginId ? "plugin" : "application",
+    },
+    scope: pluginId ? { ...(isPlainObject(scopeInput) ? scopeInput : existing.scope ?? {}), plugin_id: pluginId } : (isPlainObject(scopeInput) ? scopeInput : existing.scope),
+  };
+}
+
+function pickViewUpdateFields(body: Record<string, unknown>): Partial<ContextView> {
+  const out: Partial<ContextView> = {};
+  const fields = [
+    "title",
+    "summary",
+    "status",
+    "source_records",
+    "source_views",
+    "compiler",
+    "purpose",
+    "confidence",
+    "stability",
+    "lossiness",
+    "privacy",
+    "validity",
+  ] as const;
+  for (const field of fields) {
+    if (Object.prototype.hasOwnProperty.call(body, field)) (out as Record<string, unknown>)[field] = body[field];
+  }
+  return out;
+}
+
+function mergeObjectPatch(value: unknown, patch: unknown): Record<string, unknown> | undefined {
+  const base = isPlainObject(value) ? value : undefined;
+  if (patch === undefined) return base;
+  if (!isPlainObject(patch)) return base;
+  return deepMergeObjects(base ?? {}, patch);
+}
+
+function deepMergeObjects(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) {
+      delete merged[key];
+      continue;
+    }
+    const current = merged[key];
+    merged[key] = isPlainObject(current) && isPlainObject(value)
+      ? deepMergeObjects(current, value)
+      : value;
+  }
+  return merged;
+}
+
+function watermarkRecordMatchesSourceFilter(record: StoredContextRecord, sourceFilter: "screenpipe" | "browser" | "runtime" | "all") {
+  if (sourceFilter === "all") return true;
+  const hay = `${record.source.type} ${record.source.connector ?? ""} ${record.schema.name}`.toLowerCase();
+  return hay.includes(sourceFilter);
+}
+
+function activityWatermarkFromRecords(records: StoredContextRecord[], events: StoredRuntimeEvent[] = []) {
+  const sortedRecords = [...records].sort((a, b) => {
+    const observedDelta = Date.parse(b.time?.observed_at ?? b.created_at) - Date.parse(a.time?.observed_at ?? a.created_at);
+    if (observedDelta) return observedDelta;
+    const createdDelta = Date.parse(b.created_at) - Date.parse(a.created_at);
+    if (createdDelta) return createdDelta;
+    return b.id.localeCompare(a.id);
+  });
+  const sortedEvents = [...events].sort((a, b) => {
+    const createdDelta = Date.parse(b.created_at) - Date.parse(a.created_at);
+    if (createdDelta) return createdDelta;
+    return b.id.localeCompare(a.id);
+  });
+  const latestRecord = sortedRecords[0];
+  const latestEvent = sortedEvents[0];
+  const latestObservedAt = sortedRecords.reduce<string | undefined>((latest, record) => maxIso(latest, record.time?.observed_at ?? record.created_at), undefined);
+  const latestRecordCreatedAt = sortedRecords.reduce<string | undefined>((latest, record) => maxIso(latest, record.created_at), undefined);
+  const latestEventCreatedAt = sortedEvents.reduce<string | undefined>((latest, event) => maxIso(latest, event.created_at), undefined);
+  const watermark = [
+    "records",
+    records.length,
+    latestObservedAt ?? "",
+    latestRecordCreatedAt ?? "",
+    latestRecord?.id ?? "",
+    "events",
+    events.length,
+    latestEventCreatedAt ?? "",
+    latestEvent?.id ?? "",
+  ].join(":");
+  return {
+    record_count: records.length,
+    latest_observed_at: latestObservedAt,
+    latest_record_created_at: latestRecordCreatedAt,
+    latest_record_id: latestRecord?.id,
+    event_count: events.length,
+    latest_event_created_at: latestEventCreatedAt,
+    latest_event_id: latestEvent?.id,
+    watermark,
+  };
+}
+
+function maxIso(current: string | undefined, next: string | undefined) {
+  if (!next) return current;
+  if (!current) return next;
+  return Date.parse(next) > Date.parse(current) ? next : current;
+}
+
+function cachedFrameImage(frameId: string) {
+  const cached = frameImageCache.get(frameId);
+  if (!cached) return undefined;
+  if (cached.expiresAt < Date.now()) {
+    frameImageCache.delete(frameId);
+    return undefined;
+  }
+  return cached;
+}
+
+function rememberFrameImage(frameId: string, image: { contentType: string; bytes: Uint8Array }) {
+  frameImageCache.set(frameId, { ...image, expiresAt: Date.now() + FRAME_CACHE_TTL_MS });
+  while (frameImageCache.size > FRAME_CACHE_MAX) {
+    const oldest = frameImageCache.keys().next().value;
+    if (!oldest) break;
+    frameImageCache.delete(oldest);
+  }
+}
+
+function summarizeProcessor(processor: ProcessorDefinition, source?: { kind: "observation" | "view"; type?: string }) {
+  const compatible = !source?.type
+    ? true
+    : source.kind === "observation"
+      ? matchesAny(processor.consumes.observations, source.type)
+      : matchesAny(processor.consumes.views, source.type);
+  return {
+    id: processor.id,
+    title: processor.title,
+    version: processor.version,
+    description: processor.description,
+    runtime: processor.runtime.kind,
+    runtime_config: processor.runtime,
+    consumes: processor.consumes,
+    produces: processor.produces,
+    policy: processor.policy,
+    compatible,
+  };
+}
+
+function sendProcessorRunResult(res: any, store: ContextStore, result: Awaited<ReturnType<ProcessorRuntime["processObservation"]>>) {
+  const views = result.views_written.map(id => store.getView(id)).filter((view): view is NonNullable<typeof view> => Boolean(view));
+  const observations = (result.observations_written ?? []).map(id => store.getRecord(id)).filter((record): record is NonNullable<typeof record> => Boolean(record));
+  return send(res, 200, {
+    ok: true,
+    result,
+    views,
+    observations,
+  });
+}
+
+function isTimelineLiveRecord(record: StoredContextRecord): boolean {
+  if (record.schema.name.startsWith("derived.")) return false;
+  if (record.schema.name.startsWith("episode.")) return false;
+  if (record.schema.name === "observation.route_candidate") return false;
+  if (record.schema.name === "observation.screenpipe_workspace_signal") return false;
+  if (record.schema.name === "observation.screenpipe_input_event") return false;
+  if (record.privacy?.retention === "do_not_store") return false;
+  return true;
+}
+
+function recordMatchesTimelineSourceFilter(record: StoredContextRecord, filter: "screenpipe" | "browser" | "runtime" | "all"): boolean {
+  if (filter === "all") return true;
+  const hay = `${record.source.type} ${record.source.connector ?? ""} ${record.schema.name}`.toLowerCase();
+  return hay.includes(filter);
+}
+
+function liveTimelineBuckets(records: StoredContextRecord[], bucketMinutes: number) {
+  const byBucket = new Map<string, Array<Record<string, unknown>>>();
+  for (const record of records) {
+    const item = liveTimelineItem(record);
+    const label = bucketLabelForIso(String(item.observed_at), bucketMinutes);
+    byBucket.set(label, [...(byBucket.get(label) ?? []), item]);
+  }
+  return [...byBucket.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([label, items]) => {
+    const startMs = Date.parse(label);
+    const start = Number.isFinite(startMs) ? new Date(startMs).toISOString() : label;
+    const end = Number.isFinite(startMs) ? new Date(startMs + bucketMinutes * 60_000).toISOString() : label;
+    const topSources = topStrings(items.map(item => String(item.source ?? "")).filter(Boolean), 5);
+    const topApps = topStrings(items.map(item => String(item.app ?? "")).filter(Boolean), 5);
+    const topDomains = topStrings(items.map(item => String(item.domain ?? "")).filter(Boolean), 5);
+    const sorted = items.sort((a, b) => Number(b.importance ?? 0) - Number(a.importance ?? 0) || Date.parse(String(b.observed_at ?? "")) - Date.parse(String(a.observed_at ?? "")));
+    return {
+      label,
+      start,
+      end,
+      count: sorted.length,
+      top_sources: topSources,
+      top_apps: topApps,
+      top_domains: topDomains,
+      top_projects: [],
+      summary: `${sorted.length} live items around ${topDomains[0] ?? topApps[0] ?? topSources[0] ?? "activity"}`,
+      items: sorted.slice(0, 24),
+    };
+  });
+}
+
+function liveTimelineItem(record: StoredContextRecord) {
+  const url = record.content?.url ?? stringValue(record.payload?.browser_url);
+  const domain = record.scope?.domain ?? domainFromUrl(url);
+  const app = record.scope?.app ?? stringValue(record.payload?.app_name) ?? stringValue(record.payload?.app);
+  const observedAt = record.time?.observed_at ?? record.created_at;
+  return {
+    id: `record:${record.id}`,
+    kind: "activity",
+    source: `${record.source.type}${record.source.connector ? `/${record.source.connector}` : ""}`,
+    schema: record.schema.name,
+    title: record.content?.title ?? stringValue(record.payload?.window_name) ?? stringValue(record.payload?.title) ?? record.schema.name,
+    subtitle: domain ?? app ?? record.source.type,
+    url,
+    path: record.content?.path,
+    app,
+    domain,
+    text: record.content?.text,
+    observed_at: observedAt,
+    importance: typeof record.signal?.importance === "number" ? record.signal.importance : record.source.type === "browser" ? 0.5 : 0.35,
+    record_ids: [record.id],
+    stats: {
+      updated_at: record.updated_at,
+      created_at: record.created_at,
+    },
+  };
+}
+
+function bucketLabelForIso(value: string, bucketMinutes: number): string {
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return value;
+  const size = bucketMinutes * 60_000;
+  return new Date(Math.floor(ms / size) * size).toISOString();
+}
+
+function topStrings(values: string[], limit: number): string[] {
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, limit).map(([value]) => value);
+}
+
+function domainFromUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+async function fetchScreenpipeAudioTranscripts(input: { limit: number; minutes: number }): Promise<
+  | { ok: true; query: Record<string, string>; transcripts: Array<Record<string, unknown>> }
+  | { ok: false; query: Record<string, string>; error: string }
+> {
+  const minutes = Math.min(Math.max(input.minutes, 1), 24 * 60);
+  const limit = Math.min(Math.max(input.limit, 1), 2_000);
+  const query = { limit: String(limit), content_type: "audio", start_time: `${minutes}m ago`, source: "screenpipe_sqlite" };
+  try {
+    const db = new DatabaseSync(process.env.SCREENPIPE_DB_PATH ?? `${process.env.HOME ?? ""}/.screenpipe/db.sqlite`, { readOnly: true });
+    try {
+      const rows = db.prepare(`
+        select
+          t.id,
+          t.audio_chunk_id,
+          t.timestamp,
+          t.transcription,
+          t.device,
+          t.speaker_id,
+          t.start_time,
+          t.end_time,
+          c.file_path
+        from audio_transcriptions t indexed by idx_audio_transcriptions_timestamp
+        left join audio_chunks c on c.id = t.audio_chunk_id
+        where t.timestamp >= datetime('now', ?)
+          and t.redacted_at is null
+          and length(trim(t.transcription)) > 0
+        order by t.timestamp desc, t.audio_chunk_id desc, coalesce(t.start_time, 0) desc, t.id desc
+        limit ?
+      `).all(`-${minutes} minutes`, limit) as Array<Record<string, unknown>>;
+      const transcripts = rows.map(row => ({
+        id: `screenpipe:audio_transcription:${row.id}`,
+        observed_at: sqliteTimestampToIso(stringValue(row.timestamp)),
+        text: stringValue(row.transcription),
+        speaker_label: row.speaker_id !== null && row.speaker_id !== undefined ? `speaker:${row.speaker_id}` : undefined,
+        device_name: stringValue(row.device),
+        chunk_id: row.audio_chunk_id,
+        start_time: numberValue(row.start_time),
+        end_time: numberValue(row.end_time),
+        file_path: stringValue(row.file_path),
+        source: "screenpipe_sqlite",
+      })).filter(item => stringValue(item.text));
+      return { ok: true, query, transcripts };
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    return { ok: false, query, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function sqliteTimestampToIso(value?: string): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.includes("T") ? value : value.replace(" ", "T");
+  const hasZone = /(?:Z|[+-]\d\d:?\d\d)$/.test(normalized);
+  return hasZone ? normalized : `${normalized}+00:00`;
 }
 
 export function createContextHttpServer(store = new ContextStore()) {

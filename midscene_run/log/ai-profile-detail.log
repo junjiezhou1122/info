@@ -1,0 +1,1 @@
+[2026-06-19T16:14:34.185+08:00] model usage detail: {"total_tokens":3398,"completion_tokens":82,"prompt_tokens":3316,"completion_tokens_details":{"text_tokens":82},"prompt_tokens_details":{"image_tokens":2503,"cached_tokens":0,"text_tokens":813}}

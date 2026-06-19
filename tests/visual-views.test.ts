@@ -99,6 +99,31 @@ test("VisualFrameView compiler dedupes by Screenpipe frame id across evidence so
   assert.equal(store.listViews({ view_types: ["visual_frame"], active_only: true, limit: 0 }).length, 1);
 }));
 
+test("VisualFrameView compiler force-refreshes an existing Screenpipe frame id", () => withStore(async (store) => {
+  const evidence = store.upsertView({
+    id: "evidence:screen:refresh-frame",
+    view_type: "evidence",
+    title: "Warp - refreshed OCR frame",
+    content: { kind: "screen", subject: { app: "Warp", title: "MemEvo OCR" }, signals: { frame_ids: ["refresh-frame"], text: "old output" } },
+    confidence: 0.8,
+  });
+  let topic = "Old OCR summary";
+  const analyzer: VisualFrameAnalyzer = async () => ({
+    ok: true,
+    content: { app: "Warp", topic, useful_facts: [topic], confidence: 0.8 },
+  });
+
+  const first = await compileVisualFrameViews({ write: true, evidenceViews: [evidence], analyzer, sampleIntervalSeconds: 0 }, store);
+  topic = "Fresh OCR summary";
+  const refreshed = await compileVisualFrameViews({ write: true, force: true, evidenceViews: [evidence], analyzer, sampleIntervalSeconds: 0 }, store);
+  const visual = store.getView("visual_frame:refresh-frame");
+
+  assert.equal(first.views.length, 1);
+  assert.equal(refreshed.views.length, 1);
+  assert.equal(visual?.summary, "Fresh OCR summary");
+  assert.equal(visual?.content?.frame_id, "refresh-frame");
+}));
+
 test("ActivityBlockView compiler aggregates visual frames without creating memory", () => withStore(async (store) => {
   const visual = store.upsertView({
     id: "visual_frame:18358:everos",

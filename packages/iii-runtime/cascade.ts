@@ -1,4 +1,5 @@
 import type { IiiCascadeInput, IiiCascadeResult, IiiCascadeStep, IiiRuntimeClient, ViewWorkerDefinition, ViewWorkerInput, ViewWorkerResult } from "./types.js";
+import { III_PROCESSOR_FUNCTIONS } from "./processor-workers.js";
 import { III_PROGRAM_FUNCTIONS } from "./program-workers.js";
 import { VIEW_WORKER_FUNCTIONS, createViewWorkerDefinitions } from "./view-workers.js";
 
@@ -44,6 +45,7 @@ export async function cascadeFromRecords(input: IiiCascadeInput, iii: IiiRuntime
 
   const initial = [
     III_PROGRAM_FUNCTIONS.processRecord,
+    III_PROCESSOR_FUNCTIONS.youtubeLearning,
     VIEW_WORKER_FUNCTIONS.evidence,
     VIEW_WORKER_FUNCTIONS.workThread,
     VIEW_WORKER_FUNCTIONS.activityTimeline,
@@ -143,7 +145,8 @@ async function runWorker(
 ): Promise<IiiCascadeStep> {
   const definition = definitions.find(item => item.function_id === functionId);
   const knownProgramType = functionId === III_PROGRAM_FUNCTIONS.processRecord ? "program.record" : functionId === III_PROGRAM_FUNCTIONS.processView ? "program.view" : undefined;
-  if (!definition && !knownProgramType) return { function_id: functionId, view_type: "unknown", depth, input, skipped: "definition not found" };
+  const knownProcessorType = functionId.startsWith("processor::") ? "processor" : undefined;
+  if (!definition && !knownProgramType && !knownProcessorType) return { function_id: functionId, view_type: "unknown", depth, input, skipped: "definition not found" };
   if (!iii.trigger) return { function_id: functionId, view_type: definition?.view_type ?? knownProgramType ?? "unknown", depth, input, skipped: "iii trigger unavailable" };
   const payload = functionId === III_PROGRAM_FUNCTIONS.processView
     ? { ...input, view_id: input.source_view_ids?.[0] }
@@ -151,12 +154,12 @@ async function runWorker(
   const result = await iii.trigger({ function_id: functionId, payload });
   return {
     function_id: functionId,
-    view_type: definition?.view_type ?? knownProgramType ?? "unknown",
+    view_type: definition?.view_type ?? knownProgramType ?? knownProcessorType ?? "unknown",
     depth,
     input,
     result: isViewWorkerResult(result) ? result : undefined,
     raw_result: isViewWorkerResult(result) ? undefined : result,
-    skipped: isViewWorkerResult(result) || isProgramWorkerResult(result) ? undefined : "trigger did not return a known worker result",
+    skipped: isViewWorkerResult(result) || isProgramWorkerResult(result) || isProcessorWorkerResult(result) ? undefined : "trigger did not return a known worker result",
   };
 }
 
@@ -225,9 +228,19 @@ function isProgramWorkerResult(value: unknown): value is { result?: { runs?: Arr
 function viewsWrittenByStep(step: IiiCascadeStep): string[] {
   if (step.result) return step.result.views_written;
   const raw = step.raw_result;
+  if (isProcessorWorkerResult(raw)) return raw.views_written;
   if (!isProgramWorkerResult(raw)) return [];
   const runs = raw.result?.runs ?? [];
   return uniqueStrings(runs.flatMap(run => run.written_views ?? []));
+}
+
+function isProcessorWorkerResult(value: unknown): value is { views_written: string[] } {
+  return Boolean(value)
+    && typeof value === "object"
+    && (value as { ok?: unknown }).ok === true
+    && typeof (value as { function_id?: unknown }).function_id === "string"
+    && Array.isArray((value as { views_written?: unknown }).views_written)
+    && Array.isArray((value as { runs?: unknown }).runs);
 }
 
 function uniqueStrings(values: Array<string | undefined>): string[] {

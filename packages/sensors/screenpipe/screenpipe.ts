@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import type { ContextRecord, StoredContextRecord } from "@info/core";
 
 export type ScreenpipePackOptions = {
@@ -12,6 +14,7 @@ export type ScreenpipePackOptions = {
   app_name?: string;
   window_name?: string;
   browser_url?: string;
+  timeout_ms?: number;
 };
 
 
@@ -274,7 +277,7 @@ export function normalizeScreenpipeResult(item: any, index: number, screenpipeUr
 
 export async function fetchScreenpipeRecords(options: ScreenpipePackOptions = {}): Promise<ScreenpipeFetchResult> {
   const screenpipeUrl = options.url ?? process.env.SCREENPIPE_URL ?? "http://localhost:3030";
-  const apiKey = options.api_key ?? await getScreenpipeApiKey();
+  const envApiKey = options.api_key ?? process.env.SCREENPIPE_API_KEY ?? process.env.SCREENPIPE_LOCAL_API_KEY ?? process.env.SCREENPIPE_API_AUTH_KEY;
   const limit = options.limit ?? 8;
   const contentType = options.content_type ?? "all";
   const queryParams: Record<string, string> = {
@@ -290,10 +293,23 @@ export async function fetchScreenpipeRecords(options: ScreenpipePackOptions = {}
 
   const params = new URLSearchParams(queryParams);
   const headers: Record<string, string> = {};
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  if (envApiKey) headers.Authorization = `Bearer ${envApiKey}`;
 
   try {
-    const res = await fetch(`${screenpipeUrl}/search?${params.toString()}`, { headers });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), options.timeout_ms ?? 8_000);
+    const searchUrl = `${screenpipeUrl}/search?${params.toString()}`;
+    let res = await fetch(searchUrl, { headers, signal: controller.signal });
+    if ((res.status === 401 || res.status === 403) && !headers.Authorization) {
+      const fallback = fetchScreenpipeRecordsFromLocalDb(options, screenpipeUrl, queryParams);
+      if (fallback.ok) {
+        clearTimeout(timer);
+        return fallback;
+      }
+      const apiKey = await getScreenpipeApiKey();
+      if (apiKey) res = await fetch(searchUrl, { headers: { Authorization: `Bearer ${apiKey}` }, signal: controller.signal });
+    }
+    clearTimeout(timer);
     if (!res.ok) {
       return { ok: false, url: screenpipeUrl, query: queryParams, records: [], error: `${res.status} ${await res.text()}` };
     }
@@ -307,6 +323,63 @@ export async function fetchScreenpipeRecords(options: ScreenpipePackOptions = {}
     };
   } catch (error: any) {
     return { ok: false, url: screenpipeUrl, query: queryParams, records: [], error: error?.message ?? String(error) };
+  }
+}
+
+function fetchScreenpipeRecordsFromLocalDb(options: ScreenpipePackOptions, screenpipeUrl: string, query: Record<string, string>): ScreenpipeFetchResult {
+  const contentType = String(options.content_type ?? "all").toLowerCase();
+  if (!["all", "ocr", "frame", "frames"].includes(contentType)) {
+    return { ok: false, url: screenpipeUrl, query, records: [], error: `local Screenpipe SQLite fallback does not support content_type=${contentType}` };
+  }
+  const dbPath = process.env.SCREENPIPE_DB_PATH ?? `${process.env.HOME ?? ""}/.screenpipe/db.sqlite`;
+  try {
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const max = db.prepare("select max(id) as id from frames").get() as { id?: number } | undefined;
+    const maxId = Number(max?.id ?? 0);
+    if (!Number.isFinite(maxId) || maxId <= 0) {
+      db.close();
+      return { ok: false, url: screenpipeUrl, query, records: [], error: "local Screenpipe SQLite has no frames" };
+    }
+    const lowerId = Math.max(0, maxId - 2500);
+    const rows = db.prepare(`
+      select
+        f.id,
+        f.timestamp,
+        f.app_name,
+        f.window_name,
+        f.browser_url,
+        coalesce(o.text, f.full_text, f.accessibility_text, '') as text
+      from frames f
+      left join ocr_text o on o.frame_id = f.id
+      where f.id >= ?
+        and coalesce(o.text, f.full_text, f.accessibility_text, '') != ''
+        and not (
+          lower(coalesce(f.app_name, '')) = 'terminal'
+          and lower(coalesce(f.window_name, '')) like '%screenpipe%'
+        )
+        and lower(coalesce(o.text, f.full_text, f.accessibility_text, '')) not like '%screenpipe record checking permissions%'
+      order by f.id desc
+      limit ?
+    `).all(lowerId, options.limit ?? 8) as Array<Record<string, unknown>>;
+    db.close();
+    return {
+      ok: true,
+      url: screenpipeUrl,
+      query: { ...query, source: "screenpipe_sqlite" },
+      records: rows.map((row, index) => normalizeScreenpipeResult({
+        id: row.id,
+        frame_id: row.id,
+        frame_ids: [row.id],
+        timestamp: row.timestamp,
+        app_name: row.app_name,
+        window_name: row.window_name,
+        browser_url: row.browser_url,
+        content_type: "ocr",
+        text: row.text,
+      }, index, screenpipeUrl, options.q)),
+    };
+  } catch (error: any) {
+    return { ok: false, url: screenpipeUrl, query, records: [], error: error?.message ?? String(error) };
   }
 }
 
@@ -430,13 +503,20 @@ export async function fetchScreenpipeFrameContext(frameId: string | number, opti
   }
 }
 
-export async function fetchScreenpipeFrameImage(frameId: string | number, options: { url?: string; api_key?: string } = {}): Promise<{ ok: true; contentType: string; bytes: Uint8Array } | { ok: false; status?: number; error: string }> {
+export async function fetchScreenpipeFrameImage(frameId: string | number, options: { url?: string; api_key?: string; timeout_ms?: number } = {}): Promise<{ ok: true; contentType: string; bytes: Uint8Array } | { ok: false; status?: number; error: string }> {
   const screenpipeUrl = options.url ?? process.env.SCREENPIPE_URL ?? "http://localhost:3030";
-  const apiKey = options.api_key ?? await getScreenpipeApiKey();
-  const headers: Record<string, string> = {};
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const envApiKey = options.api_key ?? process.env.SCREENPIPE_API_KEY ?? process.env.SCREENPIPE_LOCAL_API_KEY ?? process.env.SCREENPIPE_API_AUTH_KEY;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeout_ms ?? 3_000);
   try {
-    const res = await fetch(`${screenpipeUrl}/frames/${encodeURIComponent(String(frameId))}`, { headers });
+    const frameUrl = `${screenpipeUrl}/frames/${encodeURIComponent(String(frameId))}`;
+    const headers: Record<string, string> = {};
+    if (envApiKey) headers.Authorization = `Bearer ${envApiKey}`;
+    let res = await fetch(frameUrl, { headers, signal: controller.signal });
+    if ((res.status === 401 || res.status === 403) && !headers.Authorization) {
+      const apiKey = await getScreenpipeApiKey();
+      if (apiKey) res = await fetch(frameUrl, { headers: { Authorization: `Bearer ${apiKey}` }, signal: controller.signal });
+    }
     if (!res.ok) return { ok: false, status: res.status, error: await res.text() };
     return {
       ok: true,
@@ -444,7 +524,9 @@ export async function fetchScreenpipeFrameImage(frameId: string | number, option
       bytes: new Uint8Array(await res.arrayBuffer()),
     };
   } catch (error: any) {
-    return { ok: false, error: error?.message ?? String(error) };
+    return { ok: false, status: error?.name === "AbortError" ? 504 : undefined, error: error?.name === "AbortError" ? `Screenpipe frame ${frameId} timed out` : error?.message ?? String(error) };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -556,21 +638,27 @@ function dedupeScreenpipeRecords(records: StoredContextRecord[]): StoredContextR
   return [...byId.values()];
 }
 
+let cachedScreenpipeApiKey: string | undefined;
+
 async function getScreenpipeApiKey(): Promise<string | undefined> {
+  if (cachedScreenpipeApiKey) return cachedScreenpipeApiKey;
   if (process.env.SCREENPIPE_API_KEY) return process.env.SCREENPIPE_API_KEY;
   if (process.env.SCREENPIPE_LOCAL_API_KEY) return process.env.SCREENPIPE_LOCAL_API_KEY;
   if (process.env.SCREENPIPE_API_AUTH_KEY) return process.env.SCREENPIPE_API_AUTH_KEY;
-  try {
-    const { execFileSync } = await import("node:child_process");
-    const token = execFileSync("screenpipe", ["auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim().split(/\s+/).at(-1);
-    return token || undefined;
-  } catch {
-    try {
-      const { execFileSync } = await import("node:child_process");
-      const token = execFileSync("npm", ["exec", "--", "screenpipe@latest", "auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim().split(/\s+/).at(-1);
-      return token || undefined;
-    } catch {
-      return undefined;
-    }
+  const direct = await execFileText("screenpipe", ["auth", "token"], 12_000);
+  if (direct) {
+    cachedScreenpipeApiKey = direct.trim().split(/\s+/).at(-1) || undefined;
+    return cachedScreenpipeApiKey;
   }
+  const viaNpm = await execFileText("npm", ["exec", "--", "screenpipe@latest", "auth", "token"], 18_000);
+  cachedScreenpipeApiKey = viaNpm?.trim().split(/\s+/).at(-1) || undefined;
+  return cachedScreenpipeApiKey;
+}
+
+function execFileText(command: string, args: string[], timeout: number): Promise<string | undefined> {
+  return new Promise(resolve => {
+    execFile(command, args, { encoding: "utf8", timeout }, (error: Error | null, stdout: string) => {
+      resolve(error ? undefined : String(stdout ?? ""));
+    });
+  });
 }

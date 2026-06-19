@@ -79,6 +79,42 @@ test("compileActivityTimeline ignores legacy derived and episode Records", () =>
   assert.doesNotMatch(JSON.stringify(result.view.content), /LEGACY EPISODE TIMELINE RECORD/);
 }));
 
+test("compileActivityTimeline renders AI session records as structured timeline metadata", () => withStore((store) => {
+  store.insertRecord({
+    id: "record:ai-session-codex",
+    schema: { name: "observation.ai_session_locator_result", version: 1 },
+    source: { type: "ai_session", connector: "codex-locator" },
+    scope: { project: "info", session: "session-1" },
+    time: { observed_at: fixtureTime() },
+    content: {
+      title: "codex session session-1",
+      path: "/Users/junjie/.codex/sessions/2026/06/19/rollout-session-1.jsonl",
+      text: "codex session session-1 cwd: /Users/junjie/info time: 2026-06-19T05:53:38.326Z -> 2026-06-19T05:54:59.482Z messages: 57, tool calls: 22 files touched: /very/long/path/that/should/not/become/the/main/timeline/body.ts",
+    },
+    payload: {
+      tool: "codex",
+      session_id: "session-1",
+      cwd: "/Users/junjie/info",
+      source_path: "/Users/junjie/.codex/sessions/2026/06/19/rollout-session-1.jsonl",
+      message_count: 57,
+      tool_call_count: 22,
+      files_touched: ["/Users/junjie/info/apps/ui/src/main.tsx", "/Users/junjie/info/packages/views/timeline/activity-timeline.ts"],
+    },
+    privacy: { level: "private", retention: "normal" },
+  });
+
+  const result = compileActivityTimeline({ write: false, limit: 20, includeRuntimeEvents: false }, store);
+  const item = result.buckets.flatMap(bucket => bucket.items)[0];
+
+  assert.equal(result.records_used, 1);
+  assert.equal(item.text, "codex session metadata · 57 messages · 22 tool calls · 2 files touched");
+  assert.equal(item.stats?.message_count, 57);
+  assert.equal(item.stats?.tool_call_count, 22);
+  assert.equal(item.stats?.files_touched_count, 2);
+  assert.deepEqual(item.stats?.files_touched, ["/Users/junjie/info/apps/ui/src/main.tsx", "/Users/junjie/info/packages/views/timeline/activity-timeline.ts"]);
+  assert.doesNotMatch(item.text ?? "", /very\/long\/path/);
+}));
+
 test("compileActivityTimeline keeps low-level Screenpipe workspace signals out of the default UI timeline", () => withStore((store) => {
   store.insertRecord({
     id: "record:screenpipe-window",
@@ -286,6 +322,128 @@ test("compileActivityTimeline can merge continuous browser page samples", () => 
   assert.equal(items[0].stats?.merged_continuous, true);
   assert.equal(items[0].stats?.samples, 3);
   assert.deepEqual(items[0].record_ids, ["record:browser-youtube-0", "record:browser-youtube-1", "record:browser-youtube-2"]);
+}));
+
+test("compileActivityTimeline projects continuous activity into every covered bucket", () => withStore((store) => {
+  for (const [index, observed] of [
+    [0, fixtureTime()],
+    [1, fixtureTime(5 * 60)],
+    [2, fixtureTime(11 * 60)],
+  ] as const) {
+    store.insertRecord({
+      id: `record:browser-long-session-${index}`,
+      schema: { name: "observation.browser_page_heartbeat", version: 1 },
+      source: { type: "browser", connector: "chrome-extension" },
+      scope: { app: "chrome", domain: "github.com" },
+      time: { observed_at: observed },
+      content: { title: "GitHub work session", url: "https://github.com/example/repo" },
+      payload: { dwell_seconds: 300 + index },
+      privacy: { level: "private", retention: "normal" },
+    });
+  }
+
+  const result = compileActivityTimeline({
+    write: false,
+    limit: 20,
+    bucketMinutes: 5,
+    includeRuntimeEvents: false,
+    dedupe: false,
+    summarizeHeartbeats: false,
+    mergeContinuous: true,
+    mergeGapMinutes: 6,
+  }, store);
+
+  assert.equal(result.records_used, 3);
+  assert.equal(result.buckets.length, 3);
+  assert.deepEqual(result.buckets.map(bucket => bucket.count), [1, 1, 1]);
+  assert.ok(result.buckets.every(bucket => bucket.items[0].stats?.merged_continuous === true));
+  assert.equal(new Set(result.buckets.map(bucket => bucket.items[0].id)).size, 3);
+  assert.match(result.buckets[1].items[0].title, /continued/);
+}));
+
+test("compileActivityTimeline supports fixed day ranges independent of sliding minutes", () => withStore((store) => {
+  const startTime = fixtureTime(-120 * 60);
+  const endTime = fixtureTime(60 * 60);
+  store.insertRecord({
+    id: "record:fixed-range-early",
+    schema: { name: "observation.browser_page_visit", version: 1 },
+    source: { type: "browser", connector: "chrome-extension" },
+    scope: { app: "chrome", domain: "example.com" },
+    time: { observed_at: fixtureTime(-90 * 60) },
+    content: { title: "Early page in fixed day range", url: "https://example.com/early" },
+    privacy: { level: "private", retention: "normal" },
+  });
+  store.insertRecord({
+    id: "record:fixed-range-late",
+    schema: { name: "observation.browser_page_visit", version: 1 },
+    source: { type: "browser", connector: "chrome-extension" },
+    scope: { app: "chrome", domain: "example.com" },
+    time: { observed_at: fixtureTime(-5 * 60) },
+    content: { title: "Late page in fixed day range", url: "https://example.com/late" },
+    privacy: { level: "private", retention: "normal" },
+  });
+
+  const result = compileActivityTimeline({
+    minutes: 15,
+    startTime,
+    endTime,
+    write: false,
+    limit: 20,
+    bucketMinutes: 30,
+    includeRuntimeEvents: false,
+  }, store);
+  const titles = result.buckets.flatMap(bucket => bucket.items.map(item => item.title));
+
+  assert.equal(result.records_used, 2);
+  assert.ok(titles.includes("Early page in fixed day range"));
+  assert.ok(titles.includes("Late page in fixed day range"));
+  assert.deepEqual(result.view.scope?.time_range, { start: startTime, end: endTime });
+}));
+
+test("compileActivityTimeline writes a stable day View for fixed day ranges", () => withStore((store) => {
+  const startTime = fixtureTime(-10 * 60 * 60);
+  const endTime = fixtureTime(2 * 60 * 60);
+  store.insertRecord({
+    id: "record:stable-day-view-first",
+    schema: { name: "observation.browser_page_visit", version: 1 },
+    source: { type: "browser", connector: "chrome-extension" },
+    scope: { app: "chrome", domain: "example.com" },
+    time: { observed_at: fixtureTime(-9 * 60 * 60) },
+    content: { title: "Stable day view first", url: "https://example.com/first" },
+    privacy: { level: "private", retention: "normal" },
+  });
+
+  const first = compileActivityTimeline({
+    minutes: 60,
+    startTime,
+    endTime,
+    write: true,
+    limit: 20,
+    includeRuntimeEvents: false,
+  }, store);
+  store.insertRecord({
+    id: "record:stable-day-view-second",
+    schema: { name: "observation.browser_page_visit", version: 1 },
+    source: { type: "browser", connector: "chrome-extension" },
+    scope: { app: "chrome", domain: "example.com" },
+    time: { observed_at: fixtureTime(-30 * 60) },
+    content: { title: "Stable day view second", url: "https://example.com/second" },
+    privacy: { level: "private", retention: "normal" },
+  });
+  const second = compileActivityTimeline({
+    minutes: 60,
+    startTime,
+    endTime,
+    write: true,
+    limit: 20,
+    includeRuntimeEvents: false,
+  }, store);
+
+  assert.equal(first.view.id, second.view.id);
+  assert.match(first.view.id, /^view:timeline:activity:day:\d{4}-\d{2}-\d{2}$/);
+  assert.equal(store.listViews({ view_types: ["timeline.activity"], limit: 10 }).filter(view => view.id === first.view.id).length, 1);
+  assert.equal(second.records_used, 2);
+  assert.equal(second.view.stability, "project");
 }));
 
 test("compileActivityTimeline does not split continuous browser duration on selected text evidence", () => withStore((store) => {

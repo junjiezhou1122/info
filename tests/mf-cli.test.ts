@@ -364,7 +364,7 @@ test("mf processor run can produce View promotion candidates", () => withDb((dbP
   const view = store.getView(result.data.result.views_written[0]);
   assert.equal(view?.view_type, "view.promotion_candidates");
   const candidates = view?.content?.candidates as Array<Record<string, unknown>>;
-  assert.ok(candidates.some(candidate => candidate.action === "create_view" && candidate.target_view_type === "research.brief"));
+  assert.ok(candidates.some(candidate => candidate.action === "create_view" && candidate.target_view_type === "brief.research"));
 }));
 
 test("mf sensor screenpipe search passes filters, normalizes records, and can write observations", () => withDb((dbPath, store) => {
@@ -507,7 +507,7 @@ test("mf evolution candidates show apply verify rollback", () => withDb((dbPath,
     compiler: { id: "processor.view_promotion_engine", mode: "deterministic" },
     content: {
       candidates: [
-        { id: "cand:create:evo", action: "create_view", target_view_type: "research.brief", priority: "high", reason: "Repeated research", rollback: { strategy: "archive_created" } },
+        { id: "cand:create:evo", action: "create_view", target_view_type: "brief.research", priority: "high", reason: "Repeated research", rollback: { strategy: "archive_created" } },
         { id: "cand:retire:evo", action: "retire_view", target_view_id: "view:stale:evo", priority: "low", reason: "Stale view" },
       ],
     },

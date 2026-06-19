@@ -8,6 +8,8 @@ import { ContextStore } from "@info/core";
 import {
   ProcessorRuntime,
   buildSurfaceStateView,
+  createDurableMemoryMinerProcessor,
+  createMemoryDailyUpdateProcessor,
   createMemoryProfileUpdateProcessor,
   createProcessorRegistry,
   createProjectCurrentProcessor,
@@ -106,6 +108,53 @@ test("a processor can consume a View produced by another processor", async () =>
   assert.equal(view?.view_type, "memory.preference");
   assert.deepEqual(view?.source_views, ["advice:writing:1"]);
   assert.equal(view?.content?.source_suggestion, "Use simpler wording.");
+}));
+
+test("agent task processor writes markdown-backed Views through the shared View writer", async () => withStore(async (store) => {
+  const processor: ProcessorDefinition = {
+    id: "agent.memory_profile_edit",
+    version: "0.0.1",
+    consumes: { observations: ["observation.codex.message"] },
+    produces: { views: ["memory.profile"] },
+    runtime: { kind: "agent_task", agent: "codex" },
+    handler: () => ({
+      views: [{
+        id: "view:memory-profile:agent-writer",
+        type: "memory.profile",
+        title: "Memory Profile",
+        summary: "Agent-authored profile update.",
+        status: "candidate",
+        scope: { user: "default" },
+        content: {
+          summary: "Agent-authored profile update.",
+          subject: "default",
+          preference: "Keep View writing actor-agnostic.",
+        },
+      }],
+    }),
+  };
+  const observation = store.insertRecord({
+    id: "obs:agent-writer:1",
+    schema: { name: "observation.codex.message", version: 1 },
+    source: { type: "ai_session", connector: "codex" },
+    content: { text: "Agent should be able to write any View through the processor path." },
+    privacy: { level: "private", retention: "normal" },
+  });
+
+  const runtime = new ProcessorRuntime({ store, processors: [processor] });
+  const result = await runtime.processObservation(observation);
+  const view = store.getView(result.views_written[0]);
+
+  assert.equal(view?.view_type, "memory.profile");
+  assert.equal(view?.compiler?.mode, "llm");
+  assert.equal(view?.content?.markdown_path, "memory/profile/default.md");
+  assert.match(String(view?.content?.markdown), /Agent-authored profile update/);
+  assert.deepEqual(view?.metadata?.view_storage, {
+    kind: "markdown",
+    content_key: "markdown",
+    path_template: "memory/profile/{subject}.md",
+    description: "Canonical profile body lives as editable markdown, with durable facts mirrored in View content.",
+  });
 }));
 
 test("view promotion engine produces adaptive ViewGraph evolution candidates", async () => withStore(async (store) => {
@@ -545,6 +594,93 @@ test("memory_profile_update processor writes profile and preferences from feedba
   assert.equal(written.some(view => view?.view_type === "memory.profile"), true);
   assert.equal(written.some(view => view?.view_type === "memory.preferences"), true);
   assert.equal(written.find(view => view?.view_type === "memory.preferences")?.compiler?.id, "processor.memory_profile_update");
+}));
+
+test("memory_daily_update processor writes accepted deterministic markdown-backed daily memory", async () => withStore(async (store) => {
+  const now = new Date("2026-06-18T10:00:00.000Z");
+  const record = store.insertRecord({
+    id: "obs:daily:codex:1",
+    schema: { name: "observation.codex.message", version: 1 },
+    source: { type: "ai_session", connector: "codex" },
+    scope: { project: "info", project_path: "/Users/junjie/info" },
+    time: { observed_at: "2026-06-18T09:30:00.000Z" },
+    content: { title: "Decision: add memory.daily producer", text: "Implement deterministic daily memory from project.current and work.focus_set." },
+    payload: { cwd: "/Users/junjie/info", commands_run: ["pnpm test"] },
+    privacy: { level: "private", retention: "normal" },
+  });
+  store.upsertView({
+    id: "view:project_current:daily",
+    view_type: "project.current",
+    status: "accepted",
+    title: "Project Current",
+    summary: "Implement memory.daily automatic producer.",
+    scope: { project: "info", project_path: "/Users/junjie/info" },
+    content: { focus: "memory.daily automatic producer" },
+  });
+  store.upsertView({
+    id: "view:work_focus:daily",
+    view_type: "work.focus_set",
+    status: "accepted",
+    title: "Work Focus",
+    content: { active_lanes: [{ lane_key: "project:/Users/junjie/info" }] },
+  });
+
+  const runtime = new ProcessorRuntime({ store, processors: [createMemoryDailyUpdateProcessor({ now })] });
+  const result = await runtime.processObservation(record);
+
+  assert.deepEqual(result.processors_matched, ["processor.memory_daily_update"]);
+  assert.deepEqual(result.views_written, ["memory:daily:2026-06-18"]);
+  const view = store.getView("memory:daily:2026-06-18");
+  assert.equal(view?.view_type, "memory.daily");
+  assert.equal(view?.status, "accepted");
+  assert.equal(view?.compiler?.id, "processor.memory_daily_update");
+  assert.equal(view?.content?.markdown_path, "memory/daily/2026-06-18.md");
+  assert.match(String(view?.content?.markdown), /# Daily Memory 2026-06-18/);
+  assert.ok(view?.source_records?.includes("obs:daily:codex:1"));
+  assert.ok(view?.source_views?.includes("view:project_current:daily"));
+}));
+
+test("durable_memory_miner directly writes workflow and collaboration memories", async () => withStore(async (store) => {
+  const now = new Date("2026-06-18T10:00:00.000Z");
+  const codex = store.insertRecord({
+    id: "obs:durable:codex:1",
+    schema: { name: "observation.codex.message", version: 1 },
+    source: { type: "ai_session", connector: "codex" },
+    scope: { project: "info", project_path: "/Users/junjie/info" },
+    content: { title: "Implement processor tests", text: "Read relevant files, implement the processor, then verify with tests." },
+    payload: { cwd: "/Users/junjie/info", commands_run: ["pnpm typecheck", "node --test tests/processor-runtime.test.ts"] },
+    privacy: { level: "private", retention: "normal" },
+  });
+  store.insertRecord({
+    id: "feedback:durable:1",
+    schema: { name: "feedback.output.edited", version: 1 },
+    source: { type: "user" },
+    content: { title: "User says directly implement", text: "请先读相关文件，然后直接实现，最后列出测试结果。" },
+    privacy: { level: "private", retention: "normal" },
+  });
+  store.upsertView({
+    id: "memory:daily:2026-06-18",
+    view_type: "memory.daily",
+    status: "accepted",
+    summary: "Read context, implement, verify.",
+    content: { summary: "Read context, implement, verify.", markdown: "Prefer direct implementation with tests." },
+  });
+
+  const runtime = new ProcessorRuntime({ store, processors: [createDurableMemoryMinerProcessor({ now })] });
+  const result = await runtime.processObservation(codex);
+
+  assert.deepEqual(result.processors_matched, ["processor.durable_memory_miner"]);
+  const written = result.views_written.map(id => store.getView(id));
+  const workflow = written.find(view => view?.view_type === "memory.workflow_patterns");
+  const collaboration = written.find(view => view?.view_type === "memory.agent_collaboration_style");
+  assert.equal(workflow?.status, "accepted");
+  assert.equal(workflow?.compiler?.id, "processor.workflow_pattern_miner");
+  assert.match(String(workflow?.content?.claim), /Workflow pattern/);
+  assert.equal(collaboration?.status, "accepted");
+  assert.equal(collaboration?.compiler?.id, "processor.agent_collaboration_style");
+  assert.match(String(collaboration?.content?.claim), /direct implementation/);
+  assert.ok(workflow?.source_records?.includes("obs:durable:codex:1"));
+  assert.ok(collaboration?.source_records?.includes("feedback:durable:1"));
 }));
 
 test("project inbox tasks and decisions processors write their project views", async () => withStore(async (store) => {

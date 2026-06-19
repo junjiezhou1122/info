@@ -191,7 +191,7 @@ export function LanguageReviewView() {
     try {
       const response = (await chrome.runtime.sendMessage({
         type: "list-ambient-tasks",
-        viewTypes: ["app.language.review_queue", "memory.language.difficult_segments"],
+        viewTypes: ["learning.review_queue", "app.language.review_queue", "memory.language.difficult_segments"],
         limit: 50,
         activeOnly: false,
       })) as ListResponse;
@@ -225,7 +225,7 @@ export function LanguageReviewView() {
   }, [load, loadRecentGaps]);
 
   const queueItems = useMemo(
-    () => items.filter(i => i.view_type === "app.language.review_queue"),
+    () => items.filter(i => i.view_type === "learning.review_queue" || i.view_type === "app.language.review_queue"),
     [items],
   );
   const memoryItems = useMemo(

@@ -17,7 +17,7 @@ export function createProjectInboxProcessor(options: ProjectInboxProcessorOption
     description: "Collects project-relevant unresolved observations and resources awaiting triage.",
     consumes: {
       observations: ["observation.browser_page_snapshot", "observation.codex.message"],
-      views: ["research.brief", "writing.advice"],
+      views: ["brief.research", "advice.writing_assist", "research.brief", "writing.advice"],
     },
     produces: { views: [PROJECT_INBOX_VIEW_TYPE] },
     runtime: { kind: "local" },
@@ -36,7 +36,7 @@ export function projectInboxHandler(options: ProjectInboxProcessorOptions = {}):
         record.schema.name === "observation.codex.message"
       )
       .slice(0, limit);
-    const briefViews = context.store.listViews({ view_types: ["research.brief", "writing.advice"], active_only: true, limit });
+    const briefViews = context.store.listViews({ view_types: ["brief.research", "advice.writing_assist", "research.brief", "writing.advice"], active_only: true, limit });
 
     const items = [
       ...recentRecords.map((record: StoredContextRecord) => ({

@@ -7,6 +7,8 @@ export const ACTIVITY_TIMELINE_COMPILER_ID = "builtin.activity-timeline";
 
 export type CompileActivityTimelineOptions = {
   minutes?: number;
+  startTime?: string;
+  endTime?: string;
   limit?: number;
   eventLimit?: number;
   bucketMinutes?: number;
@@ -71,16 +73,19 @@ export type CompileActivityTimelineResult = {
 export function compileActivityTimeline(options: CompileActivityTimelineOptions = {}, store = new ContextStore()): CompileActivityTimelineResult {
   const generatedAt = new Date().toISOString();
   const minutes = options.minutes ?? 24 * 60;
+  const endTime = options.endTime ?? generatedAt;
+  const startTime = options.startTime ?? new Date(Date.parse(endTime) - minutes * 60_000).toISOString();
   const limit = options.limit ?? 300;
   const bucketMinutes = options.bucketMinutes ?? chooseBucketMinutes(minutes);
-  const range = { start: new Date(Date.parse(generatedAt) - minutes * 60_000).toISOString(), end: generatedAt };
+  const range = { start: startTime, end: endTime };
+  const timeWindow = { start_time: startTime, end_time: endTime, minutes };
   const candidateLimit = options.records ? limit : Math.max(limit * 3, limit + 50);
   const sourceFilter = options.sourceFilter ?? "all";
   const candidates = options.records ?? (sourceFilter === "all"
-    ? store.recent(candidateLimit, undefined, { minutes })
-    : store.recentBySourceFilter(sourceFilter, candidateLimit, undefined, { minutes }));
+    ? store.recent(candidateLimit, undefined, timeWindow)
+    : store.recentBySourceFilter(sourceFilter, candidateLimit, undefined, timeWindow));
   const records = candidates.filter(record => isRawActivityRecord(record, options)).slice(0, limit);
-  const rawRuntimeEvents = options.runtimeEvents ?? store.listRuntimeEvents({ limit: Math.max((options.eventLimit ?? 80) * 3, options.eventLimit ?? 80), timeWindow: { minutes } });
+  const rawRuntimeEvents = options.runtimeEvents ?? store.listRuntimeEvents({ limit: Math.max((options.eventLimit ?? 80) * 3, options.eventLimit ?? 80), timeWindow });
   const runtimeEvents = options.includeRuntimeEvents === false
     ? []
     : filterEventsForPlugin(rawRuntimeEvents, store)
@@ -88,10 +93,13 @@ export function compileActivityTimeline(options: CompileActivityTimelineOptions 
       .slice(0, options.eventLimit ?? 80);
   const items = buildTimelineItems(records, runtimeEvents, options);
   const buckets = bucketItems(items, bucketMinutes, options);
+  const fixedDayRange = hasExplicitDayRange(options, range);
+  const viewId = activityTimelineViewId(range, minutes, fixedDayRange);
+  const title = options.title ?? activityTimelineTitle(range, minutes, fixedDayRange);
   const view: ContextView = {
-    id: `view:timeline:activity:${minutes}m:${generatedAt.slice(0, 13)}`,
+    id: viewId,
     view_type: "timeline.activity",
-    title: options.title ?? `Activity timeline (${minutes}m)`,
+    title,
     summary: `${items.length} activity items from ${records.length} records and ${runtimeEvents.length} runtime events across ${buckets.length} buckets.`,
     status: "candidate",
     source_records: records.map(record => record.id),
@@ -102,11 +110,11 @@ export function compileActivityTimeline(options: CompileActivityTimelineOptions 
       minutes,
       bucket_minutes: bucketMinutes,
       buckets,
-      items: items.slice(0, 500),
+      items: items.slice(0, 5_000),
       signals: summarizeItems(items),
     },
     confidence: 0.9,
-    stability: minutes <= 240 ? "session" : "project",
+    stability: fixedDayRange || minutes > 240 ? "project" : "session",
     lossiness: "medium",
     privacy: { level: "private", retention: "normal", allow_embedding: false, allow_llm_summary: true, allow_external_llm: false, allow_external_reader: false },
     metadata: { generated_at: generatedAt, record_count: records.length, runtime_event_count: runtimeEvents.length, item_count: items.length },
@@ -129,12 +137,42 @@ export function compileActivityTimeline(options: CompileActivityTimelineOptions 
   return { ok: true, compiler_id: ACTIVITY_TIMELINE_COMPILER_ID, view: stored, records_used: records.length, events_used: runtimeEvents.length, buckets };
 }
 
+function activityTimelineViewId(range: { start: string; end: string }, minutes: number, fixedDayRange: boolean): string {
+  if (fixedDayRange) return `view:timeline:activity:day:${timelineDayKey(range.start)}`;
+  return `view:timeline:activity:${minutes}m:${new Date(range.end).toISOString().slice(0, 13)}`;
+}
+
+function activityTimelineTitle(range: { start: string; end: string }, minutes: number, fixedDayRange: boolean): string {
+  if (fixedDayRange) return `Activity timeline (${timelineDayKey(range.start)})`;
+  return `Activity timeline (${minutes}m)`;
+}
+
+function hasExplicitDayRange(options: CompileActivityTimelineOptions, range: { start?: string; end?: string }): boolean {
+  if (!options.startTime || !options.endTime) return false;
+  if (!range.start || !range.end) return false;
+  const startMs = Date.parse(range.start);
+  const endMs = Date.parse(range.end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return false;
+  return endMs - startMs > 4 * 60 * 60_000;
+}
+
+function timelineDayKey(start: string): string {
+  const startMs = Date.parse(start);
+  if (!Number.isFinite(startMs)) return start.slice(0, 10);
+  const midday = new Date(startMs + 12 * 60 * 60_000);
+  const year = midday.getFullYear();
+  const month = String(midday.getMonth() + 1).padStart(2, "0");
+  const day = String(midday.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function isRawActivityRecord(record: StoredContextRecord, options: CompileActivityTimelineOptions = {}): boolean {
   if (record.schema.name.startsWith("derived.")) return false;
   if (record.schema.name.startsWith("episode.")) return false;
   if (!recordMatchesSourceFilter(record, options.sourceFilter)) return false;
   if (isScreenpipeTimelineEcho(record)) return false;
   if (!options.includeLowLevelScreenpipe && isDefaultActivityNoise(record)) return false;
+  if (!options.includeLowLevelScreenpipe && record.schema.name === "observation.route_candidate") return false;
   if (!options.includeLowLevelScreenpipe && record.schema.name === "observation.screenpipe_workspace_signal") return false;
   if (!options.includeLowLevelScreenpipe && record.schema.name === "observation.screenpipe_input_event") return false;
   if (record.privacy?.retention === "do_not_store") return false;
@@ -386,8 +424,9 @@ function bucketItems(items: ActivityTimelineItem[], bucketMinutes: number, optio
   const byBucket = new Map<string, ActivityTimelineItem[]>();
   const itemLimit = options.bucketItemLimit ?? 30;
   for (const item of items) {
-    const label = bucketLabel(item.observed_at, bucketMinutes);
-    byBucket.set(label, [...(byBucket.get(label) ?? []), item]);
+    for (const [label, bucketItem] of bucketPlacements(item, bucketMinutes)) {
+      byBucket.set(label, [...(byBucket.get(label) ?? []), bucketItem]);
+    }
   }
   return [...byBucket.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([label, bucketItems]) => {
     const startMs = Date.parse(label);
@@ -411,6 +450,39 @@ function bucketItems(items: ActivityTimelineItem[], bucketMinutes: number, optio
       items: itemLimit === false ? sorted : sorted.slice(0, itemLimit),
     };
   });
+}
+
+function bucketPlacements(item: ActivityTimelineItem, bucketMinutes: number): Array<[string, ActivityTimelineItem]> {
+  const start = stringStatFromItem(item, "start");
+  const end = stringStatFromItem(item, "end");
+  if (!start || !end || item.stats?.merged_continuous !== true) {
+    return [[bucketLabel(item.observed_at, bucketMinutes), item]];
+  }
+  const labels = bucketLabelsForRange(start, end, bucketMinutes);
+  if (labels.length <= 1) return [[bucketLabel(item.observed_at, bucketMinutes), item]];
+  return labels.map(label => [label, bucketContinuationItem(item, label, labels.at(-1) === label)]);
+}
+
+function bucketContinuationItem(item: ActivityTimelineItem, label: string, isEndBucket: boolean): ActivityTimelineItem {
+  const suffix = isEndBucket ? "" : " · continued";
+  return {
+    ...item,
+    id: `${item.id}:bucket:${label}`,
+    title: isEndBucket ? item.title : `${item.title}${suffix}`,
+    stats: { ...(item.stats ?? {}), bucket_projection: true, projected_bucket: label },
+  };
+}
+
+function bucketLabelsForRange(start: string, end: string, bucketMinutes: number): string[] {
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return [];
+  const size = bucketMinutes * 60_000;
+  const first = Math.floor(startMs / size) * size;
+  const last = Math.floor(Math.max(startMs, endMs - 1) / size) * size;
+  const labels: string[] = [];
+  for (let t = last; t >= first; t -= size) labels.push(new Date(t).toISOString());
+  return labels;
 }
 
 function summarizeItems(items: ActivityTimelineItem[]) {
@@ -453,6 +525,7 @@ function subtitleForRecord(record: StoredContextRecord): string | undefined {
 }
 
 function textOf(record: StoredContextRecord): string | undefined {
+  if (isAiSessionRecord(record)) return aiSessionTimelineText(record);
   const text = stringValue(record.content?.text) ?? stringValue(record.payload?.text);
   if (!text) return undefined;
   return text.replace(/\s+/g, " ").trim().slice(0, 800) || undefined;
@@ -460,6 +533,25 @@ function textOf(record: StoredContextRecord): string | undefined {
 
 function recordStats(record: StoredContextRecord): Record<string, unknown> | undefined {
   const out: Record<string, unknown> = {};
+  if (isAiSessionRecord(record)) {
+    for (const key of ["tool", "session_id", "cwd", "source_path", "source_uri", "started_at", "ended_at", "last_activity_at"] as const) {
+      if (record.payload?.[key] !== undefined && record.payload?.[key] !== "") out[key] = record.payload[key];
+    }
+    for (const key of ["message_count", "user_message_count", "assistant_message_count", "tool_call_count"] as const) {
+      const value = Number(record.payload?.[key]);
+      if (Number.isFinite(value)) out[key] = value;
+    }
+    const files = stringArray(record.payload?.files_touched);
+    const commands = stringArray(record.payload?.commands_run);
+    if (files.length) {
+      out.files_touched_count = files.length;
+      out.files_touched = files.slice(0, 8);
+    }
+    if (commands.length) {
+      out.commands_run_count = commands.length;
+      out.commands_run = commands.slice(0, 5);
+    }
+  }
   for (const key of ["content_type", "app_name", "window_name", "browser_url", "minutes", "frame_count", "frame_id", "frame_ids", "role", "text_source", "node_count", "event_type", "capture_trigger"] as const) {
     if (record.payload?.[key] !== undefined && record.payload?.[key] !== "") out[key] = record.payload[key];
   }
@@ -490,6 +582,24 @@ function titleForRecord(record: StoredContextRecord): string {
     return "Screen OCR";
   }
   return record.content?.title ?? record.content?.url ?? record.content?.path ?? record.schema.name;
+}
+
+function isAiSessionRecord(record: StoredContextRecord): boolean {
+  return record.schema.name.includes("ai_session") || record.source.type === "ai_session";
+}
+
+function aiSessionTimelineText(record: StoredContextRecord): string | undefined {
+  const tool = stringValue(record.payload?.tool) ?? record.source.connector?.replace(/-locator$/, "") ?? "AI";
+  const messageCount = Number(record.payload?.message_count);
+  const toolCallCount = Number(record.payload?.tool_call_count);
+  const filesTouched = stringArray(record.payload?.files_touched).length;
+  const parts = [
+    `${tool} session metadata`,
+    Number.isFinite(messageCount) ? `${messageCount} messages` : undefined,
+    Number.isFinite(toolCallCount) ? `${toolCallCount} tool calls` : undefined,
+    filesTouched ? `${filesTouched} files touched` : undefined,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : undefined;
 }
 
 function attributionParts(record: StoredContextRecord): string[] {
@@ -729,6 +839,10 @@ function frameIdsOfRecord(record: StoredContextRecord): Array<string | number> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
 }
 
 function stringStatFromItem(item: ActivityTimelineItem, key: string): string | undefined {

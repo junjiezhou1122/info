@@ -52,8 +52,9 @@ export function nextViewCursor(views: Array<{ updated_at?: string }>, fallback?:
   }, fallback);
 }
 
-export function viewListCandidateLimit(input: { limit: number; query?: string; pluginScoped: boolean; summaryOnly?: boolean; boundedSummary?: boolean }): number {
+export function viewListCandidateLimit(input: { limit: number; query?: string; pluginScoped: boolean; summaryOnly?: boolean; boundedSummary?: boolean; exactType?: boolean }): number {
   if (input.limit <= 0) return 0;
+  if (input.exactType && !input.query && !input.pluginScoped) return input.limit;
   if (input.summaryOnly && input.boundedSummary && !input.query && !input.pluginScoped) return input.limit;
   if (input.pluginScoped) return Math.max(input.limit * 20, 200);
   // View provenance/scope filtering can remove many recent candidates.
@@ -152,6 +153,11 @@ export function summarizeViewContent(content: ContextView["content"]) {
     if (topics.length) summary.topics = topics;
     const intents = Array.isArray(content?.stated_intents) ? content.stated_intents.filter(item => typeof item === "string").slice(0, 3) : [];
     if (intents.length) summary.stated_intents = intents;
+  }
+  if (kind === "screen_semantics") {
+    if (typeof content?.frame_id === "string" || typeof content?.frame_id === "number") summary.frame_id = content.frame_id;
+    const frameIds = Array.isArray(content?.frame_ids) ? content.frame_ids.filter(item => typeof item === "string" || typeof item === "number").slice(0, 6) : [];
+    if (frameIds.length) summary.frame_ids = frameIds;
   }
   return summary;
 }

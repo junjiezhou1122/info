@@ -12,6 +12,7 @@ This gives the agent a visual automation fallback for pages where DOM selectors 
 
 ```bash
 export CHROME_ACP_MIDSCENE=1
+export CHROME_ACP_EXPOSE_MIDSCENE=1
 export MIDSCENE_MODEL_BASE_URL="https://openrouter.ai/api/v1"
 export MIDSCENE_MODEL_API_KEY="..."
 export MIDSCENE_MODEL_NAME="qwen/qwen3.7-plus"
@@ -55,4 +56,4 @@ Recommended agent policy:
 
 ## Notes
 
-Midscene commands need a strong vision-grounding model. If no model env is set, do not enable `CHROME_ACP_MIDSCENE`; the MCP server may start but actions will fail at inference time.
+Midscene commands need a strong vision-grounding model. If no model env is set, do not enable `CHROME_ACP_MIDSCENE`; the MCP server will keep Midscene tools hidden unless `CHROME_ACP_EXPOSE_MIDSCENE=1`, `CHROME_ACP_MIDSCENE=1`, and all `MIDSCENE_MODEL_*` values are present.

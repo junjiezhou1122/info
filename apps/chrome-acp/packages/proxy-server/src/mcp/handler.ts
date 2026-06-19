@@ -23,6 +23,7 @@ import {
 import { log } from "../logger.js";
 import { executeInfoTool } from "./info-handler.js";
 import { executeMidsceneVisionAct } from "./midscene-handler.js";
+import { isMidsceneToolExposed, midsceneUnavailableMessage } from "./midscene-config.js";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 
@@ -428,6 +429,12 @@ async function executeCurrentBrowserTool(
   },
 ): Promise<McpToolCallResult> {
   if (name === "browser_current_vision_act") {
+    if (!isMidsceneToolExposed()) {
+      return {
+        content: [{ type: "text", text: midsceneUnavailableMessage() }],
+        isError: true,
+      };
+    }
     return executeMidsceneVisionAct({
       intent: args.intent,
       target: args.target,
@@ -527,19 +534,14 @@ async function handleToolCall(
   }
 
   if (params.name === "browser_vision_act") {
-    const exposed =
-      process.env.CHROME_ACP_EXPOSE_MIDSCENE === "1" ||
-      process.env.CHROME_ACP_EXPOSE_MIDSCENE === "true";
-    if (!exposed) {
+    if (!isMidsceneToolExposed()) {
       return {
         jsonrpc: "2.0",
         id,
         result: {
           content: [{
             type: "text",
-            text:
-              "browser_vision_act is hidden by default. Use browser_tabs, browser_observe, and browser_act for normal page automation. " +
-              "Restart the proxy with CHROME_ACP_EXPOSE_MIDSCENE=1 only if visual automation is explicitly needed.",
+            text: midsceneUnavailableMessage(),
           }],
           isError: true,
         },

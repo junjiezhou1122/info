@@ -192,6 +192,43 @@ test("POST /agent/tasks queues and processes tasks through the HTTP contract", a
   assert.ok(store.listViews({ view_types: ["brief.background_research"], limit: 5 }).length >= 1);
 }));
 
+test("GET /processors lists compatible processors for a source type", async () => withStore(async (store) => {
+  const response = await request(store, "/processors?source_kind=observation&source_type=observation.screenpipe_activity");
+  const body = response.body as { ok: boolean; processors: Array<{ id: string; consumes: { observations?: string[] }; produces: { views?: string[] }; compatible?: boolean }> };
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.ok(body.processors.some(processor => processor.id === "processor.screenpipe_surface"));
+  assert.ok(body.processors.every(processor => processor.compatible !== false));
+}));
+
+test("POST /processors/run creates Views from an Observation input", async () => withStore(async (store) => {
+  const record = store.insertRecord({
+    id: "record:http-processor-screenpipe",
+    schema: { name: "observation.screenpipe_activity", version: 1 },
+    source: { type: "screenpipe", connector: "screenpipe" },
+    content: {
+      app_name: "Cursor",
+      window_name: "info - Cursor",
+      ocr_text: "Implement dynamic processor-created views.",
+    },
+    privacy: { level: "private", retention: "normal" },
+  });
+
+  const response = await request(store, "/processors/run", {
+    method: "POST",
+    body: { processor_id: "processor.screenpipe_surface", record_id: record.id },
+  });
+  const body = response.body as { ok: boolean; result: { views_written: string[] }; views: Array<{ id: string; view_type: string; source_records?: string[] }> };
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.views.length, 1);
+  assert.equal(body.views[0].view_type, "screenpipe.surface");
+  assert.ok(body.views[0].source_records?.includes(record.id));
+  assert.deepEqual(body.result.views_written, [body.views[0].id]);
+}));
+
 test("POST /agent/tasks rejects plugin-scoped queue or process requests", async () => withStore(async (store) => {
   const response = await request(store, "/agent/tasks?plugin_id=external-agent", {
     method: "POST",
@@ -6484,6 +6521,95 @@ test("POST /timeline/activity/compile ignores newer legacy Records before limiti
   assert.equal(response.body.records_used, 1);
   assert.deepEqual(response.body.view.source_records, [visible.id]);
   assert.doesNotMatch(JSON.stringify(response.body.view), /NEWER LEGACY ACTIVITY SOURCE/);
+}));
+
+test("POST /timeline/activity/compile honors fixed day ranges", async () => withStore(async (store) => {
+  const now = Date.now();
+  const startTime = new Date(now - 12 * 60 * 60_000).toISOString();
+  const endTime = new Date(now + 60_000).toISOString();
+  const early = store.insertRecord({
+    id: "record:http-activity-fixed-range-early",
+    schema: { name: "observation.browser_ambient_requested", version: 1 },
+    source: { type: "browser", connector: "chrome-extension" },
+    time: { observed_at: new Date(now - 9 * 60 * 60_000).toISOString() },
+    content: { title: "Early HTTP activity should stay visible" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  const late = store.insertRecord({
+    id: "record:http-activity-fixed-range-late",
+    schema: { name: "observation.browser_ambient_requested", version: 1 },
+    source: { type: "browser", connector: "chrome-extension" },
+    time: { observed_at: new Date(now - 5 * 60_000).toISOString() },
+    content: { title: "Late HTTP activity should stay visible" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const response = await request(store, "/timeline/activity/compile", {
+    method: "POST",
+    body: {
+      minutes: 15,
+      start_time: startTime,
+      end_time: endTime,
+      limit: 20,
+      event_limit: 0,
+      write: true,
+      include_runtime_events: false,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.records_used, 2);
+  assert.deepEqual(response.body.view.source_records.sort(), [early.id, late.id].sort());
+  assert.match(response.body.view.id, /^view:timeline:activity:day:\d{4}-\d{2}-\d{2}$/);
+  assert.deepEqual(response.body.view.scope.time_range, { start: startTime, end: endTime });
+}));
+
+test("GET /timeline/activity/watermark changes only for timeline source activity", async () => withStore(async (store) => {
+  const now = Date.now();
+  const startTime = new Date(now - 60_000).toISOString();
+  const endTime = new Date(now + 60 * 60_000).toISOString();
+  const first = store.insertRecord({
+    id: "record:http-activity-watermark-first",
+    schema: { name: "observation.browser_ambient_requested", version: 1 },
+    source: { type: "browser", connector: "chrome-extension" },
+    time: { observed_at: new Date(now - 10 * 60_000).toISOString() },
+    content: { title: "First watermark activity" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+
+  const initial = await request(store, `/timeline/activity/watermark?start_time=${encodeURIComponent(startTime)}&end_time=${encodeURIComponent(endTime)}`);
+  assert.equal(initial.status, 200);
+  assert.equal(initial.body.ok, true);
+  assert.equal(initial.body.record_count, 1);
+  assert.equal(initial.body.latest_record_id, first.id);
+
+  await request(store, "/timeline/activity/compile", {
+    method: "POST",
+    body: {
+      start_time: startTime,
+      end_time: endTime,
+      limit: 20,
+      event_limit: 20,
+      write: true,
+      include_runtime_events: true,
+    },
+  });
+  const afterCompile = await request(store, `/timeline/activity/watermark?start_time=${encodeURIComponent(startTime)}&end_time=${encodeURIComponent(endTime)}`);
+  assert.equal(afterCompile.body.watermark, initial.body.watermark);
+
+  const second = store.insertRecord({
+    id: "record:http-activity-watermark-second",
+    schema: { name: "observation.screenpipe_activity", version: 1 },
+    source: { type: "screenpipe", connector: "screenpipe" },
+    time: { observed_at: new Date(now - 2 * 60_000).toISOString() },
+    content: { title: "Second watermark activity" },
+    privacy: { level: "private", retention: "normal", allow_external_llm: false },
+  });
+  const changed = await request(store, `/timeline/activity/watermark?start_time=${encodeURIComponent(startTime)}&end_time=${encodeURIComponent(endTime)}`);
+  assert.notEqual(changed.body.watermark, initial.body.watermark);
+  assert.equal(changed.body.record_count, 1);
+  assert.equal(changed.body.latest_record_id, second.id);
 }));
 
 test("POST /timeline/activity/compile with plugin_id does not let hidden records or events starve visible activity", async () => {
