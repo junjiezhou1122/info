@@ -2,6 +2,7 @@ import { ContextStore } from "@info/core";
 import type { LlmOptions, StoredContextRecord, StoredContextView, StoredRuntimeEvent } from "@info/core";
 import { compileEvidenceViews } from "./evidence/index.js";
 import { compileActivityViews } from "./activity/index.js";
+import { compileActivityEpisodes } from "./activity-episode/index.js";
 import { compileAudioViews } from "./audio/index.js";
 import { compileVisualFrameViews } from "./visual-frame/index.js";
 import { compileActivityBlockViews } from "./activity-block/index.js";
@@ -21,6 +22,7 @@ import { compileProjectCurrent } from "./project/index.js";
 export const VIEW_PROCESSOR_FUNCTIONS = {
   evidence: "view::evidence_compile",
   activity: "view::activity_compile",
+  activityEpisode: "view::activity_episode_compile",
   audio: "view::audio_compile",
   visualFrame: "view::visual_frame_compile",
   activityBlock: "view::activity_block_compile",
@@ -75,6 +77,8 @@ export type ViewProcessorInput = {
   source_filter?: "screenpipe" | "browser" | "runtime" | "all";
   merge_continuous?: boolean;
   merge_gap_minutes?: number;
+  summarize_with_llm?: boolean;
+  llm_episode_limit?: number;
   cascade?: boolean;
   cascade_depth?: number;
   max_depth?: number;
@@ -106,6 +110,7 @@ export function createViewProcessorDefinitions(): ViewProcessorDefinition[] {
   return [
     processor(VIEW_PROCESSOR_FUNCTIONS.evidence, "evidence", ["info.observation.ingested", "info.view.requested"], compileEvidenceProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.activity, "activity", ["info.view.evidence.written", "info.view.requested"], compileActivityProcessor),
+    processor(VIEW_PROCESSOR_FUNCTIONS.activityEpisode, "activity.episode", ["info.observation.ingested", "info.schedule.tick", "info.view.requested"], compileActivityEpisodeProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.audio, "audio", ["info.view.evidence.written", "info.view.requested"], compileAudioProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.visualFrame, "visual_frame", ["info.view.evidence.written", "info.view.requested"], compileVisualFrameProcessor),
     processor(VIEW_PROCESSOR_FUNCTIONS.activityBlock, "activity_block", ["info.view.activity.written", "info.view.audio.written", "info.view.visual_frame.written", "info.view.requested"], compileActivityBlockProcessor),
@@ -152,6 +157,27 @@ async function compileActivityProcessor(input: ViewProcessorInput, context: View
   return viewResult(VIEW_PROCESSOR_FUNCTIONS.activity, "activity", result.generated_at, storedViews(result.views), {
     compiler_id: result.compiler_id,
     source_views_used: result.source_views_used,
+  });
+}
+
+async function compileActivityEpisodeProcessor(input: ViewProcessorInput, context: ViewProcessorContext) {
+  const result = await compileActivityEpisodes({
+    minutes: input.minutes ?? 24 * 60,
+    startTime: input.start_time,
+    endTime: input.end_time,
+    limit: input.limit ?? 500,
+    write: input.write ?? true,
+    records: input.records ?? (input.source_record_ids?.length ? recordsById(context.store, input.source_record_ids) : undefined),
+    llm: input.llm,
+    summarizeWithLlm: input.summarize_with_llm,
+    llmEpisodeLimit: input.llm_episode_limit,
+    gapMinutes: input.merge_gap_minutes,
+  }, context.store);
+  return viewResult(VIEW_PROCESSOR_FUNCTIONS.activityEpisode, "activity.episode", result.generated_at, storedViews(result.views), {
+    compiler_id: result.compiler_id,
+    records_used: result.records_used,
+    episodes: result.episodes.length,
+    ...result.diagnostics,
   });
 }
 
@@ -385,6 +411,7 @@ async function compileObservationTimelineProcessor(input: ViewProcessorInput, co
 }
 
 async function compileActivityTimelineProcessor(input: ViewProcessorInput, context: ViewProcessorContext) {
+  const explicitEpisodeViews = pickViewList(input.source_views ?? viewsById(context.store, input.source_view_ids), "activity.episode");
   const result = compileActivityTimeline({
     minutes: input.activity_timeline_minutes ?? input.minutes ?? 240,
     startTime: input.start_time,
@@ -403,6 +430,7 @@ async function compileActivityTimelineProcessor(input: ViewProcessorInput, conte
     mergeGapMinutes: input.merge_gap_minutes,
     records: input.records,
     runtimeEvents: input.runtime_events,
+    episodeViews: explicitEpisodeViews.length ? explicitEpisodeViews : undefined,
     pluginId: input.plugin_id,
   }, context.store);
   return viewResult(VIEW_PROCESSOR_FUNCTIONS.activityTimeline, "timeline.activity", new Date().toISOString(), storedViews([result.view]), {

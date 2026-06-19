@@ -164,6 +164,28 @@ export function LanguageReviewView() {
   const [error, setError] = useState<string | null>(null);
   const refreshTimer = useRef<number | null>(null);
   const recentTimer = useRef<number | null>(null);
+  const syncedGapKeys = useRef<Set<string>>(new Set());
+
+  const syncCaptionGaps = useCallback(async (gaps: RecentCaptionGap[]) => {
+    const pending = gaps
+      .filter(gap => gap?.video_id && gap.status !== "active")
+      .filter(gap => {
+        const key = [
+          gap.video_id,
+          Math.round(gap.start_seconds ?? 0),
+          Math.round(gap.end_seconds ?? gap.video_current_seconds ?? 0),
+          gap.fragment_id ?? gap.id ?? "",
+        ].join(":");
+        if (syncedGapKeys.current.has(key)) return false;
+        syncedGapKeys.current.add(key);
+        return true;
+      });
+    if (!pending.length) return;
+    await chrome.runtime.sendMessage({
+      type: "language.caption_gap.sync",
+      gaps: pending,
+    }).catch(() => undefined);
+  }, []);
 
   const loadRecentGaps = useCallback(async () => {
     try {
@@ -179,11 +201,15 @@ export function LanguageReviewView() {
         : [];
       setRecentGaps(gaps);
       setSavedVideos(videos);
+      void syncCaptionGaps([
+        ...gaps,
+        ...videos.flatMap(video => Array.isArray(video.segments) ? video.segments : []),
+      ]);
     } catch {
       setRecentGaps([]);
       setSavedVideos([]);
     }
-  }, []);
+  }, [syncCaptionGaps]);
 
   const load = useCallback(async () => {
     setLoading(true);

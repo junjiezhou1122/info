@@ -1,5 +1,7 @@
 export * as EvidenceView from "./evidence/index.js";
 export * as ActivityView from "./activity/index.js";
+export * as ActivityEpisodeView from "./activity-episode/index.js";
+export * from "./activity-episode/index.js";
 export * as AudioView from "./audio/index.js";
 export * as VisualFrameView from "./visual-frame/index.js";
 export * as ActivityBlockView from "./activity-block/index.js";

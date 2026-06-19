@@ -51,6 +51,18 @@ type TabState = {
 };
 
 const tabState = new Map<number, TabState>();
+const HEARTBEAT_MAX_TABS = 4;
+const RECENT_MEANINGFUL_TAB_TTL_MS = 30 * 60_000;
+
+type RememberedTab = {
+  tabId: number;
+  windowId?: number;
+  url: string;
+  title?: string;
+  rememberedAt: number;
+};
+
+let lastMeaningfulTab: RememberedTab | null = null;
 
 export async function installInfoCaptureDefaults() {
   const keys = Object.keys(DEFAULT_SETTINGS) as Array<keyof InfoSettings>;
@@ -61,12 +73,19 @@ export async function installInfoCaptureDefaults() {
 export function startInfoCapture() {
   chrome.tabs.onActivated.addListener(async ({ tabId }) => {
     const tab = await chrome.tabs.get(tabId).catch(() => undefined);
-    if (tab?.id && tab.url) await ensureVisit(tab, "tab_activated");
+    if (tab?.id && tab.url) {
+      rememberMeaningfulTab(tab);
+      getTabState(tab.id, tab.url, { markActivated: true });
+      await ensureVisit(tab, "tab_activated");
+    }
   });
 
   chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (changeInfo.status === "complete" || changeInfo.url) {
-      if (tab?.id && tab.url) await ensureVisit(tab, "page_loaded");
+      if (tab?.id && tab.url) {
+        rememberMeaningfulTab(tab);
+        await ensureVisit(tab, "page_loaded");
+      }
     }
   });
 
@@ -76,12 +95,13 @@ export function startInfoCapture() {
       await sendLifecycleEvent(state, "tab_closed").catch(() => undefined);
       tabState.delete(tabId);
     }
+    if (lastMeaningfulTab?.tabId === tabId) lastMeaningfulTab = null;
   });
 
   setInterval(async () => {
     const settings = await getSettings();
     if (!settings.captureStream) return;
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+    const tabs = await getHeartbeatTabs();
     for (const tab of tabs) {
       if (!tab?.id || !tab.url) continue;
       await ensureVisit(tab, "heartbeat_tick");
@@ -190,6 +210,8 @@ export async function handleInfoCaptureMessage(message: any, sender: chrome.runt
 
 async function ensureVisit(tab: chrome.tabs.Tab, reason: string) {
   if (!tab.id || !tab.url) return undefined;
+  if (!shouldCaptureBrowserTab(tab)) return undefined;
+  rememberMeaningfulTab(tab);
   const settings = await getSettings();
   const state = getTabState(tab.id, tab.url);
   state.windowId = tab.windowId;
@@ -206,6 +228,7 @@ async function ensureVisit(tab: chrome.tabs.Tab, reason: string) {
 
 async function captureHeartbeat(tab: chrome.tabs.Tab) {
   if (!tab.id || !tab.url) return { ok: false, error: "no active tab" };
+  if (!shouldCaptureBrowserTab(tab)) return { ok: true, skipped: "ignored tab" };
   const state = getTabState(tab.id, tab.url);
   state.windowId = tab.windowId;
   state.settings = await getSettings();
@@ -658,7 +681,7 @@ function shouldUseAgentTasksEndpoint(message: any) {
   const prefix = typeof message.viewTypePrefix === "string" ? message.viewTypePrefix : undefined;
   const types = Array.isArray(message.viewTypes) ? message.viewTypes : [];
   if (prefix === "agent." || prefix === "task.") return true;
-  return types.some((type: unknown) => type === "agent.task_list" || type === "task.background_research" || type === "task.toolsmith_prototype");
+  return types.some((type: unknown) => type === "agent.task_list" || type === "task.background_research");
 }
 
 async function pollAgentTasks(message: any) {
@@ -758,7 +781,7 @@ async function postViewFeedback(message: any) {
 }
 
 async function collectFromTab(tabId: number): Promise<PageContext> {
-  return await chrome.tabs.sendMessage(tabId, { type: "collect-page-context" });
+  return await chrome.tabs.sendMessage(tabId, { type: "collect-page-context" }, { frameId: 0 });
 }
 
 function basicPageFromTab(tab: chrome.tabs.Tab): PageContext {
@@ -780,8 +803,113 @@ function basicPageFromTab(tab: chrome.tabs.Tab): PageContext {
 }
 
 async function getActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const tabs = await getCurrentCandidateTabs();
+  return tabs[0];
+}
+
+async function getHeartbeatTabs(): Promise<chrome.tabs.Tab[]> {
+  const candidates = await getCurrentCandidateTabs();
+  const remembered = await getRememberedMeaningfulTab();
+  return dedupeTabs([...candidates, ...(remembered ? [remembered] : [])])
+    .filter(shouldCaptureBrowserTab)
+    .slice(0, HEARTBEAT_MAX_TABS);
+}
+
+async function getCurrentCandidateTabs(): Promise<chrome.tabs.Tab[]> {
+  const windows = await chrome.windows.getAll({ populate: true, windowTypes: ["normal"] }).catch(() => []);
+  const activeTabs = windows
+    .filter(window => window.state !== "minimized")
+    .sort((a, b) => Number(Boolean(b.focused)) - Number(Boolean(a.focused)))
+    .flatMap(window => (window.tabs ?? []).filter(tab => tab.active));
+  const fallback = activeTabs.length
+    ? []
+    : await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+  return dedupeTabs([...activeTabs, ...fallback])
+    .filter(tab => tab?.id && tab.url)
+    .sort((a, b) => tabCaptureScore(b) - tabCaptureScore(a));
+}
+
+async function getRememberedMeaningfulTab(): Promise<chrome.tabs.Tab | undefined> {
+  if (!lastMeaningfulTab) return undefined;
+  if (Date.now() - lastMeaningfulTab.rememberedAt > RECENT_MEANINGFUL_TAB_TTL_MS) {
+    lastMeaningfulTab = null;
+    return undefined;
+  }
+  const tab = await chrome.tabs.get(lastMeaningfulTab.tabId).catch(() => undefined);
+  if (!tab?.id || !tab.url || !shouldCaptureBrowserTab(tab)) {
+    lastMeaningfulTab = null;
+    return undefined;
+  }
   return tab;
+}
+
+function dedupeTabs(tabs: chrome.tabs.Tab[]): chrome.tabs.Tab[] {
+  const seen = new Set<number>();
+  const result: chrome.tabs.Tab[] = [];
+  for (const tab of tabs) {
+    if (!tab?.id || seen.has(tab.id)) continue;
+    seen.add(tab.id);
+    result.push(tab);
+  }
+  return result;
+}
+
+function rememberMeaningfulTab(tab: chrome.tabs.Tab): void {
+  if (!tab.id || !tab.url || !shouldRememberBrowserTab(tab)) return;
+  lastMeaningfulTab = {
+    tabId: tab.id,
+    windowId: tab.windowId,
+    url: tab.url,
+    title: tab.title,
+    rememberedAt: Date.now(),
+  };
+}
+
+function shouldRememberBrowserTab(tab: chrome.tabs.Tab): boolean {
+  return shouldCaptureBrowserTab(tab) && tabCaptureScore(tab) >= 10;
+}
+
+function shouldCaptureBrowserTab(tab: chrome.tabs.Tab): boolean {
+  const url = tab.url || "";
+  if (!url) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) return false;
+  if (isMetaflowSelfUrl(parsed)) return false;
+  if (isBrowserChromeNoiseUrl(parsed)) return false;
+  return true;
+}
+
+function isMetaflowSelfUrl(url: URL): boolean {
+  return ["localhost", "127.0.0.1"].includes(url.hostname) && ["5177", "5173"].includes(url.port);
+}
+
+function isBrowserChromeNoiseUrl(url: URL): boolean {
+  const host = url.hostname;
+  return host === "ogs.google.com"
+    || host === "tpc.googlesyndication.com"
+    || host.endsWith(".gstatic.com")
+    || host.endsWith(".googleusercontent.com");
+}
+
+function tabCaptureScore(tab: chrome.tabs.Tab): number {
+  const url = tab.url || "";
+  const title = tab.title || "";
+  let parsed: URL | undefined;
+  try { parsed = new URL(url); } catch {}
+  let score = 0;
+  if (tab.active) score += 20;
+  if (tab.highlighted) score += 5;
+  if (parsed?.hostname.includes("youtube.com") && parsed.pathname === "/watch") score += 80;
+  if (parsed?.hostname === "youtu.be") score += 70;
+  if (title.trim()) score += 4;
+  if (parsed && !isBrowserChromeNoiseUrl(parsed)) score += 6;
+  if (parsed && isMetaflowSelfUrl(parsed)) score -= 200;
+  return score;
 }
 
 async function getSettings(): Promise<InfoSettings> {
@@ -789,7 +917,7 @@ async function getSettings(): Promise<InfoSettings> {
   return { ...DEFAULT_SETTINGS, ...(await chrome.storage.local.get(keys)) };
 }
 
-function getTabState(tabId: number, url: string): TabState {
+function getTabState(tabId: number, url: string, options: { markActivated?: boolean } = {}): TabState {
   let state = tabState.get(tabId);
   if (!state || state.url !== url) {
     let domain = "";
@@ -809,7 +937,7 @@ function getTabState(tabId: number, url: string): TabState {
     };
     tabState.set(tabId, state);
   }
-  state.activatedAt = Date.now();
+  if (options.markActivated) state.activatedAt = Date.now();
   return state;
 }
 

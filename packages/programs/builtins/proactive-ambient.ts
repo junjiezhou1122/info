@@ -203,7 +203,7 @@ export const toolsmithAmbientProgram: Program = {
   default_autonomy: "draft",
   capabilities: [AGENT_TASK_CAPABILITY],
   applications: ["project.cockpit", "task.inbox"],
-  produces: ["opportunity.tool", "task.toolsmith_prototype", "draft.tool_prototype"],
+  produces: ["opportunity.tool", "draft.tool_prototype"],
   learns_from: ["feedback.tool_opportunity.accepted", "feedback.tool_opportunity.dismissed", "feedback.tool_prototype.used"],
 
   attention(signal: ContextSignal, store): AttentionDecision {
@@ -229,7 +229,6 @@ export const toolsmithAmbientProgram: Program = {
     const source = store.getView(signal.object_id);
     if (!source) return { ok: false, reason: `toolsmith source view not found: ${signal.object_id}` };
     const opportunity = buildToolOpportunityView(source);
-    const prototypeTask = buildToolPrototypeTaskView(source, opportunity);
     const agentTask = buildToolPrototypeAgentTask(source, opportunity, buildContextPack);
     const agentResult = process.env.TOOLSMITH_AGENT_TASK_RUNTIME
       ? await runCapability(AGENT_TASK_CAPABILITY, { payload: { task: agentTask } })
@@ -242,12 +241,11 @@ export const toolsmithAmbientProgram: Program = {
       ok: true,
       reason: agentResult.ok
         ? "created tool opportunity and requested a no-file-edit prototype draft"
-        : "created tool opportunity and prototype task; AgentTask delegation was unavailable",
-      views: [...agentViews, opportunity, prototypeTask],
+        : "created tool opportunity; AgentTask delegation was unavailable",
+      views: [...agentViews, opportunity],
       diagnostics: {
         source_view_type: source.view_type,
         opportunity_view_id: opportunity.id,
-        prototype_task_view_id: prototypeTask.id,
         agent_task: {
           ok: agentResult.ok,
           reason: agentResult.reason,
@@ -739,36 +737,6 @@ function buildToolOpportunityView(source: StoredContextView): ContextView {
     confidence: Math.max(0.48, Math.min(0.84, source.confidence ?? 0.58)),
     stability: "project",
     lossiness: "medium",
-    privacy: source.privacy,
-  };
-}
-
-function buildToolPrototypeTaskView(source: StoredContextView, opportunity: ContextView): ContextView {
-  const focus = focusText(source);
-  return {
-    id: `task:toolsmith-prototype:${stableKey(`${source.id}:${opportunity.id}`)}`,
-    view_type: "task.toolsmith_prototype",
-    title: `Prototype tool task: ${focus}`.slice(0, 180),
-    summary: `Prepare a no-file-edit prototype plan for ${focus}`.slice(0, 300),
-    status: "candidate",
-    source_records: source.source_records,
-    source_views: [source.id, opportunity.id!],
-    compiler: { id: "program.toolsmith_ambient", version: "0.1.0", mode: "deterministic" },
-    purpose: "Delegable task for an agent runtime to draft a small workflow-improving tool without changing files.",
-    scope: withPlugin(source.scope, "program.toolsmith_ambient"),
-    content: {
-      focus,
-      opportunity_view_id: opportunity.id,
-      output_target: "draft.tool_prototype",
-      constraints: {
-        no_file_edits: true,
-        prototype_only: true,
-        require_user_approval_before_implementation: true,
-      },
-    },
-    confidence: opportunity.confidence,
-    stability: "session",
-    lossiness: "low",
     privacy: source.privacy,
   };
 }

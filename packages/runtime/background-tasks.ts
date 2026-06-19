@@ -5,7 +5,7 @@ import { signalFromObject } from "@info/programs/signals.js";
 import type { AutonomyProfile } from "@info/programs/types.js";
 import { buildAgentTaskList } from "./agent-tasks.js";
 
-const BACKGROUND_TASK_TYPES = ["task.background_research", "task.toolsmith_prototype"] as const;
+const BACKGROUND_TASK_TYPES = ["task.background_research"] as const;
 const BACKGROUND_TASK_SOURCE_TYPES = ["project.current", "work.focus_set"] as const;
 const AGENT_TASK_SUBMIT_FUNCTION = "capability::agent_task_submit";
 
@@ -254,13 +254,6 @@ function buildAgentTask(view: StoredContextView, runtime: string, store: Context
 
 function outputContractForTask(view: StoredContextView): { view_type: string; title: string; purpose: string } {
   const focus = stringValue(view.content?.focus) ?? view.title ?? view.id;
-  if (view.view_type === "task.toolsmith_prototype") {
-    return {
-      view_type: "draft.tool_prototype",
-      title: `Tool prototype draft: ${focus}`.slice(0, 180),
-      purpose: "Background no-file-edit prototype plan for a small workflow-improving tool.",
-    };
-  }
   return {
     view_type: "brief.background_research",
     title: `Background research: ${focus}`.slice(0, 180),
@@ -318,13 +311,11 @@ function markTaskProcessed(store: ContextStore, view: StoredContextView, task: A
 
 function runtimeForTask(view: StoredContextView, override?: string): string | undefined {
   if (override) return override;
-  if (view.view_type === "task.toolsmith_prototype") return process.env.TOOLSMITH_AGENT_TASK_RUNTIME;
   if (view.view_type === "task.background_research") return process.env.PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME;
   return undefined;
 }
 
 function requiredAutonomyForTask(view: StoredContextView): AutonomyProfile {
-  if (view.view_type === "task.toolsmith_prototype") return "draft";
   return "suggest";
 }
 

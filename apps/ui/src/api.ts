@@ -159,14 +159,18 @@ export async function fetchViewCatalog(): Promise<ViewCatalogResponse> {
 export async function fetchViewsByType(viewType: string, options: { limit?: number; cursor?: string; includeCandidates?: boolean; activeOnly?: boolean } = {}): Promise<ViewListResponse> {
   const params = new URLSearchParams({
     view_types: viewType,
-    limit: String(options.limit ?? 80),
-    summary_only: viewType === "audio" ? "false" : "true",
+    limit: String(options.limit === undefined ? 80 : options.limit),
+    summary_only: viewType === "audio" || viewType === "activity.episode" ? "false" : "true",
   });
   if (options.activeOnly !== false && !options.includeCandidates) params.set("active_only", "true");
   if (options.cursor) params.set("updated_after", options.cursor);
   const res = await fetchWithTimeout(`${API_BASE}/context/views?${params.toString()}`, undefined, 8_000);
   if (!res.ok) throw new Error(`${viewType} views fetch failed: ${res.status}`);
   return res.json();
+}
+
+export async function fetchActivityEpisodes(options: { limit?: number } = {}): Promise<ViewListResponse> {
+  return fetchViewsByType("activity.episode", { limit: options.limit === undefined ? 300 : options.limit, activeOnly: true });
 }
 
 export async function fetchAudioTranscripts(options: { minutes?: number; limit?: number } = {}): Promise<AudioTranscriptResponse> {

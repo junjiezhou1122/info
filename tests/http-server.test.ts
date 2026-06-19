@@ -3676,13 +3676,14 @@ test("GET /context/views/catalog exposes unified View families and manual-create
   assert.equal(response.body.ok, true);
   assert.ok(response.body.order.includes("evidence"));
   assert.ok(response.body.order.includes("project.current_context"));
-  assert.ok(response.body.order.includes("task.toolsmith_prototype"));
+  assert.equal(response.body.order.includes("task.toolsmith_prototype"), false);
   const project = response.body.families.find((family: any) => family.view_type === "project.current_context");
   assert.equal(project.label, "Project Context");
   assert.equal(project.category, "project");
   const manualTypes = new Set(response.body.manual_create.map((family: any) => family.view_type));
   assert.ok(manualTypes.has("project.current_context"));
   assert.ok(manualTypes.has("task.background_research"));
+  assert.equal(manualTypes.has("task.toolsmith_prototype"), false);
 }));
 
 test("POST /context/views can mark manually created Views through the shared catalog", async () => withStore(async (store) => {

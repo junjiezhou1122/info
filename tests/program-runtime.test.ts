@@ -549,20 +549,13 @@ test("Toolsmith Ambient proposes small tools and requests no-file-edit prototype
 
     const result = await runtime.processObject(workflow, { program_id: "program.toolsmith_ambient" });
     const opportunity = store.getView(result.runs[0].written_views.find(id => id.startsWith("opportunity:tool:")) ?? "");
-    const task = store.getView(result.runs[0].written_views.find(id => id.startsWith("task:toolsmith-prototype:")) ?? "");
     const draft = store.getView(result.runs[0].written_views.find(id => id.startsWith("draft.tool_prototype:")) ?? "");
 
     assert.equal(result.runs[0].ok, true);
     assert.ok(opportunity);
     assert.equal(opportunity.view_type, "opportunity.tool");
     assert.match(String(opportunity.content?.autonomy_boundary), /file edits require sandbox_auto/);
-    assert.ok(task);
-    assert.equal(task.view_type, "task.toolsmith_prototype");
-    assert.deepEqual(task.content?.constraints, {
-      no_file_edits: true,
-      prototype_only: true,
-      require_user_approval_before_implementation: true,
-    });
+    assert.equal(result.runs[0].written_views.some(id => id.startsWith("task:toolsmith-prototype:")), false);
     assert.ok(draft);
     assert.equal(draft.view_type, "draft.tool_prototype");
     assert.equal(draft.compiler?.id, "capability.agent_task.submit");

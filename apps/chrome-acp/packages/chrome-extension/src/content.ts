@@ -1038,7 +1038,7 @@ ambientScheduleDwellCheck();
 const YT_WATCH_PATH = "/watch";
 const YT_GAP_KEY = "C";
 const YT_GAP_FLUSH_AFTER_MS = 12_000;          // emit the gap after 12s of idle
-const YT_GAP_MIN_TOTAL_MS = 8_000;              // ignore micro-gaps < 8s
+const YT_GAP_MIN_TOTAL_MS = 5_000;              // ignore micro-gaps < 5s
 const YT_SEND_DEBOUNCE_MS = 1_500;
 const YT_RECENT_GAPS_KEY = "language.recent_caption_gaps";
 const YT_RECENT_ACTIVE_WRITE_MS = 1_000;
@@ -1122,6 +1122,7 @@ function ytIsPlayerPaused(): boolean {
 function ytIsCaptionsOn(): boolean {
   // The captions button carries aria-pressed when captions are active.
   const btn = document.querySelector<HTMLElement>(".ytp-subtitles-button");
+  if (ytReadCaptionText()) return true;
   if (!btn) return false;
   const pressed = btn.getAttribute("aria-pressed");
   if (pressed === "true") return true;
@@ -1130,12 +1131,45 @@ function ytIsCaptionsOn(): boolean {
   return Boolean(track);
 }
 
+function ytCleanCaptionText(text: string): string {
+  return text
+    .replace(/\b[A-Za-z-]+\s+\(auto-generated\)\s*Click for settings\b/gi, " ")
+    .replace(/\b[A-Za-z-]+\s+\(auto-generated\)\b/gi, " ")
+    .replace(/\bClick for settings\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function ytCollapseIncrementalCaptionLines(lines: string[]): string[] {
+  const collapsed: string[] = [];
+  for (const line of lines) {
+    const text = ytCleanCaptionText(line);
+    if (!text) continue;
+    const existingLonger = collapsed.some(existing => ytIsCaptionPrefix(text, existing));
+    if (existingLonger) continue;
+    for (let index = collapsed.length - 1; index >= 0; index -= 1) {
+      if (ytIsCaptionPrefix(collapsed[index], text)) collapsed.splice(index, 1);
+    }
+    collapsed.push(text);
+  }
+  return collapsed;
+}
+
+function ytIsCaptionPrefix(shorter: string, longer: string): boolean {
+  return longer === shorter || (longer.startsWith(shorter) && /^[\s,.;:!?]/.test(longer.slice(shorter.length, shorter.length + 1)));
+}
+
 function ytReadCaptionText(): string | null {
   // YouTube often renders the visible caption as multiple segment nodes.
-  const segments = Array.from(document.querySelectorAll<HTMLElement>(
-    ".ytp-caption-window-container .ytp-caption-segment, .caption-window .captions-text",
-  ))
-    .map(slot => (slot.textContent ?? "").replace(/\s+/g, " ").trim())
+  // Prefer those leaf nodes; the broader fallback can include settings UI text.
+  const leafSegments = Array.from(document.querySelectorAll<HTMLElement>(
+    ".ytp-caption-window-container .ytp-caption-segment",
+  ));
+  const fallbackSegments = leafSegments.length
+    ? []
+    : Array.from(document.querySelectorAll<HTMLElement>(".caption-window .captions-text"));
+  const segments = [...leafSegments, ...fallbackSegments]
+    .map(slot => ytCleanCaptionText(slot.textContent ?? ""))
     .filter(Boolean);
   const joined = segments.join(" ").replace(/\s+/g, " ").trim();
   return joined || null;
@@ -1149,9 +1183,9 @@ function ytVideoUrlAt(seconds: number): string {
 
 function ytSubtitleText(gap: YtGap): string {
   const lines = gap.captionSamples
-    .map(sample => sample.text.replace(/\s+/g, " ").trim())
+    .map(sample => sample.text)
     .filter(Boolean);
-  return Array.from(new Set(lines)).join("\n");
+  return ytCollapseIncrementalCaptionLines(lines).join("\n");
 }
 
 function ytSendCanonicalObservation(schemaName: string, payload: Record<string, unknown>): void {

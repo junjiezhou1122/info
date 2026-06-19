@@ -73,7 +73,6 @@ const PREFIX_LABEL: Record<string, string> = {
   "advice.writing_assist": "Writing assist",
   "agent.task_list": "Task list",
   "task.background_research": "Background research",
-  "task.toolsmith_prototype": "Toolsmith task",
   "opportunity.tool": "Tool opportunity",
   "brief.background_research": "Research brief",
 };

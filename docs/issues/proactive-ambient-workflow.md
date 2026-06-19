@@ -120,14 +120,13 @@ Behavior:
 
 - runs at `background` speed;
 - uses `draft` autonomy by default;
-- writes a tool opportunity and prototype task;
+- writes a tool opportunity;
 - asks AgentTask only for a no-file-edit `draft.tool_prototype`.
 
 Output:
 
 ```text
 opportunity.tool
-task.toolsmith_prototype
 draft.tool_prototype       // from AgentTask when delegation succeeds
 tool.prototype_artifact    // sandbox artifact compiled from a prototype draft
 ```
@@ -135,7 +134,7 @@ tool.prototype_artifact    // sandbox artifact compiled from a prototype draft
 Sandbox artifact loop:
 
 ```text
-draft.tool_prototype / task.toolsmith_prototype / opportunity.tool
+draft.tool_prototype / opportunity.tool
   -> runtime.toolsmith_artifacts
   -> observation.toolsmith_sandbox_artifact
   -> context artifact file under data/toolsmith-sandbox
@@ -154,7 +153,7 @@ Rules:
 - writing intervention produces suggestions/drafts only;
 - toolsmith work proposes a tool and drafts a prototype plan;
 - real file edits require explicit user action or a future `sandbox_auto` policy path.
-- live background AgentTask delegation is opt-in through `PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME` or `TOOLSMITH_AGENT_TASK_RUNTIME`; otherwise the Programs create task/advice/draft Views without blocking ingest.
+- live background AgentTask delegation is opt-in through `PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME`; otherwise the Programs create task/advice/draft Views without blocking ingest.
 
 ## Runtime Scheduling
 
@@ -176,10 +175,9 @@ Ambient Programs may create task Views without doing live agent work during inge
 
 ```text
 task.background_research
-task.toolsmith_prototype
   -> runtime background task processor
   -> capability.agent_task.submit
-  -> brief.background_research / draft.tool_prototype
+  -> brief.background_research
 ```
 
 Realtime vs queued policy:
@@ -190,8 +188,8 @@ work / background        -> task View + agent.task_list queue surface
 ```
 
 `agent.task_list` is the canonical queue View for slow AgentTask work. It
-summarizes `task.background_research` and `task.toolsmith_prototype` Views with
-status, runtime, output type, provenance counts, and the realtime/queued policy.
+summarizes `task.background_research` Views with status, runtime, output type,
+provenance counts, and the realtime/queued policy.
 Chrome ACP, the Info UI, HTTP clients, and other agents should read this View or
 the `/agent/tasks` HTTP endpoint instead of each inventing a task list.
 
@@ -212,7 +210,6 @@ Environment controls:
 RUNTIME_BACKGROUND_TASKS=1
 RUNTIME_BACKGROUND_TASK_LIMIT=8
 PROACTIVE_RESEARCH_AGENT_TASK_RUNTIME=local_mock | claude_code | ...
-TOOLSMITH_AGENT_TASK_RUNTIME=local_mock | claude_code | ...
 RUNTIME_TOOLSMITH_ARTIFACTS=1
 TOOLSMITH_SANDBOX_DIR=data/toolsmith-sandbox
 ```
@@ -229,7 +226,6 @@ advice.writing_assist
 task.background_research
 draft.writing_continuation
 opportunity.tool
-task.toolsmith_prototype
 draft.tool_prototype
 ```
 
@@ -239,7 +235,7 @@ The Ambient tab groups the same family by workflow:
 Queue: agent.task_list
 Research: advice.research, task.background_research, brief.background_research
 Writing: advice.writing_assist, draft.writing_continuation
-Toolsmith: opportunity.tool, task.toolsmith_prototype, draft.tool_prototype, tool.prototype_artifact
+Toolsmith: opportunity.tool, draft.tool_prototype, tool.prototype_artifact
 ```
 
 HTTP clients can use:

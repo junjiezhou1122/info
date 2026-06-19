@@ -6,6 +6,7 @@ const SAVED_CAPTION_GAPS_BY_VIDEO_KEY = "language.caption_gaps.by_video";
 const MAX_RECENT_CAPTION_GAPS = 12;
 const MAX_SAVED_CAPTION_VIDEOS = 80;
 const MAX_SAVED_GAPS_PER_VIDEO = 50;
+const syncedCaptionGapKeys = new Set<string>();
 
 type CaptionGap = {
   id?: string;
@@ -49,6 +50,8 @@ type SavedCaptionVideo = {
   segments: CaptionGap[];
 };
 
+const backgroundCaptionSender: chrome.runtime.MessageSender = {};
+
 async function injectContentScript(tabId: number) {
   await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
@@ -69,6 +72,55 @@ function captionSegmentKey(gap: CaptionGap): string {
     Math.round(Number(gap.end_seconds) || 0),
     gap.observed_at || gap.captured_at || "",
   ].join(":");
+}
+
+function cleanCaptionText(text: unknown): string {
+  return String(text ?? "")
+    .replace(/\b[A-Za-z-]+\s+\(auto-generated\)\s*Click for settings\b/gi, " ")
+    .replace(/\b[A-Za-z-]+\s+\(auto-generated\)\b/gi, " ")
+    .replace(/\bClick for settings\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function captionTextScore(text: string): number {
+  if (!text) return 0;
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+  const letterCount = (text.match(/[A-Za-z]/g) ?? []).length;
+  return wordCount * 10 + letterCount;
+}
+
+function isCaptionPrefix(shorter: string, longer: string): boolean {
+  return longer === shorter || (longer.startsWith(shorter) && /^[\s,.;:!?]/.test(longer.slice(shorter.length, shorter.length + 1)));
+}
+
+function collapseIncrementalCaptionLines(lines: string[]): string[] {
+  const collapsed: string[] = [];
+  for (const line of lines) {
+    const text = cleanCaptionText(line);
+    if (!text) continue;
+    const existingLonger = collapsed.some(existing => isCaptionPrefix(text, existing));
+    if (existingLonger) continue;
+    for (let index = collapsed.length - 1; index >= 0; index -= 1) {
+      if (isCaptionPrefix(collapsed[index], text)) collapsed.splice(index, 1);
+    }
+    collapsed.push(text);
+  }
+  return collapsed;
+}
+
+function bestCaptionText(gap: CaptionGap): string {
+  const lines = [
+    ...(Array.isArray(gap.caption_samples) ? gap.caption_samples.map(sample => sample?.text) : []),
+    ...(Array.isArray(gap.transcript_samples) ? gap.transcript_samples : []),
+    ...(typeof gap.subtitle_text === "string" ? gap.subtitle_text.split(/\n+/) : []),
+    gap.current_caption,
+  ]
+    .map(cleanCaptionText)
+    .filter(Boolean);
+  const collapsed = collapseIncrementalCaptionLines(lines);
+  if (collapsed.length) return collapsed.join(" ");
+  return lines.sort((a, b) => captionTextScore(b) - captionTextScore(a))[0] ?? "";
 }
 
 async function persistCaptionGapByVideo(gap: CaptionGap): Promise<void> {
@@ -109,6 +161,75 @@ async function persistCaptionGapByVideo(gap: CaptionGap): Promise<void> {
   await chrome.storage?.local?.set?.({ [SAVED_CAPTION_GAPS_BY_VIDEO_KEY]: limited }).catch(() => undefined);
 }
 
+async function mirrorCaptionGapToContext(gap: CaptionGap, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  if (!gap.video_id) return undefined;
+  const captionText = bestCaptionText(gap);
+  if (!captionText) return undefined;
+  const tab = sender.tab ?? await findCaptionTab(gap);
+  return handleInfoCaptureMessage({
+    type: "youtube-observation",
+    schemaName: "observation.youtube.caption_fragment",
+    payload: {
+      ...gap,
+      caption_text: captionText,
+      subtitle_text: captionText,
+      transcript_samples: [captionText],
+      observed_at: gap.fragment_ended_at || gap.observed_at || gap.captured_at || new Date().toISOString(),
+    },
+  }, tab ? { ...sender, tab } : sender);
+}
+
+async function syncCaptionGapToContext(gap: CaptionGap, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  if (!gap.video_id) return undefined;
+  if (gap.status === "active" && Math.round((gap.caption_on_ms ?? 0) / 1000) < 5) return undefined;
+  const captionText = bestCaptionText(gap);
+  if (!captionText) return undefined;
+  const key = [
+    captionVideoId(gap),
+    Math.round(Number(gap.start_seconds) || 0),
+    Math.round(Number(gap.end_seconds) || Number(gap.video_current_seconds) || 0),
+    captionText.slice(0, 80),
+  ].join(":");
+  if (syncedCaptionGapKeys.has(key)) return { ok: true, skipped: "already_synced", key };
+  syncedCaptionGapKeys.add(key);
+  return mirrorCaptionGapToContext({
+    ...gap,
+    status: "sent",
+    ended_reason: gap.ended_reason || "storage_sync",
+    end_seconds: gap.end_seconds ?? gap.video_current_seconds,
+    fragment_ended_at: gap.fragment_ended_at || gap.captured_at || new Date().toISOString(),
+  }, sender);
+}
+
+async function findCaptionTab(gap: CaptionGap): Promise<chrome.tabs.Tab | undefined> {
+  const videoUrl = typeof gap.video_url === "string" ? gap.video_url : "";
+  const videoId = typeof gap.video_id === "string" ? gap.video_id : "";
+  const tabs = await chrome.tabs.query({}).catch(() => []);
+  return tabs.find(tab => {
+    const url = tab.url || "";
+    if (!url) return false;
+    if (videoUrl && url === videoUrl) return true;
+    if (videoId && url.includes("youtube.com/watch") && url.includes(videoId)) return true;
+    return false;
+  }) ?? tabs.find(tab => {
+    const url = tab.url || "";
+    return videoId ? url.includes(videoId) : url.includes("youtube.com/watch");
+  });
+}
+
+function gapsFromSavedByVideo(value: unknown): CaptionGap[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.values(value as Record<string, SavedCaptionVideo>)
+    .flatMap(video => Array.isArray(video?.segments) ? video.segments : []);
+}
+
+async function syncCaptionGapsFromStorage(gaps: CaptionGap[]): Promise<void> {
+  for (const gap of gaps.slice(0, 40)) {
+    if (!gap || typeof gap !== "object") continue;
+    await syncCaptionGapToContext(gap, backgroundCaptionSender).catch(() => undefined);
+  }
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   await installInfoCaptureDefaults();
   if (chrome.sidePanel?.setPanelBehavior) {
@@ -132,6 +253,16 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "complete") injectContentScript(tabId);
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "session" && changes[RECENT_CAPTION_GAPS_KEY]) {
+    const value = changes[RECENT_CAPTION_GAPS_KEY].newValue;
+    if (Array.isArray(value)) void syncCaptionGapsFromStorage(value);
+  }
+  if (areaName === "local" && changes[SAVED_CAPTION_GAPS_BY_VIDEO_KEY]) {
+    void syncCaptionGapsFromStorage(gapsFromSavedByVideo(changes[SAVED_CAPTION_GAPS_BY_VIDEO_KEY].newValue));
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -169,7 +300,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ].slice(0, MAX_RECENT_CAPTION_GAPS);
       await chrome.storage?.session?.set?.({ [RECENT_CAPTION_GAPS_KEY]: next }).catch(() => undefined);
       await persistCaptionGapByVideo(savedGap).catch(() => undefined);
-      sendResponse({ ok: true, id, count: next.length });
+      const mirrored = status === "sent"
+        ? await mirrorCaptionGapToContext(savedGap, sender).catch(error => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+        : undefined;
+      sendResponse({ ok: true, id, count: next.length, mirrored });
+      return;
+    }
+
+    if (message?.type === "language.caption_gap.sync") {
+      const gaps = Array.isArray(message.gaps) ? message.gaps : [];
+      const results = [];
+      for (const gap of gaps.slice(0, 20)) {
+        if (!gap || typeof gap !== "object") continue;
+        results.push(await syncCaptionGapToContext(gap as CaptionGap, sender)
+          .catch(error => ({ ok: false, error: error instanceof Error ? error.message : String(error) })));
+      }
+      sendResponse({ ok: true, synced: results.filter(Boolean).length, results });
       return;
     }
 

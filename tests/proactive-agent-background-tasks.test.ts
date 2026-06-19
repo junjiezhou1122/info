@@ -221,7 +221,7 @@ test("background task dry-run calls capability but does not write briefs or mark
   assert.equal(store.getView(task.id)?.content?.background_task, undefined);
 }));
 
-test("background task processing respects autonomy gates", async () => withStore(async (store) => {
+test("background task processing ignores retired toolsmith prototype task Views", async () => withStore(async (store) => {
   const record = store.insertRecord({
     id: "record:proactive-autonomy-source",
     schema: { name: "observation.local_project", version: 1 },
@@ -239,9 +239,11 @@ test("background task processing respects autonomy gates", async () => withStore
   });
 
   const result = await processAmbientBackgroundTasks({ mode: "process", runtime: "local_mock", autonomy: "suggest", write: true }, store);
+  const list = buildAgentTaskList({ write: true }, store);
 
   assert.equal(result.processed, 0);
-  assert.equal(result.skipped, 1);
-  assert.match(result.tasks[0]?.reason ?? "", /autonomy denied/);
+  assert.equal(result.skipped, 0);
+  assert.equal(result.tasks.length, 0);
+  assert.equal(list.items.length, 0);
   assert.equal(store.listViews({ view_types: ["draft.tool_prototype"], limit: 5 }).length, 0);
 }));

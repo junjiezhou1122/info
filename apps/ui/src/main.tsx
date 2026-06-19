@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { CalendarDays, ChevronLeft, ChevronRight, CircleDotDashed, FileText, Home, Search, Settings } from "lucide-react";
-import { createContextView, fetchActivityTimeline, fetchActivityTimelineWatermark, fetchAudioTranscripts, fetchContextView, fetchLatestActivityTimelineView, fetchProcessors, fetchRecentRecords, fetchRuntimeSettings, fetchViewFamilies, fetchViewsByType, fetchViewsByTypes, patchViewStatus, runProcessor, runRuntimeTick, saveRuntimeSettings, screenpipeFrameUrl, submitViewFeedback, syncScreenpipe, updateContextView } from "./api";
+import { createContextView, fetchActivityEpisodes, fetchActivityTimeline, fetchActivityTimelineWatermark, fetchAudioTranscripts, fetchContextView, fetchLatestActivityTimelineView, fetchProcessors, fetchRecentRecords, fetchRuntimeSettings, fetchViewFamilies, fetchViewsByType, fetchViewsByTypes, patchViewStatus, runProcessor, runRuntimeTick, saveRuntimeSettings, screenpipeFrameUrl, submitViewFeedback, syncScreenpipe, updateContextView } from "./api";
 import type { ActivityTimelineResponse, AudioTranscriptItem, ContextRecordSummary, ContextViewInput, ContextViewSummary, ContextViewUpdateInput, ProcessorDefinitionSummary, RuntimeSettings, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewCatalogResponse, ViewFamiliesResponse, ViewFamilyDefinition, ViewFamilySummary, ViewStatus } from "./types";
 import metaflowMarkUrl from "./assets/metaflow-mark.png";
 import "./styles.css";
 
 const TIMELINE_WATERMARK_POLL_MS = 5_000;
+const TIMELINE_LIVE_MAX_LAG_MS = 45_000;
+const TIMELINE_AUTO_SYNC_MIN_INTERVAL_MS = 20_000;
 const VIEW_REFRESH_POLL_MS = 15_000;
 const DEFAULT_BUCKET_MINUTES = 60;
 const DEFAULT_TIMELINE_MINUTES = 24 * 60;
@@ -15,6 +17,7 @@ const TIMELINE_PAGE_MINUTES = 180;
 const FALLBACK_VIEW_TYPE_ORDER = [
   "state.surface", "work.focus_set", "project.current", "memory.daily", "memory.profile",
   "evidence", "visual_frame", "audio", "activity", "activity_block", "proposal", "resource", "intent", "workflow", "memory",
+  "activity.episode",
   "thread.active_work", "project.current_context", "brief.research", "brief.background_research",
   "advice.research", "advice.writing_assist",
   "agent.task_list",
@@ -59,7 +62,7 @@ const VIEW_GROUPS = [
     id: "patterns",
     title: "Patterns",
     subtitle: "intent and workflow compression",
-    types: ["intent", "workflow", "activity_block", "activity", "proposal"],
+    types: ["activity.episode", "intent", "workflow", "activity_block", "activity", "proposal"],
   },
   {
     id: "evidence",
@@ -73,7 +76,7 @@ const VIEW_CATALOG_CACHE = new Map<string, ViewFamilyDefinition>();
 let VIEW_CATALOG_ORDER_CACHE: string[] = FALLBACK_VIEW_TYPE_ORDER;
 type SourceFilter = "screenpipe" | "browser" | "runtime" | "all";
 type DetailMode = "activity" | "debug";
-type ActiveTab = "home" | "timeline" | "ambient" | "views" | "settings";
+type ActiveTab = "home" | "timeline" | "episodes" | "ambient" | "views" | "settings";
 type SidebarItem = {
   id: string;
   label: string;
@@ -156,6 +159,7 @@ let RUNTIME_SETTINGS_MEMORY_CACHE: { settings: RuntimeSettings; status: string }
 const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: "home", label: "Home", icon: Home, tab: "home" },
   { id: "timeline", label: "Timeline", icon: Search, tab: "timeline" },
+  { id: "episodes", label: "Episodes", icon: CalendarDays, tab: "episodes" },
   { id: "ambient", label: "Ambient", icon: CircleDotDashed, tab: "ambient" },
   { id: "views", label: "Views", icon: FileText, tab: "views" },
   { id: "settings", label: "Settings", icon: Settings, tab: "settings" },
@@ -166,6 +170,9 @@ function App() {
   const initialTimelineCache = useMemo(() => loadCachedTimeline(), []);
   const [timeline, setTimeline] = useState<ActivityTimelineResponse | null>(initialTimelineCache?.response ?? null);
   const [viewFamilies, setViewFamilies] = useState<ViewFamiliesResponse | null>(initialViewCache?.response ?? null);
+  const [episodes, setEpisodes] = useState<ContextViewSummary[]>([]);
+  const [episodesLoading, setEpisodesLoading] = useState(false);
+  const [episodesStatus, setEpisodesStatus] = useState("Episodes not loaded");
   const [lastTick, setLastTick] = useState<RuntimeTickResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [viewsLoading, setViewsLoading] = useState(false);
@@ -195,6 +202,7 @@ function App() {
   const timelineSignatureRef = useRef(initialTimelineCache?.signature ?? timelineSignature(bucketMinutes, detailMode, sourceFilter));
   const timelineInFlightSignatureRef = useRef<string | null>(null);
   const timelineSyncInFlightRef = useRef(false);
+  const timelineLastAutoSyncAtRef = useRef(0);
   const timelineWatermarkRef = useRef(initialTimelineCache?.watermark ?? "");
   const timelineWatermarkInFlightRef = useRef(false);
 
@@ -379,6 +387,24 @@ function App() {
     }
   }
 
+  async function refreshEpisodes(options: { quiet?: boolean } = {}) {
+    const quiet = options.quiet ?? false;
+    if (!quiet) {
+      setEpisodesLoading(true);
+      setEpisodesStatus("Loading activity episodes...");
+    }
+    try {
+      const response = await fetchActivityEpisodes({ limit: 0 });
+      const next = (response.views ?? []).sort(compareEpisodesNewestFirst);
+      setEpisodes(next);
+      setEpisodesStatus(`${next.length} activity episodes loaded`);
+    } catch (error) {
+      setEpisodesStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (!quiet) setEpisodesLoading(false);
+    }
+  }
+
   async function syncTimeline(options: { fullDay?: boolean; manual?: boolean } = {}) {
     if (timelineSyncInFlightRef.current) return;
     timelineSyncInFlightRef.current = true;
@@ -419,6 +445,18 @@ function App() {
       setTimelinePaging(current => ({ ...current, dayTotal: next.record_count }));
       const previous = timelineWatermarkRef.current;
       timelineWatermarkRef.current = next.watermark;
+      const shouldAutoSync = options.refreshOnChange !== false
+        && isToday
+        && (sourceFilter === "all" || sourceFilter === "screenpipe")
+        && timelineLagMs(next.latest_observed_at) > TIMELINE_LIVE_MAX_LAG_MS
+        && Date.now() - timelineLastAutoSyncAtRef.current > TIMELINE_AUTO_SYNC_MIN_INTERVAL_MS
+        && !timelineSyncInFlightRef.current;
+      if (shouldAutoSync) {
+        timelineLastAutoSyncAtRef.current = Date.now();
+        setTimelineSyncStatus("Catching up from Screenpipe...");
+        await syncTimeline({ fullDay: false, manual: false });
+        return;
+      }
       if (options.forceRefresh || (options.refreshOnChange !== false && previous && previous !== next.watermark)) {
         setTimelineSyncStatus("New activity detected");
         await refresh({ quiet: true, force: true });
@@ -465,6 +503,20 @@ function App() {
   }, [activeTab, live]);
 
   useEffect(() => {
+    if (activeTab !== "episodes") return;
+    if (!episodes.length) refreshEpisodes().catch(error => setEpisodesStatus(error instanceof Error ? error.message : String(error)));
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (!live) return;
+    if (activeTab !== "episodes") return;
+    const timer = window.setInterval(() => {
+      refreshEpisodes({ quiet: true }).catch(() => undefined);
+    }, VIEW_REFRESH_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [activeTab, live]);
+
+  useEffect(() => {
     if (activeTab !== "timeline") return;
     const force = !isSelectedDayTimelineResponse(timeline, selectedDay) || timelineSignatureRef.current !== timelineSignature(bucketMinutes, detailMode, sourceFilter, selectedDay);
     hydrateLatestTimelineView().catch(() => undefined);
@@ -502,9 +554,10 @@ function App() {
     "app-shell",
     sidebarCollapsed ? "sidebar-collapsed" : "",
     activeTab === "home" ? "home-mode" : "",
-    activeTab === "views" || activeTab === "ambient" ? "workspace-mode" : "",
+    activeTab === "views" || activeTab === "ambient" || activeTab === "episodes" ? "workspace-mode" : "",
     activeTab === "views" ? "views-mode" : "",
     activeTab === "timeline" ? "timeline-mode" : "",
+    activeTab === "episodes" ? "episodes-mode" : "",
     activeTab === "settings" ? "settings-mode" : "",
   ].filter(Boolean).join(" ");
 
@@ -574,6 +627,8 @@ function App() {
                     <button className="secondary" onClick={() => setViewComposerOpen(true)}>Create View</button>
                     <button onClick={() => refreshViews({ force: true })} disabled={viewsLoading}>{viewsLoading ? "Loading…" : "Reload Views"}</button>
                   </>
+                ) : activeTab === "episodes" ? (
+                  <button onClick={() => refreshEpisodes()} disabled={episodesLoading}>{episodesLoading ? "Loading..." : "Reload Episodes"}</button>
                 ) : activeTab === "ambient" ? (
                   <button onClick={() => setViewStatus("Ambient panel has local controls")}>Ambient Controls</button>
                 ) : activeTab === "settings" ? (
@@ -607,6 +662,8 @@ function App() {
           />
         ) : activeTab === "ambient" ? (
           <AmbientPanel />
+        ) : activeTab === "episodes" ? (
+          <ActivityEpisodesPanel episodes={episodes} loading={episodesLoading} status={episodesStatus} onRefresh={() => refreshEpisodes()} />
         ) : activeTab === "views" ? (
           <MemoryViewsPanel response={viewFamilies} loading={viewsLoading && !viewFamilies} composerOpen={viewComposerOpen} onComposerClose={() => setViewComposerOpen(false)} onRefreshViews={() => refreshViews({ quiet: true, force: true })} />
         ) : (
@@ -666,6 +723,7 @@ function RuntimeSidebar({ activeTab, collapsed, live, onNavigate, onToggleCollap
 
 function pageTitle(tab: ActiveTab): string {
   if (tab === "timeline") return "Timeline";
+  if (tab === "episodes") return "Activity Episodes";
   if (tab === "ambient") return "Ambient";
   if (tab === "views") return "Runtime Views";
   return "Runtime Settings";
@@ -673,9 +731,150 @@ function pageTitle(tab: ActiveTab): string {
 
 function pageDescription(tab: ActiveTab): string {
   if (tab === "timeline") return "按时间整理最近 focus 的 app、网页和项目活动。";
+  if (tab === "episodes") return "按稳定 app 或网页页面聚合 Observation，形成可总结、可记忆、可触发 ambient help 的活动片段。";
   if (tab === "ambient") return "主动后台搜索、写作介入和小工具机会都会先沉淀成可检查的 Views。";
   if (tab === "views") return "查看 Observation 压缩和 ambient Programs 产出的 Evidence、Intent、Workflow、Advice、Task、Draft 和 Memory Views。";
   return "控制 VisionFrame、ActivityBlock、Intent 和 Workflow 压缩的模型与开关。";
+}
+
+function ActivityEpisodesPanel({ episodes, loading, status, onRefresh }: { episodes: ContextViewSummary[]; loading: boolean; status: string; onRefresh: () => Promise<void> }) {
+  const sortedEpisodes = useMemo(() => [...episodes].sort(compareEpisodesNewestFirst), [episodes]);
+  const frameEpisodeCount = useMemo(() => episodes.filter(view => viewFrameIdsOf(view).length > 0).length, [episodes]);
+  const latest = sortedEpisodes[0];
+  const latestTime = latest ? stringFromUnknown(latest.content?.end_time) ?? latest.updated_at ?? latest.created_at : undefined;
+  return (
+    <section className="episodes-workspace" aria-label="Activity episodes">
+      <div className="episodes-feed-head">
+        <div>
+          <h2>{episodeGreeting()}, Junjie</h2>
+          <span>{loading ? "正在刷新 episode..." : `${sortedEpisodes.length} 个 episode · ${frameEpisodeCount} 个有 frame${latestTime ? ` · 最近 ${timeOfDay(latestTime)}` : status ? ` · ${status}` : ""}`}</span>
+        </div>
+        <button className="episode-icon-button" type="button" onClick={onRefresh} disabled={loading} aria-label="Reload episodes">
+          <ChevronRight size={18} strokeWidth={2.2} />
+        </button>
+      </div>
+      {!sortedEpisodes.length ? (
+        <div className="timeline-empty-state episode-empty-state">
+          <div className="empty-clock">◷</div>
+          <b>暂无 Episodes</b>
+          <span>运行 activity.episode processor 后，这里会展示按 app/page 聚合的活动片段；有 frame 的会显示截图</span>
+          <button type="button" onClick={onRefresh} disabled={loading}>{loading ? "Loading..." : "Load episodes"}</button>
+        </div>
+      ) : (
+        <div className="episode-feed">
+          {sortedEpisodes.map(view => <EpisodeTimelineRow key={view.id} view={view} />)}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function EpisodeTimelineRow({ view }: { view: ContextViewSummary }) {
+  const content = view.content ?? {};
+  const start = stringFromUnknown(content.start_time) ?? view.created_at ?? "";
+  const end = stringFromUnknown(content.end_time) ?? view.updated_at ?? start;
+  const urls = stringArrayFromUnknown(content.urls);
+  const domains = stringArrayFromUnknown(content.domains);
+  const titles = stringArrayFromUnknown(content.window_titles);
+  const projects = stringArrayFromUnknown(content.projects);
+  const keywords = stringArrayFromUnknown(content.keywords);
+  const ambient = recordValue(content.ambient_help);
+  const shouldHelp = ambient?.should_help === true;
+  const tags = uniqueStrings([...keywords, ...projects, ...domains]).slice(0, 4);
+  const frameIds = viewFrameIdsOf(view);
+  const visibleFrames = frameIds.slice(0, 4);
+  const hiddenCount = Math.max(0, frameIds.length - visibleFrames.length);
+  const app = stringFromUnknown(content.app) ?? (content.identity_kind === "browser_url" ? domainLabel(domains[0] ?? urls[0]) : "Info");
+  const title = cleanEpisodeTitle(view.title ?? titles[0] ?? urls[0] ?? "Activity episode");
+  const [preview, setPreview] = useState<FramePreview | null>(null);
+  return (
+    <div className={`episode-row ${shouldHelp ? "helpful" : ""}`}>
+      <div className="episode-row-rail">
+        <span className={content.identity_kind === "browser_url" ? "browser" : ""} />
+        <time>{timeOfDay(end || start)}</time>
+      </div>
+      <article className="episode-story-card">
+        <header className="episode-story-header">
+          <div className="episode-app-line">
+            <span className={content.identity_kind === "browser_url" ? "episode-app-icon browser" : "episode-app-icon"}>{app.slice(0, 1).toUpperCase()}</span>
+            <b>{app}</b>
+          </div>
+          <div className="episode-story-tags">
+            {tags.map(tag => <span key={tag}>{tag}</span>)}
+            {shouldHelp ? <span>ambient</span> : null}
+          </div>
+        </header>
+        <h3>{title}</h3>
+        {visibleFrames.length ? (
+          <div className="episode-evidence-strip" aria-label="Episode frame evidence">
+            {visibleFrames.map(frameId => (
+              <EpisodeFrameThumb key={String(frameId)} frameId={frameId} title={title} onOpen={setPreview} />
+            ))}
+          </div>
+        ) : null}
+        {hiddenCount > 0 ? (
+          <div className="episode-more-line">
+            <ChevronRight size={18} strokeWidth={2.2} />
+            <span>+{hiddenCount} more</span>
+          </div>
+        ) : null}
+        {preview ? (
+          <FrameLightbox preview={preview} onClose={() => setPreview(null)} />
+        ) : null}
+      </article>
+    </div>
+  );
+}
+
+function EpisodeFrameThumb({ frameId, title, onOpen }: { frameId: string | number; title: string; onOpen: (preview: FramePreview) => void }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return null;
+  return (
+    <button className="episode-frame-thumb" type="button" onClick={() => onOpen({ frameId, title })}>
+      <img src={screenpipeFrameUrl(frameId)} alt="" loading="lazy" onError={() => setFailed(true)} />
+    </button>
+  );
+}
+
+function compareEpisodesNewestFirst(a: ContextViewSummary, b: ContextViewSummary) {
+  return Date.parse(stringFromUnknown(b.content?.end_time) ?? b.updated_at ?? b.created_at ?? "")
+    - Date.parse(stringFromUnknown(a.content?.end_time) ?? a.updated_at ?? a.created_at ?? "");
+}
+
+function uniqueStrings(values: Array<string | undefined>) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function domainLabel(value?: string) {
+  if (!value) return "Browser";
+  try {
+    return new URL(value).hostname.replace(/^www\./, "");
+  } catch {
+    return value.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] || "Browser";
+  }
+}
+
+function cleanEpisodeTitle(title: string) {
+  return title.replace(/^Browsing:\s*/i, "").replace(/^terminal:\s*/i, "Terminal: ").trim();
+}
+
+function episodeGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 5) return "夜深了";
+  if (hour < 11) return "早上好";
+  if (hour < 14) return "中午好";
+  if (hour < 18) return "下午好";
+  return "晚上好";
 }
 
 function AmbientPanel() {
@@ -1269,6 +1468,7 @@ const VIEW_BIRTH_PARENTS: Record<string, string[]> = {
   "learning.youtube_fragment": ["audio", "visual_frame", "evidence"],
   "view.promotion_candidates": ["memory.preferences", "project.memory"],
   activity: ["evidence"],
+  "activity.episode": ["activity"],
   activity_block: ["activity"],
   proposal: ["activity"],
   intent: ["proposal"],
@@ -1284,6 +1484,7 @@ const VIEW_TREE_PLACEMENTS: Record<string, { column: string; y: number }> = {
   audio: { column: "Signal", y: 242 },
   visual_frame: { column: "Signal", y: 322 },
   activity: { column: "Signal", y: 402 },
+  "activity.episode": { column: "Core", y: 602 },
   resource: { column: "Signal", y: 482 },
   "learning.youtube_fragment": { column: "Signal", y: 562 },
   "state.surface": { column: "Core", y: 242 },
@@ -2528,6 +2729,12 @@ function timelineWatermarkFromResponse(response: ActivityTimelineResponse) {
   ].join(":");
 }
 
+function timelineLagMs(observedAt?: string) {
+  const observedMs = observedAt ? Date.parse(observedAt) : 0;
+  if (!Number.isFinite(observedMs) || observedMs <= 0) return Number.POSITIVE_INFINITY;
+  return Date.now() - observedMs;
+}
+
 function cachedTimelineStatus(response: ActivityTimelineResponse, cachedAt: number) {
   const age = cachedAt ? relativeTime(new Date(cachedAt).toISOString()) : "cached";
   return `${response.records_used} records · ${response.buckets.length} buckets · cached ${age}`;
@@ -3025,7 +3232,7 @@ function TimelineWorkbench({
     <section className="timeline-workspace" aria-label="Timeline workspace">
       <div className="timeline-main-panel">
         <div className="timeline-greeting">
-          <h2>早上好, Junjie</h2>
+          <h2>{episodeGreeting()}, Junjie</h2>
           <span>{live ? "正在记录" : "已暂停"} · {timelineStatus}</span>
         </div>
         <Timeline buckets={buckets} loading={loading} sourceFilter={sourceFilter} selectedItemId={selectedItemId} detailMode={detailMode} paging={paging} onLoadMore={onLoadMore} onSelect={onSelect} onOpenFrame={onOpenFrame} />
@@ -3822,6 +4029,7 @@ function viewFamilyLabel(family: string) {
     visual_frame: "VisualFrameView",
     audio: "AudioView",
     activity: "ActivityView",
+    "activity.episode": "Activity Episode",
     activity_block: "ActivityBlockView",
     proposal: "ProposalView",
     intent: "IntentView",
@@ -3915,6 +4123,7 @@ function viewTypePurpose(type: string) {
     visual_frame: "screen semantics",
     audio: "speech semantics",
     activity: "time chunk",
+    "activity.episode": "stable activity segment",
     activity_block: "10m block",
     proposal: "next view",
     resource: "material",
@@ -4593,9 +4802,33 @@ function formatRange(start: string, end: string) {
   return `${timeOfDay(start)} – ${timeOfDay(end)}`;
 }
 
+function formatRangeShort(start: string, end: string) {
+  const startLabel = timeOfDay(start);
+  const endLabel = timeOfDay(end);
+  if (!startLabel) return endLabel;
+  if (!endLabel || startLabel === endLabel) return startLabel;
+  return `${startLabel}-${endLabel}`;
+}
+
+function formatMinutes(minutes: number) {
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  const hours = Math.floor(minutes / 60);
+  const rest = Math.round(minutes % 60);
+  return rest ? `${hours}h ${rest}m` : `${hours}h`;
+}
+
 function timeOfDay(iso: string) {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stringArrayFromUnknown(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map(item => item.trim()) : [];
 }
 
 function relativeTime(iso?: string) {

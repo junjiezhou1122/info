@@ -24,6 +24,7 @@ export type CompileActivityTimelineOptions = {
   mergeGapMinutes?: number;
   records?: StoredContextRecord[];
   runtimeEvents?: StoredRuntimeEvent[];
+  episodeViews?: StoredContextView[];
   pluginId?: string;
 };
 
@@ -91,7 +92,8 @@ export function compileActivityTimeline(options: CompileActivityTimelineOptions 
     : filterEventsForPlugin(rawRuntimeEvents, store)
       .filter(isTimelineRuntimeEvent)
       .slice(0, options.eventLimit ?? 80);
-  const items = buildTimelineItems(records, runtimeEvents, options);
+  const episodeViews = options.episodeViews ?? store.listViews({ view_types: ["activity.episode"], active_only: true, limit: 200, timeWindow });
+  const items = buildTimelineItems(records, runtimeEvents, { ...options, episodeViews });
   const buckets = bucketItems(items, bucketMinutes, options);
   const fixedDayRange = hasExplicitDayRange(options, range);
   const viewId = activityTimelineViewId(range, minutes, fixedDayRange);
@@ -103,6 +105,7 @@ export function compileActivityTimeline(options: CompileActivityTimelineOptions 
     summary: `${items.length} activity items from ${records.length} records and ${runtimeEvents.length} runtime events across ${buckets.length} buckets.`,
     status: "candidate",
     source_records: records.map(record => record.id),
+    source_views: episodeViews.map(view => view.id),
     compiler: { id: ACTIVITY_TIMELINE_COMPILER_ID, version: "1", mode: "deterministic" },
     purpose: "UI-friendly all-sensor activity timeline over browser, Screenpipe, local project, AI-session, and runtime event evidence.",
     scope: { time_range: range, plugin_id: options.pluginId ?? ACTIVITY_TIMELINE_COMPILER_ID },
@@ -117,7 +120,7 @@ export function compileActivityTimeline(options: CompileActivityTimelineOptions 
     stability: fixedDayRange || minutes > 240 ? "project" : "session",
     lossiness: "medium",
     privacy: { level: "private", retention: "normal", allow_embedding: false, allow_llm_summary: true, allow_external_llm: false, allow_external_reader: false },
-    metadata: { generated_at: generatedAt, record_count: records.length, runtime_event_count: runtimeEvents.length, item_count: items.length },
+    metadata: { generated_at: generatedAt, record_count: records.length, runtime_event_count: runtimeEvents.length, episode_count: episodeViews.length, item_count: items.length },
   };
   const shouldWrite = options.write ?? true;
   const stored = shouldWrite ? store.upsertView(view) : view;
@@ -254,7 +257,46 @@ function isScreenpipeTimelineEcho(record: StoredContextRecord): boolean {
 }
 
 function buildTimelineItems(records: StoredContextRecord[], runtimeEvents: StoredRuntimeEvent[], options: CompileActivityTimelineOptions = {}): ActivityTimelineItem[] {
-  return buildRawTimelineItems(records, runtimeEvents, options);
+  const episodeItems = (options.episodeViews ?? []).map(episodeViewToItem);
+  const covered = new Set(episodeItems.flatMap(item => item.record_ids ?? []));
+  const rawRecords = covered.size ? records.filter(record => !covered.has(record.id)) : records;
+  return [...episodeItems, ...buildRawTimelineItems(rawRecords, runtimeEvents, options)];
+}
+
+function episodeViewToItem(view: StoredContextView): ActivityTimelineItem {
+  const content = view.content ?? {};
+  const start = stringValue(content.start_time) ?? view.created_at;
+  const end = stringValue(content.end_time) ?? view.updated_at;
+  const frameIds = Array.isArray(content.frame_ids) ? content.frame_ids.filter((id): id is string | number => typeof id === "string" || typeof id === "number") : [];
+  return {
+    id: `episode:${view.id}`,
+    kind: "activity_episode",
+    source: "view/activity.episode",
+    schema: view.view_type,
+    title: view.title ?? "Activity episode",
+    subtitle: `${formatRangeShort(start, end)}${typeof content.duration_minutes === "number" ? ` · ${formatMinutes(content.duration_minutes)}` : ""}`,
+    url: Array.isArray(content.urls) && typeof content.urls[0] === "string" ? content.urls[0] : undefined,
+    app: typeof content.app === "string" ? content.app : view.scope?.app,
+    domain: Array.isArray(content.domains) && typeof content.domains[0] === "string" ? content.domains[0] : view.scope?.domain,
+    project: view.scope?.project,
+    text: view.summary,
+    observed_at: end,
+    importance: 0.78,
+    record_ids: view.source_records ?? [],
+    stats: {
+      source_view_id: view.id,
+      start,
+      end,
+      duration_minutes: content.duration_minutes,
+      record_count: content.record_count,
+      keywords: content.keywords,
+      next_steps: content.next_steps,
+      ambient_help: content.ambient_help,
+      frame_ids: frameIds.length ? frameIds : undefined,
+      frame_id: frameIds[0],
+      merged_continuous: true,
+    },
+  };
 }
 
 function buildRawTimelineItems(records: StoredContextRecord[], runtimeEvents: StoredRuntimeEvent[], options: CompileActivityTimelineOptions = {}): ActivityTimelineItem[] {

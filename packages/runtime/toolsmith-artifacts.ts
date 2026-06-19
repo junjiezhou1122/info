@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { ContextStore } from "@info/core";
 import type { ContextView, StoredContextView } from "@info/core";
 
-const TOOLSMITH_SOURCE_TYPES = ["draft.tool_prototype", "task.toolsmith_prototype", "opportunity.tool"] as const;
+const TOOLSMITH_SOURCE_TYPES = ["draft.tool_prototype", "opportunity.tool"] as const;
 
 export type ToolsmithArtifactResult = {
   ok: true;

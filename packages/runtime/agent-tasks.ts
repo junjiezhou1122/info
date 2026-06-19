@@ -3,7 +3,7 @@ import { processAmbientBackgroundTasks, type AmbientBackgroundTaskMode, type Amb
 import type { AutonomyProfile } from "@info/programs/types.js";
 
 export const AGENT_TASK_LIST_VIEW_TYPE = "agent.task_list";
-export const AGENT_TASK_SOURCE_VIEW_TYPES = ["task.background_research", "task.toolsmith_prototype"] as const;
+export const AGENT_TASK_SOURCE_VIEW_TYPES = ["task.background_research"] as const;
 
 export type AgentTaskListStatus = "queued" | "completed" | "failed" | "skipped" | "candidate" | "cancelled";
 

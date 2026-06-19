@@ -113,7 +113,7 @@ pnpm mf --json task process --runtime acp_stdio --limit 3
 ```
 
 `task list --refresh` writes/reads `agent.task_list`, which summarizes pending
-and processed `task.background_research` and `task.toolsmith_prototype` Views.
+and processed `task.background_research` Views.
 HTTP clients can use `GET /agent/tasks?refresh=true` and `POST /agent/tasks` for
 the same contract.
 

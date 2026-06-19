@@ -49,19 +49,105 @@ function truncate(s: string, max: number): string {
 let _cachedUrl: string | null = null;
 let _cachedText: string | null = null;
 let _cachedPageContextInjected = false;
+let _lastMeaningfulTabId: number | null = null;
+let _lastMeaningfulTabAt = 0;
+
+const MEANINGFUL_TAB_TTL_MS = 30 * 60_000;
 
 async function getActiveTab(): Promise<chrome.tabs.Tab | null> {
   if (typeof chrome === "undefined" || !chrome.tabs?.query) return null;
   try {
-    const [currentWindowTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (currentWindowTab) return currentWindowTab;
-
-    const [lastFocusedTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    return lastFocusedTab ?? null;
+    const tabs = await getCandidateTabs();
+    const chosen = tabs.find(shouldUseAsPageContext);
+    if (chosen) {
+      rememberMeaningfulTab(chosen);
+      return chosen;
+    }
+    const remembered = await getRememberedMeaningfulTab();
+    if (remembered) return remembered;
+    return tabs[0] ?? null;
   } catch (error) {
     console.warn("[active-tab-context] chrome.tabs.query failed:", error);
     return null;
   }
+}
+
+async function getCandidateTabs(): Promise<chrome.tabs.Tab[]> {
+  const windows = await chrome.windows?.getAll?.({ populate: true, windowTypes: ["normal"] }).catch(() => []);
+  const windowTabs = Array.isArray(windows)
+    ? windows
+        .filter(window => window.state !== "minimized")
+        .sort((a, b) => Number(Boolean(b.focused)) - Number(Boolean(a.focused)))
+        .flatMap(window => (window.tabs ?? []).filter(tab => tab.active))
+    : [];
+  const [currentWindowTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [lastFocusedTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return dedupeTabs([currentWindowTab, lastFocusedTab, ...windowTabs].filter(Boolean) as chrome.tabs.Tab[])
+    .sort((a, b) => tabContextScore(b) - tabContextScore(a));
+}
+
+async function getRememberedMeaningfulTab(): Promise<chrome.tabs.Tab | null> {
+  if (!_lastMeaningfulTabId || Date.now() - _lastMeaningfulTabAt > MEANINGFUL_TAB_TTL_MS) return null;
+  const tab = await chrome.tabs.get(_lastMeaningfulTabId).catch(() => null);
+  return tab && shouldUseAsPageContext(tab) ? tab : null;
+}
+
+function rememberMeaningfulTab(tab: chrome.tabs.Tab): void {
+  if (!tab.id || !shouldUseAsPageContext(tab)) return;
+  _lastMeaningfulTabId = tab.id;
+  _lastMeaningfulTabAt = Date.now();
+}
+
+function dedupeTabs(tabs: chrome.tabs.Tab[]): chrome.tabs.Tab[] {
+  const seen = new Set<number>();
+  const result: chrome.tabs.Tab[] = [];
+  for (const tab of tabs) {
+    if (!tab?.id || seen.has(tab.id)) continue;
+    seen.add(tab.id);
+    result.push(tab);
+  }
+  return result;
+}
+
+function shouldUseAsPageContext(tab: chrome.tabs.Tab): boolean {
+  const url = tab.url || "";
+  if (!url) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) return false;
+  if (isMetaflowSelfUrl(parsed)) return false;
+  if (isBrowserChromeNoiseUrl(parsed)) return false;
+  return true;
+}
+
+function isMetaflowSelfUrl(url: URL): boolean {
+  return ["localhost", "127.0.0.1"].includes(url.hostname) && ["5177", "5173"].includes(url.port);
+}
+
+function isBrowserChromeNoiseUrl(url: URL): boolean {
+  const host = url.hostname;
+  return host === "ogs.google.com"
+    || host === "tpc.googlesyndication.com"
+    || host.endsWith(".gstatic.com")
+    || host.endsWith(".googleusercontent.com");
+}
+
+function tabContextScore(tab: chrome.tabs.Tab): number {
+  const url = tab.url || "";
+  let parsed: URL | undefined;
+  try { parsed = new URL(url); } catch {}
+  let score = 0;
+  if (tab.active) score += 20;
+  if (tab.highlighted) score += 5;
+  if (parsed?.hostname.includes("youtube.com") && parsed.pathname === "/watch") score += 80;
+  if (parsed?.hostname === "youtu.be") score += 70;
+  if (tab.title) score += 4;
+  if (parsed && isMetaflowSelfUrl(parsed)) score -= 200;
+  return score;
 }
 
 async function readTabContent(tabId: number): Promise<{ text: string | null; selected: string | null }> {

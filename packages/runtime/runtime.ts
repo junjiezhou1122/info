@@ -35,6 +35,7 @@ import type { AutonomyProfile } from "@info/programs/types.js";
 const VIEW_WORKER_FUNCTIONS = {
   evidence: "view::evidence_compile",
   activity: "view::activity_compile",
+  activityEpisode: "view::activity_episode_compile",
   audio: "view::audio_compile",
   visualFrame: "view::visual_frame_compile",
   activityBlock: "view::activity_block_compile",
@@ -651,6 +652,17 @@ async function compileRuntimeViews(input: {
     });
     out.push({ view_type: "activity", records_used: numberValue(compiled.diagnostics.records_used), view_count: activities.views.length, title: "Activity Views" });
 
+    const episodes = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.activityEpisode, {
+      minutes: input.activityMinutes ?? Math.max(input.windowMinutes, 240),
+      limit: 500,
+      write: input.write,
+      source_record_ids: input.records?.map(record => record.id),
+      llm: input.aiViewCompression ? input.llm : undefined,
+      summarize_with_llm: input.aiViewCompression,
+      llm_episode_limit: 6,
+    });
+    out.push({ view_type: "activity.episode", records_used: numberValue(episodes.diagnostics.records_used), view_count: episodes.views.length, title: input.aiViewCompression ? "AI Activity Episodes" : "Activity Episodes" });
+
     const audioViews = await triggerViewWorker(iii, VIEW_WORKER_FUNCTIONS.audio, {
       write: input.write,
       source_view_ids: compiled.views_written,
@@ -924,6 +936,8 @@ type RuntimeViewWorkerPayload = {
   visual_frame_concurrency?: number;
   visual_frame_sample_seconds?: number;
   force?: boolean;
+  summarize_with_llm?: boolean;
+  llm_episode_limit?: number;
   project_path?: string;
   project?: string;
   plugin_id?: string;

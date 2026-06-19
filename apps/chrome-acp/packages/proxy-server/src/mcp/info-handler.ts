@@ -121,7 +121,6 @@ const VIEW_FAMILY_TYPES: Record<string, string[] | undefined> = {
     "agent.task_list",
     "draft.writing_continuation",
     "opportunity.tool",
-    "task.toolsmith_prototype",
     "draft.tool_prototype",
     "tool.prototype_artifact",
     "app.language.learning_pack",
@@ -131,7 +130,7 @@ const VIEW_FAMILY_TYPES: Record<string, string[] | undefined> = {
     "memory.language.difficult_segments",
   ],
   analyze: ["analysis.browser_page", "analysis.browser_agent_task", "analysis.repo"],
-  task: ["agent.task_list", "task.background_research", "task.browser_ambient", "task.toolsmith_prototype"],
+  task: ["agent.task_list", "task.background_research", "task.browser_ambient"],
   language: [
     "app.language.learning_pack",
     "learning.review_queue",
@@ -140,7 +139,7 @@ const VIEW_FAMILY_TYPES: Record<string, string[] | undefined> = {
     "memory.language.difficult_segments",
   ],
   writing: ["advice.writing_assist", "draft.writing_continuation"],
-  tool: ["opportunity.tool", "task.toolsmith_prototype", "draft.tool_prototype", "tool.prototype_artifact"],
+  tool: ["opportunity.tool", "draft.tool_prototype", "tool.prototype_artifact"],
   project: ["project.current_context", "thread.active_work", "brief.project_next_state", "memory.project.patterns"],
   all: undefined,
 };

@@ -60,6 +60,10 @@ _Avoid_: current page, browser context
 A short-lived View of active work lanes inferred from normalized evidence such as Screenpipe search results, browser activity, local project signals, Git state, and AI session metadata. It groups recent evidence into lanes such as project, topic, domain, app, or communication without replacing the underlying sensor search layer.
 _Avoid_: active thread, current task
 
+**Activity Episode**:
+A short-lived View that groups continuous Observations from the same stable user context, such as an application, page, window, project, or conversation, into one user-understandable activity segment.
+_Avoid_: raw log, task, daily summary, legacy episode record
+
 **Project Current**:
 A project-scoped View of current project state derived from strong, fresh, provenance-backed project lanes in a Work Focus Set. It describes the current project identity, path, repo, active files, active webpages, active agent sessions, and supporting sources without recommending next actions.
 _Avoid_: project.current_context, project summary

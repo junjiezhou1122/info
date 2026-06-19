@@ -36,7 +36,7 @@ The application-facing ambient chain is also mostly live:
 ```text
 project.current_context/thread.active_work
   -> advice.research/advice.writing_assist/opportunity.tool
-  -> task.background_research/task.toolsmith_prototype
+  -> task.background_research
   -> draft.writing_continuation/draft.tool_prototype
   -> agent.task_list/tool.prototype_artifact
 ```
@@ -72,7 +72,6 @@ surfaces.
 | View type | Status | Spec | Runtime catalog | Producer | UI | Notes |
 |---|---:|---:|---:|---:|---:|---|
 | `task.background_research` | Runtime-ready | Legacy | Yes | Yes | Yes | Produced by proactive ambient program/manual path and queued into agent tasks. |
-| `task.toolsmith_prototype` | Runtime-ready | Legacy | Yes | Yes | Yes | Produced by tool-opportunity/toolsmith ambient flow. |
 | `agent.task_list` | Runtime-ready | Legacy + Spec | Yes | Yes | Yes | Built by runtime agent task list. |
 
 ## Memory

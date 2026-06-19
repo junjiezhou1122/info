@@ -1008,8 +1008,14 @@ export function createContextHttpHandler(store: ContextStore) {
       const bucketMinutes = Math.min(Math.max(Number(url.searchParams.get("bucket_minutes") ?? url.searchParams.get("bucketMinutes") ?? 15), 1), 120);
       const sourceFilter = url.searchParams.get("source_filter") ?? url.searchParams.get("sourceFilter") ?? "all";
       if (!["screenpipe", "browser", "runtime", "all"].includes(sourceFilter)) return send(res, 400, { ok: false, error: "invalid source_filter" });
-      const records = store.recentByUpdatedAt(limit * 4)
+      const minutes = Math.min(Math.max(Number(url.searchParams.get("minutes") ?? 60), 1), 24 * 60);
+      const cutoffMs = Date.now() - minutes * 60_000;
+      const records = store.recentByUpdatedAt(Math.max(limit * 40, 2_000))
         .filter(isTimelineLiveRecord)
+        .filter(record => {
+          const observedMs = Date.parse(record.time?.observed_at ?? record.updated_at ?? record.created_at);
+          return Number.isFinite(observedMs) && observedMs >= cutoffMs;
+        })
         .filter(record => recordMatchesTimelineSourceFilter(record, sourceFilter as any))
         .slice(0, limit);
       const buckets = liveTimelineBuckets(records, bucketMinutes);
