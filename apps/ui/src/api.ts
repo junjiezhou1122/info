@@ -90,7 +90,7 @@ export async function fetchActivityTimelineWatermark(options: { minutes?: number
   if (options.startTime) range.set("start_time", options.startTime);
   if (options.endTime) range.set("end_time", options.endTime);
   if (options.includeRuntimeEvents) range.set("include_runtime_events", "true");
-  const res = await fetchWithTimeout(`${API_BASE}/timeline/activity/watermark?${range.toString()}`, undefined, 12_000);
+  const res = await fetchWithTimeout(`${API_BASE}/timeline/activity/watermark?${range.toString()}`, undefined, 30_000);
   if (!res.ok) throw new Error(`timeline watermark failed: ${res.status}`);
   return res.json();
 }

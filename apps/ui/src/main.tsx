@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ChevronLeft, ChevronRight, CircleDotDashed, FileText, Home, Search, Settings } from "lucide-react";
+import { CalendarDays, ChevronLeft, ChevronRight, CircleDotDashed, FileText, Home, Search, Settings } from "lucide-react";
 import { createContextView, fetchActivityTimeline, fetchActivityTimelineWatermark, fetchAudioTranscripts, fetchContextView, fetchLatestActivityTimelineView, fetchProcessors, fetchRecentRecords, fetchRuntimeSettings, fetchViewFamilies, fetchViewsByType, fetchViewsByTypes, patchViewStatus, runProcessor, runRuntimeTick, saveRuntimeSettings, screenpipeFrameUrl, submitViewFeedback, syncScreenpipe, updateContextView } from "./api";
 import type { ActivityTimelineResponse, AudioTranscriptItem, ContextRecordSummary, ContextViewInput, ContextViewSummary, ContextViewUpdateInput, ProcessorDefinitionSummary, RuntimeSettings, RuntimeTickResponse, TimelineBucket, TimelineItem, ViewCatalogResponse, ViewFamiliesResponse, ViewFamilyDefinition, ViewFamilySummary, ViewStatus } from "./types";
 import metaflowMarkUrl from "./assets/metaflow-mark.png";
@@ -148,7 +148,7 @@ const TIMELINE_WINDOWS = [
 const VIEW_FAMILIES_CACHE_KEY = "metaflow.viewFamilies.v1";
 const VIEW_TYPE_VIEWS_CACHE_KEY = "metaflow.viewTypeViews.v1";
 const TIMELINE_CACHE_KEY = "metaflow.timeline.v1";
-const TIMELINE_SIGNATURE_VERSION = "timeline-v6";
+const TIMELINE_SIGNATURE_VERSION = "timeline-v7";
 const SIDEBAR_COLLAPSED_CACHE_KEY = "metaflow.sidebar.collapsed.v1";
 let AMBIENT_VIEWS_MEMORY_CACHE: { views: ContextViewSummary[]; status: string } | null = null;
 let RUNTIME_SETTINGS_MEMORY_CACHE: { settings: RuntimeSettings; status: string } | null = null;
@@ -179,6 +179,9 @@ function App() {
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [detailMode, setDetailMode] = useState<DetailMode>("activity");
   const [timelinePaging, setTimelinePaging] = useState<TimelinePagingState>({ hasMore: true, loading: false, pages: 0 });
+  const [selectedDay, setSelectedDay] = useState(() => dayKey(new Date()));
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(() => monthKey(new Date()));
   const [activeTab, setActiveTab] = useState<ActiveTab>("home");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_CACHE_KEY) === "1");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -199,8 +202,12 @@ function App() {
     setTimelinePaging({ hasMore: true, loading: false, pages: 0 });
   }
 
+  function selectedDayRange() {
+    return dayRange(selectedDay);
+  }
+
   async function refreshTimelineDayTotal() {
-    const day = todayRange();
+    const day = selectedDayRange();
     const next = await fetchActivityTimelineWatermark({
       startTime: day.start,
       endTime: day.end,
@@ -219,7 +226,7 @@ function App() {
       setStatus(`${timeline.records_used} records · ${timeline.buckets.length} buckets · cached ${age}`);
       return;
     }
-    const requestSignature = timelineSignature(bucketMinutes, detailMode, sourceFilter);
+    const requestSignature = timelineSignature(bucketMinutes, detailMode, sourceFilter, selectedDay);
     if (timelineInFlightSignatureRef.current === requestSignature) return;
     timelineInFlightSignatureRef.current = requestSignature;
     const seq = ++refreshSeq.current;
@@ -231,7 +238,7 @@ function App() {
       const debugMode = detailMode === "debug";
       const sourceNeedsRawRecords = sourceFilter === "screenpipe" || sourceFilter === "runtime" || sourceFilter === "all";
       const rawMode = debugMode || sourceNeedsRawRecords;
-      const range = initialTimelineRangeForSource(sourceFilter);
+      const range = initialTimelineRangeForSource(sourceFilter, selectedDay);
       const rangeMinutes = timelineRangeMinutes(range);
       const next = await fetchActivityTimeline({
         minutes: rangeMinutes,
@@ -251,7 +258,7 @@ function App() {
       });
       if (seq !== refreshSeq.current) return;
       setTimeline(next);
-      setTimelinePaging(pagingStateFromResponse(next, todayRange()));
+      setTimelinePaging(pagingStateFromResponse(next, selectedDayRange()));
       refreshTimelineDayTotal().catch(() => undefined);
       timelineCacheMsRef.current = Date.now();
       timelineSignatureRef.current = requestSignature;
@@ -271,7 +278,7 @@ function App() {
 
   async function loadMoreTimeline() {
     if (!timeline || timelinePaging.loading || !timelinePaging.hasMore) return;
-    const day = todayRange();
+    const day = selectedDayRange();
     const cursorEnd = timelinePaging.cursorEnd ?? oldestTimelineItemAt(timeline) ?? day.end;
     const cursorMs = Date.parse(cursorEnd);
     const dayStartMs = Date.parse(day.start);
@@ -320,13 +327,13 @@ function App() {
   }
 
   async function hydrateLatestTimelineView() {
-    if (timeline) return;
+    if (timeline || selectedDay !== dayKey(new Date())) return;
     try {
       const cached = await fetchLatestActivityTimelineView({ todayOnly: true });
       if (!cached) return;
       setTimeline(cached);
       timelineCacheMsRef.current = Date.now();
-      timelineSignatureRef.current = timelineSignature(bucketMinutes, detailMode, sourceFilter);
+      timelineSignatureRef.current = timelineSignature(bucketMinutes, detailMode, sourceFilter, selectedDay);
       const watermark = timelineWatermarkFromResponse(cached);
       timelineWatermarkRef.current = watermark;
       saveCachedTimeline(cached, timelineCacheMsRef.current, timelineSignatureRef.current, watermark);
@@ -379,7 +386,7 @@ function App() {
     setTimelineSyncStatus(options.manual ? "Syncing now..." : "Auto syncing...");
     if (options.manual) setStatus("Syncing Screenpipe…");
     try {
-      const tick = await syncScreenpipe(options.fullDay ? timelineRangeMinutes(todayRange()) : liveSyncWindowMinutes());
+      const tick = await syncScreenpipe(options.fullDay ? timelineRangeMinutes(selectedDayRange()) : liveSyncWindowMinutes());
       setLastTick(tick);
       const syncedWindows = tick.diagnostics?.screenpipe_activity?.count ?? 0;
       setTimelineSyncState("idle");
@@ -398,11 +405,13 @@ function App() {
 
   async function checkTimelineWatermark(options: { refreshOnChange?: boolean; forceRefresh?: boolean } = {}) {
     if (timelineWatermarkInFlightRef.current) return;
+    const isToday = selectedDay === dayKey(new Date());
+    if (!isToday && options.refreshOnChange !== false) return;
     timelineWatermarkInFlightRef.current = true;
     try {
       const next = await fetchActivityTimelineWatermark({
-        startTime: todayRange().start,
-        endTime: todayRange().end,
+        startTime: selectedDayRange().start,
+        endTime: selectedDayRange().end,
         sourceFilter,
         includeRuntimeEvents: detailMode === "debug" || sourceFilter === "runtime",
       });
@@ -433,10 +442,12 @@ function App() {
     await syncTimeline({ fullDay: true, manual: true });
   }
 
-  async function showTodayTimeline() {
+  function showTodayTimeline() {
     resetTimelinePaging();
+    setTimeline(null);
+    setSelectedDay(dayKey(new Date()));
+    setCalendarMonth(monthKey(new Date()));
     setTimelineSyncStatus("Loading today...");
-    await refresh({ quiet: false, force: true });
   }
 
   useEffect(() => {
@@ -455,7 +466,7 @@ function App() {
 
   useEffect(() => {
     if (activeTab !== "timeline") return;
-    const force = !isTodayTimelineResponse(timeline) || timelineSignatureRef.current !== timelineSignature(bucketMinutes, detailMode, sourceFilter);
+    const force = !isSelectedDayTimelineResponse(timeline, selectedDay) || timelineSignatureRef.current !== timelineSignature(bucketMinutes, detailMode, sourceFilter, selectedDay);
     hydrateLatestTimelineView().catch(() => undefined);
     if (!timeline) {
       setStatus(initialTimelineCache ? cachedTimelineStatus(initialTimelineCache.response, timelineCacheMsRef.current) : "Loading latest timeline view...");
@@ -464,7 +475,7 @@ function App() {
       if (force) refresh({ quiet: true, force: true }).catch(error => setStatus(error instanceof Error ? error.message : String(error)));
     }
     checkTimelineWatermark({ refreshOnChange: false }).catch(error => setTimelineSyncStatus(error instanceof Error ? error.message : String(error)));
-  }, [activeTab, bucketMinutes, detailMode, sourceFilter, live]);
+  }, [activeTab, bucketMinutes, detailMode, sourceFilter, selectedDay, live]);
 
   useEffect(() => {
     if (!live) return;
@@ -473,7 +484,7 @@ function App() {
       checkTimelineWatermark({ refreshOnChange: true }).catch(() => undefined);
     }, TIMELINE_WATERMARK_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [activeTab, live, bucketMinutes, detailMode, sourceFilter]);
+  }, [activeTab, live, bucketMinutes, detailMode, sourceFilter, selectedDay]);
 
   useEffect(() => {
     if (!previewFrame) return;
@@ -511,6 +522,16 @@ function App() {
     setSourceFilter(filter);
   }
 
+  function changeSelectedDay(nextDay: string) {
+    resetTimelinePaging();
+    setTimeline(null);
+    setSelectedItemId(null);
+    setSelectedDay(nextDay);
+    setCalendarMonth(monthKey(parseDayKey(nextDay)));
+    setCalendarOpen(false);
+    timelineWatermarkRef.current = "";
+  }
+
   return (
     <div className={shellClass}>
       <RuntimeSidebar activeTab={activeTab} collapsed={sidebarCollapsed} live={live} onNavigate={setActiveTab} onToggleCollapse={toggleSidebar} />
@@ -535,7 +556,14 @@ function App() {
                         <button key={option.value} className={bucketMinutes === option.value ? "active" : ""} type="button" onClick={() => { resetTimelinePaging(); setBucketMinutes(option.value); }}>{option.label}</button>
                       ))}
                     </div>
-                    <button className="secondary today-button" type="button" onClick={showTodayTimeline} disabled={loading}>{loading ? "加载中" : "今天"}</button>
+                    <TimelineDatePicker
+                      selectedDay={selectedDay}
+                      calendarMonth={calendarMonth}
+                      open={calendarOpen}
+                      onOpen={setCalendarOpen}
+                      onMonth={setCalendarMonth}
+                      onSelect={changeSelectedDay}
+                    />
                     <button className="secondary" onClick={() => { resetTimelinePaging(); setDetailMode(value => value === "debug" ? "activity" : "debug"); }}>{detailMode === "debug" ? "事件" : "原始"}</button>
                     <button className="secondary" onClick={() => setLive(value => !value)}>{live ? "Live" : "Paused"}</button>
                     <button className="secondary" onClick={() => refresh(false)} disabled={loading}>{loading ? "Loading…" : "Reload"}</button>
@@ -2443,8 +2471,8 @@ function seedViewFamilies(types: string[]): ViewFamilySummary[] {
   }));
 }
 
-function timelineSignature(bucketMinutes: number, detailMode: DetailMode, sourceFilter: SourceFilter) {
-  return `${TIMELINE_SIGNATURE_VERSION}:${bucketMinutes}:${detailMode}:${sourceFilter}`;
+function timelineSignature(bucketMinutes: number, detailMode: DetailMode, sourceFilter: SourceFilter, selectedDay = dayKey(new Date())) {
+  return `${TIMELINE_SIGNATURE_VERSION}:${selectedDay}:${bucketMinutes}:${detailMode}:${sourceFilter}`;
 }
 
 function loadCachedTimeline(): { response: ActivityTimelineResponse; cachedAt: number; signature: string; watermark: string } | null {
@@ -2467,10 +2495,14 @@ function loadCachedTimeline(): { response: ActivityTimelineResponse; cachedAt: n
 }
 
 function isTodayTimelineResponse(response: ActivityTimelineResponse | null | undefined): response is ActivityTimelineResponse {
+  return isSelectedDayTimelineResponse(response, dayKey(new Date()));
+}
+
+function isSelectedDayTimelineResponse(response: ActivityTimelineResponse | null | undefined, selectedDay: string): response is ActivityTimelineResponse {
   if (!response?.ok) return false;
-  if (response.view.id.startsWith("view:timeline:activity:day:")) return true;
+  if (response.view.id === `view:timeline:activity:day:${selectedDay}`) return true;
   const minutes = response.view.content?.minutes;
-  return typeof minutes === "number" && minutes > 4 * 60;
+  return selectedDay === dayKey(new Date()) && typeof minutes === "number" && minutes > 4 * 60;
 }
 
 function saveCachedTimeline(response: ActivityTimelineResponse, cachedAt = Date.now(), signature = timelineSignature(DEFAULT_BUCKET_MINUTES, "activity", "all"), watermark = timelineWatermarkFromResponse(response)) {
@@ -2874,6 +2906,71 @@ function ViewSkeleton() {
         {Array.from({ length: 6 }).map((_, index) => <div className="skeleton-row" key={index} />)}
       </div>
     </section>
+  );
+}
+
+function TimelineDatePicker({
+  selectedDay,
+  calendarMonth,
+  open,
+  onOpen,
+  onMonth,
+  onSelect,
+}: {
+  selectedDay: string;
+  calendarMonth: string;
+  open: boolean;
+  onOpen: (open: boolean) => void;
+  onMonth: (month: string) => void;
+  onSelect: (day: string) => void;
+}) {
+  const selected = parseDayKey(selectedDay);
+  const today = dayKey(new Date());
+  const previousDay = addDays(selected, -1);
+  const nextDay = addDays(selected, 1);
+  const canGoNext = dayKey(nextDay) <= today;
+  const days = calendarDays(calendarMonth);
+  return (
+    <div className="timeline-date-picker">
+      <button className="date-step" type="button" aria-label="Previous day" onClick={() => onSelect(dayKey(previousDay))}>
+        <ChevronLeft size={17} strokeWidth={2.2} />
+      </button>
+      <button className="date-current" type="button" aria-expanded={open} onClick={() => onOpen(!open)}>
+        <CalendarDays size={17} strokeWidth={2.1} />
+        <span>{formatTimelineDay(selectedDay)}</span>
+      </button>
+      <button className="date-step" type="button" aria-label="Next day" disabled={!canGoNext} onClick={() => onSelect(dayKey(nextDay))}>
+        <ChevronRight size={17} strokeWidth={2.2} />
+      </button>
+      {open && (
+        <div className="calendar-popover">
+          <div className="calendar-head">
+            <button type="button" aria-label="Previous month" onClick={() => onMonth(monthKey(addMonths(parseMonthKey(calendarMonth), -1)))}>
+              <ChevronLeft size={18} />
+            </button>
+            <b>{formatCalendarMonth(calendarMonth)}</b>
+            <button type="button" aria-label="Next month" disabled={monthKey(addMonths(parseMonthKey(calendarMonth), 1)) > monthKey(new Date())} onClick={() => onMonth(monthKey(addMonths(parseMonthKey(calendarMonth), 1)))}>
+              <ChevronRight size={18} />
+            </button>
+          </div>
+          <div className="calendar-weekdays">
+            {["一", "二", "三", "四", "五", "六", "日"].map(day => <span key={day}>{day}</span>)}
+          </div>
+          <div className="calendar-grid">
+            {days.map(day => {
+              const key = dayKey(day);
+              const inMonth = monthKey(day) === calendarMonth;
+              const disabled = key > today;
+              return (
+                <button key={key} type="button" className={`${key === selectedDay ? "selected" : ""} ${key === today ? "today" : ""} ${inMonth ? "" : "muted"}`} disabled={disabled} onClick={() => onSelect(key)}>
+                  {day.getDate()}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -4125,14 +4222,79 @@ function hashText(value: string) {
 }
 
 function todayRange() {
-  const now = new Date();
-  const start = new Date(now);
-  start.setHours(0, 0, 0, 0);
-  return { start: start.toISOString(), end: now.toISOString() };
+  return dayRange(dayKey(new Date()));
 }
 
-function initialTimelineRangeForSource(sourceFilter: SourceFilter) {
-  const day = todayRange();
+function dayRange(day: string) {
+  const selected = parseDayKey(day);
+  const start = new Date(selected);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(selected);
+  const today = dayKey(new Date());
+  if (day === today) {
+    end.setTime(Date.now());
+  } else {
+    end.setHours(23, 59, 59, 999);
+  }
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
+function dayKey(date: Date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function monthKey(date: Date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+}
+
+function parseDayKey(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, (month || 1) - 1, day || 1);
+}
+
+function parseMonthKey(value: string) {
+  const [year, month] = value.split("-").map(Number);
+  return new Date(year, (month || 1) - 1, 1);
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addMonths(date: Date, months: number) {
+  const next = new Date(date);
+  next.setMonth(next.getMonth() + months);
+  return next;
+}
+
+function calendarDays(month: string) {
+  const first = parseMonthKey(month);
+  const start = new Date(first);
+  const weekday = (start.getDay() + 6) % 7;
+  start.setDate(start.getDate() - weekday);
+  return Array.from({ length: 42 }, (_, index) => addDays(start, index));
+}
+
+function formatTimelineDay(day: string) {
+  const date = parseDayKey(day);
+  const today = dayKey(new Date());
+  if (day === today) return "今天";
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+function formatCalendarMonth(month: string) {
+  const date = parseMonthKey(month);
+  return `${date.getFullYear()}年${date.getMonth() + 1}月`;
+}
+
+function pad2(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function initialTimelineRangeForSource(sourceFilter: SourceFilter, selectedDay: string) {
+  const day = dayRange(selectedDay);
   if (sourceFilter !== "screenpipe" && sourceFilter !== "runtime" && sourceFilter !== "all") return day;
   const endMs = Date.parse(day.end);
   const startMs = Date.parse(day.start);
