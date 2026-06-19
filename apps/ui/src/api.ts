@@ -22,7 +22,7 @@ export async function syncScreenpipe(windowMinutes = 15, screenpipeLimit = scree
       compile_views: false,
       screenpipe_limit: screenpipeLimit,
     }),
-  }, windowMinutes > 120 ? 30_000 : 12_000);
+  }, screenpipeSyncTimeoutMs(windowMinutes));
   if (!res.ok) throw new Error(`screenpipe sync failed: ${res.status}`);
   return res.json();
 }
@@ -372,4 +372,10 @@ function timelineRecordLimit(minutes: number, sourceFilter: "screenpipe" | "brow
 
 function screenpipeSyncLimit(minutes: number) {
   return Math.min(4_000, Math.max(80, Math.ceil(minutes * 3)));
+}
+
+function screenpipeSyncTimeoutMs(minutes: number) {
+  if (minutes > 12 * 60) return 60_000;
+  if (minutes > 120) return 45_000;
+  return 25_000;
 }

@@ -137,6 +137,7 @@ const TIMELINE_WINDOWS = [
 const VIEW_FAMILIES_CACHE_KEY = "metaflow.viewFamilies.v1";
 const VIEW_TYPE_VIEWS_CACHE_KEY = "metaflow.viewTypeViews.v1";
 const TIMELINE_CACHE_KEY = "metaflow.timeline.v1";
+const TIMELINE_SIGNATURE_VERSION = "timeline-v3";
 const SIDEBAR_COLLAPSED_CACHE_KEY = "metaflow.sidebar.collapsed.v1";
 let AMBIENT_VIEWS_MEMORY_CACHE: { views: ContextViewSummary[]; status: string } | null = null;
 let RUNTIME_SETTINGS_MEMORY_CACHE: { settings: RuntimeSettings; status: string } | null = null;
@@ -324,6 +325,7 @@ function App() {
         sourceFilter,
         includeRuntimeEvents: detailMode === "debug" || sourceFilter === "runtime",
       });
+      setTimelineSyncState("idle");
       const previous = timelineWatermarkRef.current;
       timelineWatermarkRef.current = next.watermark;
       if (options.forceRefresh || (options.refreshOnChange !== false && previous && previous !== next.watermark)) {
@@ -2354,7 +2356,7 @@ function seedViewFamilies(types: string[]): ViewFamilySummary[] {
 }
 
 function timelineSignature(bucketMinutes: number, detailMode: DetailMode, sourceFilter: SourceFilter) {
-  return `${bucketMinutes}:${detailMode}:${sourceFilter}`;
+  return `${TIMELINE_SIGNATURE_VERSION}:${bucketMinutes}:${detailMode}:${sourceFilter}`;
 }
 
 function loadCachedTimeline(): { response: ActivityTimelineResponse; cachedAt: number; signature: string; watermark: string } | null {
@@ -2822,7 +2824,7 @@ function TimelineWorkbench({
   onSourceFilter: (filter: SourceFilter) => void;
   onSync: () => void;
 }) {
-  const rawItems = numericMeta(timeline?.view?.metadata?.item_count, buckets.reduce((sum, bucket) => sum + bucket.count, 0));
+  const sourceRecordTotal = timeline?.records_used ?? numericMeta(timeline?.view?.metadata?.record_count, buckets.reduce((sum, bucket) => sum + bucket.count, 0));
   const recordCount = timeline?.records_used ?? 0;
   const timelineStatus = syncState === "syncing" || syncState === "error"
     ? syncStatus || status
@@ -2853,7 +2855,7 @@ function TimelineWorkbench({
           <div className="capture-stats">
             <button type="button" onClick={onSync} aria-label="Sync now">↵</button>
             <div><b>{stats.items}</b><span>今天</span></div>
-            <div><b>{rawItems}</b><span>总计</span></div>
+            <div><b>{sourceRecordTotal}</b><span>总计</span></div>
           </div>
           <div className={`capture-sync-state ${syncState}`}>
             {live ? (syncState === "syncing" ? "Auto syncing" : syncState === "error" ? "Sync needs attention" : "Auto sync on") : "Auto sync paused"}
@@ -4017,7 +4019,12 @@ function timelineRangeMinutes(range: { start: string; end: string }) {
 }
 
 function timelineUiRecordLimit(minutes: number, sourceFilter: SourceFilter, detailMode: DetailMode) {
-  if (sourceFilter === "screenpipe") return detailMode === "debug" ? 300 : 160;
+  if (sourceFilter === "screenpipe") {
+    const samplesPerMinute = detailMode === "debug" ? 1.8 : 1.2;
+    const minimum = detailMode === "debug" ? 1_200 : 900;
+    const maximum = detailMode === "debug" ? 2_400 : 1_500;
+    return Math.min(maximum, Math.max(minimum, Math.ceil(minutes * samplesPerMinute)));
+  }
   if (detailMode === "debug") {
     const samplesPerMinute = sourceFilter === "runtime" ? 2 : sourceFilter === "browser" ? 10 : 18;
     return Math.min(4_000, Math.max(1_000, Math.ceil(minutes * samplesPerMinute)));
